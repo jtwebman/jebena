@@ -199,6 +199,13 @@ fn u16At(code: []const u8, off: usize) RunError!u16 {
     if (off + 2 > code.len) return error.Truncated;
     return std.mem.readInt(u16, code[off..][0..2], .big);
 }
+fn i32At(code: []const u8, off: usize) RunError!i32 {
+    if (off + 4 > code.len) return error.Truncated;
+    return std.mem.readInt(i32, code[off..][0..4], .big);
+}
+fn switchPad(pc: usize) usize {
+    return (4 - ((pc + 1) % 4)) % 4;
+}
 fn branch(pc: usize, offset: i32, code_len: usize) RunError!usize {
     const target = @as(i64, @intCast(pc)) + offset;
     if (target < 0 or target >= code_len) return error.BadBranch;
@@ -352,12 +359,12 @@ fn loadConstant2(f: *Frame, class: ?*const Class, index: u16) RunError!void {
     }
 }
 
-fn exec(a: std.mem.Allocator, class: ?*const Class, budget: *Budget, code: []const u8, max_stack: u16, max_locals: u16, arg_slots: []const Value) RunError!?Value {
+fn exec(alloc: std.mem.Allocator, class: ?*const Class, budget: *Budget, code: []const u8, max_stack: u16, max_locals: u16, arg_slots: []const Value) RunError!?Value {
     if (arg_slots.len > max_locals) return error.BadLocal;
-    const stack = try a.alloc(Value, max_stack);
-    defer a.free(stack);
-    const locals = try a.alloc(Value, max_locals);
-    defer a.free(locals);
+    const stack = try alloc.alloc(Value, max_stack);
+    defer alloc.free(stack);
+    const locals = try alloc.alloc(Value, max_locals);
+    defer alloc.free(locals);
     for (locals) |*l| l.* = .{ .int = 0 };
     for (arg_slots, 0..) |v, i| locals[i] = v;
 
@@ -514,6 +521,81 @@ fn exec(a: std.mem.Allocator, class: ?*const Class, budget: *Budget, code: []con
             const a2 = try f.pop();
             try f.push(b);
             try f.push(a2);
+            f.pc += 1;
+            continue :sw try step(&f, code);
+        },
+        .pop2 => {
+            if (f.sp < 2) return error.StackUnderflow;
+            f.sp -= 2;
+            f.pc += 1;
+            continue :sw try step(&f, code);
+        },
+        .dup_x1 => {
+            if (f.sp < 2) return error.StackUnderflow;
+            if (f.sp + 1 > f.stack.len) return error.StackOverflow;
+            const a = f.stack[f.sp - 1];
+            const b = f.stack[f.sp - 2];
+            f.stack[f.sp - 2] = a;
+            f.stack[f.sp - 1] = b;
+            f.stack[f.sp] = a;
+            f.sp += 1;
+            f.pc += 1;
+            continue :sw try step(&f, code);
+        },
+        .dup_x2 => {
+            if (f.sp < 3) return error.StackUnderflow;
+            if (f.sp + 1 > f.stack.len) return error.StackOverflow;
+            const a = f.stack[f.sp - 1];
+            const b = f.stack[f.sp - 2];
+            const c = f.stack[f.sp - 3];
+            f.stack[f.sp - 3] = a;
+            f.stack[f.sp - 2] = c;
+            f.stack[f.sp - 1] = b;
+            f.stack[f.sp] = a;
+            f.sp += 1;
+            f.pc += 1;
+            continue :sw try step(&f, code);
+        },
+        .dup2 => {
+            if (f.sp < 2) return error.StackUnderflow;
+            if (f.sp + 2 > f.stack.len) return error.StackOverflow;
+            const a = f.stack[f.sp - 1];
+            const b = f.stack[f.sp - 2];
+            f.stack[f.sp] = b;
+            f.stack[f.sp + 1] = a;
+            f.sp += 2;
+            f.pc += 1;
+            continue :sw try step(&f, code);
+        },
+        .dup2_x1 => {
+            if (f.sp < 3) return error.StackUnderflow;
+            if (f.sp + 2 > f.stack.len) return error.StackOverflow;
+            const a = f.stack[f.sp - 1];
+            const b = f.stack[f.sp - 2];
+            const c = f.stack[f.sp - 3];
+            f.stack[f.sp - 3] = b;
+            f.stack[f.sp - 2] = a;
+            f.stack[f.sp - 1] = c;
+            f.stack[f.sp] = b;
+            f.stack[f.sp + 1] = a;
+            f.sp += 2;
+            f.pc += 1;
+            continue :sw try step(&f, code);
+        },
+        .dup2_x2 => {
+            if (f.sp < 4) return error.StackUnderflow;
+            if (f.sp + 2 > f.stack.len) return error.StackOverflow;
+            const a = f.stack[f.sp - 1];
+            const b = f.stack[f.sp - 2];
+            const c = f.stack[f.sp - 3];
+            const d = f.stack[f.sp - 4];
+            f.stack[f.sp - 4] = b;
+            f.stack[f.sp - 3] = a;
+            f.stack[f.sp - 2] = d;
+            f.stack[f.sp - 1] = c;
+            f.stack[f.sp] = b;
+            f.stack[f.sp + 1] = a;
+            f.sp += 2;
             f.pc += 1;
             continue :sw try step(&f, code);
         },
@@ -700,6 +782,60 @@ fn exec(a: std.mem.Allocator, class: ?*const Class, budget: *Budget, code: []con
         },
         .goto => {
             f.pc = try branch(f.pc, try s16(code, f.pc + 1), code.len);
+            continue :sw try step(&f, code);
+        },
+        .tableswitch => {
+            const key = try f.popInt();
+            const p = f.pc + 1 + switchPad(f.pc);
+            const def = try i32At(code, p);
+            const low = try i32At(code, p + 4);
+            const high = try i32At(code, p + 8);
+            var off = def;
+            if (key >= low and key <= high) {
+                const i: usize = @intCast(@as(i64, key) - @as(i64, low));
+                off = try i32At(code, p + 12 + i * 4);
+            }
+            f.pc = try branch(f.pc, off, code.len);
+            continue :sw try step(&f, code);
+        },
+        .lookupswitch => {
+            const key = try f.popInt();
+            const p = f.pc + 1 + switchPad(f.pc);
+            const def = try i32At(code, p);
+            const npairs = try i32At(code, p + 4);
+            if (npairs < 0) return error.BadBranch;
+            var off = def;
+            var i: usize = 0;
+            while (i < @as(usize, @intCast(npairs))) : (i += 1) {
+                if (try i32At(code, p + 8 + i * 8) == key) {
+                    off = try i32At(code, p + 8 + i * 8 + 4);
+                    break;
+                }
+            }
+            f.pc = try branch(f.pc, off, code.len);
+            continue :sw try step(&f, code);
+        },
+        .wide => {
+            const w = try opAt(code, f.pc + 1);
+            const idx: usize = try u16At(code, f.pc + 2);
+            switch (w) {
+                .iload => try f.pushInt(try f.localInt(idx)),
+                .lload => try f.pushLong(try f.localLong(idx)),
+                .fload => try f.pushFloat(try f.localFloat(idx)),
+                .dload => try f.pushDouble(try f.localDouble(idx)),
+                .istore => try f.setLocal1(idx, .{ .int = try f.popInt() }),
+                .lstore => try f.setLocal2(idx, .{ .long = try f.popLong() }),
+                .fstore => try f.setLocal1(idx, .{ .float = try f.popFloat() }),
+                .dstore => try f.setLocal2(idx, .{ .double = try f.popDouble() }),
+                .iinc => {
+                    const c = try s16(code, f.pc + 4);
+                    try f.setLocal1(idx, .{ .int = (try f.localInt(idx)) +% c });
+                    f.pc += 6;
+                    continue :sw try step(&f, code);
+                },
+                else => return error.UnsupportedOpcode,
+            }
+            f.pc += 4;
             continue :sw try step(&f, code);
         },
         // ---- calls / returns ----
@@ -958,4 +1094,46 @@ test "Numeric: double comparison (dsgn uses dcmp)" {
     try testing.expectEqual(Value{ .int = 1 }, (try cls.callStaticValues("dsgn", "(DD)I", &.{ .{ .double = 5.0 }, .{ .double = 2.0 } }, &b)).?);
     b = Budget{};
     try testing.expectEqual(Value{ .int = 0 }, (try cls.callStaticValues("dsgn", "(DD)I", &.{ .{ .double = 2.0 }, .{ .double = 2.0 } }, &b)).?);
+}
+
+test "stack op dup2: (2,3) duplicated then summed = 10" {
+    // iconst_2 iconst_3 dup2 iadd iadd iadd ireturn
+    const code = [_]u8{ 0x05, 0x06, 0x5c, 0x60, 0x60, 0x60, 0xac };
+    try testing.expectEqual(@as(?i32, 10), try runInt(testing.allocator, &code, 4, 0, &.{}));
+}
+
+test "stack op dup_x1" {
+    // iconst_1 iconst_2 dup_x1 -> stack 2,1,2 ; iadd iadd -> 2+1+2=5
+    const code = [_]u8{ 0x04, 0x05, 0x5a, 0x60, 0x60, 0xac };
+    try testing.expectEqual(@as(?i32, 5), try runInt(testing.allocator, &code, 3, 0, &.{}));
+}
+
+test "tableswitch executes (Switch.dense)" {
+    var cf: ClassFile = undefined;
+    var arena: std.heap.ArenaAllocator = undefined;
+    const cls = try loadClass("testdata/Switch.class", &cf, &arena);
+    defer cf.deinit();
+    defer arena.deinit();
+    try testing.expectEqual(Value{ .int = 10 }, (try cls.callStatic("dense", "(I)I", &.{0})).?);
+    try testing.expectEqual(Value{ .int = 30 }, (try cls.callStatic("dense", "(I)I", &.{2})).?);
+    try testing.expectEqual(Value{ .int = 40 }, (try cls.callStatic("dense", "(I)I", &.{3})).?);
+    try testing.expectEqual(Value{ .int = -1 }, (try cls.callStatic("dense", "(I)I", &.{9})).?);
+}
+
+test "lookupswitch executes (Switch.sparse)" {
+    var cf: ClassFile = undefined;
+    var arena: std.heap.ArenaAllocator = undefined;
+    const cls = try loadClass("testdata/Switch.class", &cf, &arena);
+    defer cf.deinit();
+    defer arena.deinit();
+    try testing.expectEqual(Value{ .int = 1 }, (try cls.callStatic("sparse", "(I)I", &.{1})).?);
+    try testing.expectEqual(Value{ .int = 2 }, (try cls.callStatic("sparse", "(I)I", &.{100})).?);
+    try testing.expectEqual(Value{ .int = 3 }, (try cls.callStatic("sparse", "(I)I", &.{1000})).?);
+    try testing.expectEqual(Value{ .int = 0 }, (try cls.callStatic("sparse", "(I)I", &.{7})).?);
+}
+
+test "wide istore/iload/iinc" {
+    // bipush 42 ; wide istore 258 ; wide iinc 258, +8 ; wide iload 258 ; ireturn
+    const code = [_]u8{ 0x10, 42, 0xc4, 0x36, 0x01, 0x02, 0xc4, 0x84, 0x01, 0x02, 0x00, 0x08, 0xc4, 0x15, 0x01, 0x02, 0xac };
+    try testing.expectEqual(@as(?i32, 50), try runInt(testing.allocator, &code, 1, 300, &.{}));
 }

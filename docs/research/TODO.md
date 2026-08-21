@@ -9,9 +9,9 @@ Working list. Check off as done; commit each. Ordered roughly by dependency.
 - [x] long/double/float values (category-2 two-slot model): consts, loads/stores, arithmetic, conversions, lcmp/fcmp/dcmp, l/f/d returns, ldc2_w; exec returns ?Value; invokestatic passes args by descriptor kind.
       arithmetic, conversions (i2l/l2i/i2f/f2i/...), lcmp/fcmp/dcmp, l/f/d returns,
       ldc2_w; exec returns ?Value; invokestatic passes args by descriptor kind.
-- [ ] more stack ops: pop2, dup_x1, dup_x2, dup2, dup2_x1, dup2_x2
-- [ ] tableswitch/lookupswitch execution
-- [ ] wide-prefixed loads/stores/iinc execution
+- [x] more stack ops: pop2, dup_x1, dup_x2, dup2, dup2_x1, dup2_x2
+- [x] tableswitch/lookupswitch execution
+- [x] wide-prefixed loads/stores/iinc execution
 
 ## Object model / heap (couples to GC, subsystem 03)
 - [ ] object header + value model for references
