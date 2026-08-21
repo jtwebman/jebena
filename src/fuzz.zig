@@ -14,6 +14,7 @@ const ClassFile = @import("class_file.zig").ClassFile;
 const attribute_decode = @import("attribute_decode.zig");
 const cpmod = @import("constant_pool.zig");
 const verify = @import("verify.zig").verify;
+const bytecode = @import("bytecode.zig");
 const testing = std.testing;
 
 const seed: []const u8 = @embedFile("testdata/Hello.class");
@@ -100,5 +101,17 @@ test "attribute decoder survives arbitrary bytes for every attribute name" {
         const name_index: u16 = @intCast(rand.intRangeAtMost(usize, 1, names.len));
         _ = attribute_decode.decode(arena.allocator(), cp, .{ .name_index = name_index, .info = buf }) catch {};
         if (i % 256 == 0) _ = arena.reset(.retain_capacity);
+    }
+}
+
+test "bytecode validator survives arbitrary bytes" {
+    var prng = std.Random.DefaultPrng.init(0xB17E_C0DE);
+    const rand = prng.random();
+    var buf: [300]u8 = undefined;
+    var i: usize = 0;
+    while (i < 20000) : (i += 1) {
+        const len = rand.intRangeAtMost(usize, 0, buf.len);
+        rand.bytes(buf[0..len]);
+        _ = bytecode.validate(buf[0..len]) catch {};
     }
 }

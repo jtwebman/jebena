@@ -13,6 +13,7 @@ pub const mutf8 = @import("mutf8.zig");
 pub const descriptor = @import("descriptor.zig");
 pub const class_file = @import("class_file.zig");
 pub const attribute_decode = @import("attribute_decode.zig");
+pub const bytecode = @import("bytecode.zig");
 pub const verify = @import("verify.zig").verify;
 pub const VerifyError = @import("verify.zig").VerifyError;
 pub const ClassFile = class_file.ClassFile;
@@ -29,4 +30,5 @@ test {
     _ = @import("descriptor.zig");
     _ = @import("attribute_decode.zig");
     _ = @import("verify.zig");
+    _ = @import("bytecode.zig");
 }
