@@ -307,6 +307,26 @@ public class JBaseSmoke {
         java.util.Collections.sort(strs);          // natural String ordering
         r += strs.get(0).charAt(0);                // 'a' = 97
         r += java.util.Collections.max(strs).charAt(0); // 'c' = 99
+
+        // Real java.util.Arrays.
+        int[] arr = { 5, 3, 8, 1, 9, 2 };
+        java.util.Arrays.sort(arr);
+        r += java.util.Arrays.toString(arr).length();     // "[1, 2, 3, 5, 8, 9]" len
+        r += java.util.Arrays.binarySearch(arr, 8);       // index of 8 in sorted -> 4
+        int[] copy = java.util.Arrays.copyOf(arr, 8);
+        r += copy.length;                                 // 8
+        r += java.util.Arrays.copyOfRange(arr, 1, 4).length; // 3
+        r += java.util.Arrays.hashCode(arr) % 100000;
+        if (java.util.Arrays.equals(arr, java.util.Arrays.copyOf(arr, 6))) r += 321;
+        int[] filled = new int[4];
+        java.util.Arrays.fill(filled, 7);
+        r += java.util.Arrays.toString(filled).length();  // "[7, 7, 7, 7]" len
+        Integer[] objs = { 30, 10, 20 };
+        java.util.Arrays.sort(objs);
+        r += objs[0];                                       // 10
+        java.util.List<Integer> alist = java.util.Arrays.asList(objs);
+        r += alist.size();                                   // 3
+        r += java.util.Arrays.toString(objs).length();      // "[10, 20, 30]" len
         return r;
     }
 }
