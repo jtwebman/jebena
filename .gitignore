@@ -1,0 +1,8 @@
+# Oracle-copyrighted spec documents — local reference only, never redistributed
+docs/specs/*.pdf
+docs/specs/*.html
+
+# Zig
+zig-cache/
+zig-out/
+.zig-cache/
