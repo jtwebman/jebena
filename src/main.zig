@@ -9,6 +9,7 @@ const jebena = @import("jebena");
 const hello_class = @embedFile("testdata/Hello.class");
 const compute_class = @embedFile("testdata/Compute.class");
 const recur_class = @embedFile("testdata/Recur.class");
+const point_class = @embedFile("testdata/Point.class");
 
 pub fn main(init: std.process.Init) !void {
     const gpa = init.gpa;
@@ -90,6 +91,17 @@ fn demo(gpa: std.mem.Allocator) !void {
     std.debug.print("parsed {s}.class (v{d}, {d} methods)\n", .{ name, cf.major_version, cf.methods.len });
     std.debug.print("executed Compute.sumTo(100) = {?d}\n", .{try runStaticInt(gpa, compute_class, "sumTo", "(I)I", 100)});
     std.debug.print("executed Recur.fib(10) = {?d}  (recursion via invokestatic)\n", .{try runStaticInt(gpa, recur_class, "fib", "(I)I", 10)});
+    std.debug.print("executed Point.make(3,4) = {?d}  (new + fields + invokevirtual)\n", .{try runStaticII(gpa, point_class, "make", 3, 4)});
+}
+
+fn runStaticII(gpa: std.mem.Allocator, class_bytes: []const u8, method: []const u8, a: i32, b: i32) !?i32 {
+    var cf = try jebena.ClassFile.parse(gpa, class_bytes);
+    defer cf.deinit();
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const cls = try jebena.interp.Class.init(gpa, arena.allocator(), &cf);
+    const r = try cls.callStatic(method, "(II)I", &.{ a, b });
+    return if (r) |v| v.int else null;
 }
 
 fn runStaticInt(gpa: std.mem.Allocator, class_bytes: []const u8, method: []const u8, desc: []const u8, arg: i32) !?i32 {

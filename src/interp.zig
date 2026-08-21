@@ -22,6 +22,8 @@ pub const Value = union(enum) {
     long: i64,
     float: f32,
     double: f64,
+    /// Object reference: heap object id, or null.
+    reference: ?u32,
     /// Reserved upper half of a category-2 value (long/double).
     top,
 };
@@ -40,6 +42,7 @@ pub const RunError = error{
     CallDepthExceeded,
     MethodNotFound,
     LinkError,
+    NullPointer,
     Truncated,
 } || bc.DecodeError || std.mem.Allocator.Error;
 
@@ -63,6 +66,7 @@ const Frame = struct {
     sp: usize = 0,
     pc: usize = 0,
     budget: *Budget,
+    heap: ?*Heap = null,
 
     fn push(f: *Frame, v: Value) RunError!void {
         if (f.sp >= f.stack.len) return error.StackOverflow;
@@ -122,6 +126,7 @@ const Frame = struct {
             .float => |x| try f.pushFloat(x),
             .long => |x| try f.pushLong(x),
             .double => |x| try f.pushDouble(x),
+            .reference => try f.push(v),
             .top => return error.TypeMismatch,
         }
     }
@@ -131,7 +136,7 @@ const Frame = struct {
             .float => .{ .float = try f.popFloat() },
             .long => .{ .long = try f.popLong() },
             .double => .{ .double = try f.popDouble() },
-            .reference => error.UnsupportedOpcode,
+            .reference => .{ .reference = try f.popRef() },
         };
     }
     // locals
@@ -171,6 +176,46 @@ const Frame = struct {
         if (idx + 1 >= f.locals.len) return error.BadLocal;
         f.locals[idx] = v;
         f.locals[idx + 1] = .top;
+    }
+    fn localRaw(f: *Frame, idx: usize) RunError!Value {
+        if (idx >= f.locals.len) return error.BadLocal;
+        return f.locals[idx];
+    }
+    fn popRef(f: *Frame) RunError!?u32 {
+        return switch (try f.pop()) {
+            .reference => |r| r,
+            else => error.TypeMismatch,
+        };
+    }
+};
+
+pub const Object = struct { class: *const Class, fields: []Value };
+
+pub const Heap = struct {
+    gpa: std.mem.Allocator,
+    objects: std.ArrayList(Object) = .empty,
+
+    pub fn deinit(self: *Heap) void {
+        for (self.objects.items) |o| self.gpa.free(o.fields);
+        self.objects.deinit(self.gpa);
+    }
+    fn defaultValue(k: Kind) Value {
+        return switch (k) {
+            .int => .{ .int = 0 },
+            .long => .{ .long = 0 },
+            .float => .{ .float = 0 },
+            .double => .{ .double = 0 },
+            .reference => .{ .reference = null },
+        };
+    }
+    pub fn alloc(self: *Heap, class: *const Class) !u32 {
+        const fields = try self.gpa.alloc(Value, class.instance_fields.len);
+        for (fields, class.instance_fields) |*fv, fd| fv.* = defaultValue(fd.kind);
+        try self.objects.append(self.gpa, .{ .class = class, .fields = fields });
+        return @intCast(self.objects.items.len - 1);
+    }
+    pub fn get(self: *Heap, id: u32) *Object {
+        return &self.objects.items[id];
     }
 };
 
@@ -215,8 +260,11 @@ fn branch(pc: usize, offset: i32, code_len: usize) RunError!usize {
 pub const Class = struct {
     gpa: std.mem.Allocator,
     cp: ConstantPool,
+    name: []const u8,
     methods: []Method,
+    instance_fields: []Field,
 
+    pub const Field = struct { name: []const u8, kind: Kind };
     pub const Param = struct { kind: Kind, slot: u16 };
     pub const Method = struct {
         name: []const u8,
@@ -225,6 +273,7 @@ pub const Class = struct {
         params: []Param,
         arg_slots: u16,
         ret: ?Kind,
+        is_static: bool,
     };
 
     fn kindOf(ft: descriptor.FieldType) Kind {
@@ -241,13 +290,33 @@ pub const Class = struct {
     }
 
     pub fn init(gpa: std.mem.Allocator, arena: std.mem.Allocator, cf: *const ClassFile) !Class {
+        const cls_name = try cf.constant_pool.classNameOf(cf.this_class);
+
+        // Instance (non-static) fields, in declaration order.
+        var nfields: usize = 0;
+        for (cf.fields) |fld| {
+            if (!fld.access_flags.isStatic()) nfields += 1;
+        }
+        const instance_fields = try arena.alloc(Field, nfields);
+        var fi: usize = 0;
+        for (cf.fields) |fld| {
+            if (fld.access_flags.isStatic()) continue;
+            const fdesc = try cf.constant_pool.utf8(fld.descriptor_index);
+            instance_fields[fi] = .{
+                .name = try cf.constant_pool.utf8(fld.name_index),
+                .kind = kindOf(try descriptor.parseFieldDescriptor(fdesc)),
+            };
+            fi += 1;
+        }
+
         const methods = try arena.alloc(Method, cf.methods.len);
         for (cf.methods, 0..) |m, i| {
             const name = try cf.constant_pool.utf8(m.name_index);
             const desc = try cf.constant_pool.utf8(m.descriptor_index);
+            const is_static = m.access_flags.isStatic();
             const mt = try descriptor.parseMethodDescriptor(arena, desc);
             const params = try arena.alloc(Param, mt.params.len);
-            var slot: u16 = 0;
+            var slot: u16 = if (is_static) 0 else 1; // slot 0 is `this` for instance methods
             for (mt.params, 0..) |pt, k| {
                 const kind = kindOf(pt);
                 params[k] = .{ .kind = kind, .slot = slot };
@@ -266,9 +335,17 @@ pub const Class = struct {
                 .params = params,
                 .arg_slots = slot,
                 .ret = if (mt.ret) |r| kindOf(r) else null,
+                .is_static = is_static,
             };
         }
-        return .{ .gpa = gpa, .cp = cf.constant_pool, .methods = methods };
+        return .{ .gpa = gpa, .cp = cf.constant_pool, .name = cls_name, .methods = methods, .instance_fields = instance_fields };
+    }
+
+    fn findField(self: *const Class, name: []const u8) ?usize {
+        for (self.instance_fields, 0..) |fd, i| {
+            if (std.mem.eql(u8, fd.name, name)) return i;
+        }
+        return null;
     }
 
     fn find(self: *const Class, name: []const u8, desc: []const u8) ?*const Method {
@@ -294,7 +371,9 @@ pub const Class = struct {
         var slots: [256]Value = undefined;
         if (m.arg_slots > slots.len) return error.LinkError;
         const n = try layoutArgs(m, args, &slots);
-        return exec(self.gpa, self, budget, c.code, c.max_stack, c.max_locals, slots[0..n]);
+        var heap = Heap{ .gpa = self.gpa };
+        defer heap.deinit();
+        return exec(self.gpa, self, &heap, budget, c.code, c.max_stack, c.max_locals, slots[0..n]);
     }
 
     /// Convenience for int-argument methods with a fresh budget.
@@ -306,6 +385,97 @@ pub const Class = struct {
         return self.callStaticValues(name, desc, buf[0..int_args.len], &b);
     }
 };
+
+fn refClassName(cls: *const Class, class_index: u16) RunError![]const u8 {
+    const c = cls.cp.get(class_index) catch return error.LinkError;
+    const ni = switch (c.*) {
+        .class => |x| x,
+        else => return error.LinkError,
+    };
+    return cls.cp.utf8(ni) catch error.LinkError;
+}
+
+fn fieldName(cls: *const Class, cp_index: u16) RunError![]const u8 {
+    const c = cls.cp.get(cp_index) catch return error.LinkError;
+    const ref = switch (c.*) {
+        .fieldref => |r| r,
+        else => return error.LinkError,
+    };
+    const nat = switch ((cls.cp.get(ref.name_and_type_index) catch return error.LinkError).*) {
+        .name_and_type => |x| x,
+        else => return error.LinkError,
+    };
+    return cls.cp.utf8(nat.name_index) catch error.LinkError;
+}
+
+fn doNew(f: *Frame, cls: *const Class, code: []const u8) RunError!void {
+    const heap = f.heap orelse return error.UnsupportedOpcode;
+    const cname = try refClassName(cls, try u16At(code, f.pc + 1));
+    if (!std.mem.eql(u8, cname, cls.name)) return error.UnsupportedOpcode; // only self-class for now
+    try f.push(.{ .reference = try heap.alloc(cls) });
+}
+
+fn doGetField(f: *Frame, cls: *const Class, code: []const u8) RunError!void {
+    const heap = f.heap orelse return error.UnsupportedOpcode;
+    const fname = try fieldName(cls, try u16At(code, f.pc + 1));
+    const oid = (try f.popRef()) orelse return error.NullPointer;
+    const obj = heap.get(oid);
+    const fi = obj.class.findField(fname) orelse return error.LinkError;
+    try f.push(obj.fields[fi]);
+}
+
+fn doPutField(f: *Frame, cls: *const Class, code: []const u8) RunError!void {
+    const heap = f.heap orelse return error.UnsupportedOpcode;
+    const fname = try fieldName(cls, try u16At(code, f.pc + 1));
+    const value = try f.pop();
+    const oid = (try f.popRef()) orelse return error.NullPointer;
+    const obj = heap.get(oid);
+    const fi = obj.class.findField(fname) orelse return error.LinkError;
+    obj.fields[fi] = value;
+}
+
+fn invokeInstance(f: *Frame, cls: *const Class, code: []const u8, is_special: bool) RunError!void {
+    const idx = try u16At(code, f.pc + 1);
+    const c = cls.cp.get(idx) catch return error.LinkError;
+    const ref = switch (c.*) {
+        .methodref => |r| r,
+        else => return error.LinkError,
+    };
+    const cname = try refClassName(cls, ref.class_index);
+    const nat = switch ((cls.cp.get(ref.name_and_type_index) catch return error.LinkError).*) {
+        .name_and_type => |x| x,
+        else => return error.LinkError,
+    };
+    const mname = cls.cp.utf8(nat.name_index) catch return error.LinkError;
+    const mdesc = cls.cp.utf8(nat.descriptor_index) catch return error.LinkError;
+
+    // Bootstrap stub: java/lang/Object.<init> is a no-op (we have no JDK loaded).
+    if (is_special and std.mem.eql(u8, mname, "<init>") and std.mem.eql(u8, cname, "java/lang/Object")) {
+        _ = (try f.popRef()) orelse return error.NullPointer; // consume `this`
+        return;
+    }
+
+    // Single-class resolution (true virtual dispatch across a hierarchy is future work).
+    const target = cls.find(mname, mdesc) orelse return error.MethodNotFound;
+    var slots: [256]Value = undefined;
+    if (target.arg_slots > slots.len) return error.LinkError;
+    var i: usize = target.params.len;
+    while (i > 0) {
+        i -= 1;
+        const p = target.params[i];
+        slots[p.slot] = try f.popKind(p.kind);
+        if (p.kind == .long or p.kind == .double) slots[p.slot + 1] = .top;
+    }
+    const oid = (try f.popRef()) orelse return error.NullPointer;
+    slots[0] = .{ .reference = oid };
+
+    if (f.budget.depth >= f.budget.max_depth) return error.CallDepthExceeded;
+    f.budget.depth += 1;
+    defer f.budget.depth -= 1;
+    const cc = target.code orelse return error.LinkError;
+    const ret = try exec(cls.gpa, cls, f.heap, f.budget, cc.code, cc.max_stack, cc.max_locals, slots[0..target.arg_slots]);
+    if (ret) |rv| try f.pushKind(rv);
+}
 
 fn invokeStatic(f: *Frame, cls: *const Class, code: []const u8) RunError!void {
     const idx = try u16At(code, f.pc + 1);
@@ -338,7 +508,7 @@ fn invokeStatic(f: *Frame, cls: *const Class, code: []const u8) RunError!void {
     f.budget.depth += 1;
     defer f.budget.depth -= 1;
     const c = target.code orelse return error.LinkError;
-    const ret = try exec(cls.gpa, cls, f.budget, c.code, c.max_stack, c.max_locals, slots[0..target.arg_slots]);
+    const ret = try exec(cls.gpa, cls, f.heap, f.budget, c.code, c.max_stack, c.max_locals, slots[0..target.arg_slots]);
     if (ret) |rv| try f.pushKind(rv);
 }
 
@@ -359,7 +529,7 @@ fn loadConstant2(f: *Frame, class: ?*const Class, index: u16) RunError!void {
     }
 }
 
-fn exec(alloc: std.mem.Allocator, class: ?*const Class, budget: *Budget, code: []const u8, max_stack: u16, max_locals: u16, arg_slots: []const Value) RunError!?Value {
+fn exec(alloc: std.mem.Allocator, class: ?*const Class, heap: ?*Heap, budget: *Budget, code: []const u8, max_stack: u16, max_locals: u16, arg_slots: []const Value) RunError!?Value {
     if (arg_slots.len > max_locals) return error.BadLocal;
     const stack = try alloc.alloc(Value, max_stack);
     defer alloc.free(stack);
@@ -368,7 +538,7 @@ fn exec(alloc: std.mem.Allocator, class: ?*const Class, budget: *Budget, code: [
     for (locals) |*l| l.* = .{ .int = 0 };
     for (arg_slots, 0..) |v, i| locals[i] = v;
 
-    var f = Frame{ .stack = stack, .locals = locals, .budget = budget };
+    var f = Frame{ .stack = stack, .locals = locals, .budget = budget, .heap = heap };
 
     sw: switch (try opAt(code, f.pc)) {
         .nop => {
@@ -839,6 +1009,62 @@ fn exec(alloc: std.mem.Allocator, class: ?*const Class, budget: *Budget, code: [
             continue :sw try step(&f, code);
         },
         // ---- calls / returns ----
+        .aconst_null => {
+            try f.push(.{ .reference = null });
+            f.pc += 1;
+            continue :sw try step(&f, code);
+        },
+        .aload => {
+            try f.push(try f.localRaw(try u8At(code, f.pc + 1)));
+            f.pc += 2;
+            continue :sw try step(&f, code);
+        },
+        .aload_0, .aload_1, .aload_2, .aload_3 => |o| {
+            try f.push(try f.localRaw(@intFromEnum(o) - @intFromEnum(Op.aload_0)));
+            f.pc += 1;
+            continue :sw try step(&f, code);
+        },
+        .astore => {
+            try f.setLocal1(try u8At(code, f.pc + 1), try f.pop());
+            f.pc += 2;
+            continue :sw try step(&f, code);
+        },
+        .astore_0, .astore_1, .astore_2, .astore_3 => |o| {
+            try f.setLocal1(@intFromEnum(o) - @intFromEnum(Op.astore_0), try f.pop());
+            f.pc += 1;
+            continue :sw try step(&f, code);
+        },
+        .areturn => return try f.pop(),
+        .new => {
+            const cls = class orelse return error.UnsupportedOpcode;
+            try doNew(&f, cls, code);
+            f.pc += 3;
+            continue :sw try step(&f, code);
+        },
+        .getfield => {
+            const cls = class orelse return error.UnsupportedOpcode;
+            try doGetField(&f, cls, code);
+            f.pc += 3;
+            continue :sw try step(&f, code);
+        },
+        .putfield => {
+            const cls = class orelse return error.UnsupportedOpcode;
+            try doPutField(&f, cls, code);
+            f.pc += 3;
+            continue :sw try step(&f, code);
+        },
+        .invokespecial => {
+            const cls = class orelse return error.UnsupportedOpcode;
+            try invokeInstance(&f, cls, code, true);
+            f.pc += 3;
+            continue :sw try step(&f, code);
+        },
+        .invokevirtual => {
+            const cls = class orelse return error.UnsupportedOpcode;
+            try invokeInstance(&f, cls, code, false);
+            f.pc += 3;
+            continue :sw try step(&f, code);
+        },
         .invokestatic => {
             const cls = class orelse return error.UnsupportedOpcode;
             try invokeStatic(&f, cls, code);
@@ -866,7 +1092,7 @@ pub fn runIntBudgeted(a: std.mem.Allocator, code: []const u8, max_stack: u16, ma
     var buf: [64]Value = undefined;
     if (args.len > buf.len) return error.BadLocal;
     for (args, 0..) |x, i| buf[i] = .{ .int = x };
-    const r = try exec(a, null, &b, code, max_stack, max_locals, buf[0..args.len]);
+    const r = try exec(a, null, null, &b, code, max_stack, max_locals, buf[0..args.len]);
     return if (r) |v| switch (v) {
         .int => |x| x,
         else => error.TypeMismatch,
@@ -1136,4 +1362,19 @@ test "wide istore/iload/iinc" {
     // bipush 42 ; wide istore 258 ; wide iinc 258, +8 ; wide iload 258 ; ireturn
     const code = [_]u8{ 0x10, 42, 0xc4, 0x36, 0x01, 0x02, 0xc4, 0x84, 0x01, 0x02, 0x00, 0x08, 0xc4, 0x15, 0x01, 0x02, 0xac };
     try testing.expectEqual(@as(?i32, 50), try runInt(testing.allocator, &code, 1, 300, &.{}));
+}
+
+test "object model: construct, mutate fields, virtual + special dispatch (Point)" {
+    var cf: ClassFile = undefined;
+    var arena: std.heap.ArenaAllocator = undefined;
+    const cls = try loadClass("testdata/Point.class", &cf, &arena);
+    defer cf.deinit();
+    defer arena.deinit();
+
+    // make(3,4): new Point(3,4) -> bump() -> (4,5) -> scaledSum(2) = (4+5)*2 = 18
+    try testing.expectEqual(Value{ .int = 18 }, (try cls.callStatic("make", "(II)I", &.{ 3, 4 })).?);
+    // dist2(3,4): sum()=7 -> 49
+    try testing.expectEqual(Value{ .int = 49 }, (try cls.callStatic("dist2", "(II)I", &.{ 3, 4 })).?);
+    // a few more
+    try testing.expectEqual(Value{ .int = 2 }, (try cls.callStatic("make", "(II)I", &.{ -1, 0 })).?); // bump->(0,1); (0+1)*2 = 2
 }

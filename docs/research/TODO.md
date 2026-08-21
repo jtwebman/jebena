@@ -14,11 +14,11 @@ Working list. Check off as done; commit each. Ordered roughly by dependency.
 - [x] wide-prefixed loads/stores/iinc execution
 
 ## Object model / heap (couples to GC, subsystem 03)
-- [ ] object header + value model for references
+- [x] object header + value model for references (heap + Object + reference values)
 - [ ] Phase-0 collector (semispace or mark-sweep) behind a GC interface
-- [ ] new / newarray / anewarray, arraylength, array load/store
-- [ ] getfield/putfield, getstatic/putstatic
-- [ ] invokevirtual / invokespecial / invokeinterface (needs class hierarchy)
+- [x] new (self-class); [ ] newarray/anewarray/arraylength/array load-store
+- [x] getfield/putfield; [ ] getstatic/putstatic
+- [x] invokevirtual/invokespecial (single class); [ ] invokeinterface + real hierarchy dispatch
 - [ ] string constants (ldc of String), <init> chains
 
 ## Subsystem 01 — verification
