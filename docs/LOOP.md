@@ -10,7 +10,8 @@ Each iteration is one small, verified, committed step. Never leave the tree red.
    from a compiled Java program.
 4. VALIDATION GATE (all must pass before committing):
    - `zig build test` (via ~/.local/zig-x86_64-linux-0.16.0/zig) — all unit tests green
-   - `bash scripts/differential.sh` — byte-identical to real OpenJDK 17
+   - `bash scripts/differential.sh` — byte-identical to the JDK21 oracle (SE-conformant)
+   - `bash scripts/jbase-smoke.sh` — our own clean-room java.base bytecode runs correctly
    - `zig fmt --check src/ build.zig` — formatted
    If anything fails: fix it, or revert the change. Do not commit red.
 5. Commit with a clear message (end with the Claude-Session line). Push if a
