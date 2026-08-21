@@ -1048,6 +1048,64 @@ fn mathIntrinsic(f: *Frame, name: []const u8, desc: []const u8) RunError!void {
     return error.UnsupportedOpcode;
 }
 
+fn lessThanInt(_: void, a: Value, b: Value) bool {
+    return a.int < b.int;
+}
+fn lessThanLong(_: void, a: Value, b: Value) bool {
+    return a.long < b.long;
+}
+fn arrayOf(f: *Frame, id: u32) RunError!*Array {
+    const heap = f.heap orelse return error.UnsupportedOpcode;
+    return switch (heap.get(id).*) {
+        .array => |*a| a,
+        else => error.LinkError,
+    };
+}
+fn arraysIntrinsic(f: *Frame, name: []const u8, desc: []const u8) RunError!void {
+    if (eq2(name, desc, "sort", "([I)V")) {
+        const arr = try arrayOf(f, (try f.popRef()) orelse return error.NullPointer);
+        std.sort.pdq(Value, arr.data, {}, lessThanInt);
+        return;
+    }
+    if (eq2(name, desc, "sort", "([J)V")) {
+        const arr = try arrayOf(f, (try f.popRef()) orelse return error.NullPointer);
+        std.sort.pdq(Value, arr.data, {}, lessThanLong);
+        return;
+    }
+    if (eq2(name, desc, "fill", "([II)V")) {
+        const val = try f.popInt();
+        const arr = try arrayOf(f, (try f.popRef()) orelse return error.NullPointer);
+        for (arr.data) |*v| v.* = .{ .int = val };
+        return;
+    }
+    if (eq2(name, desc, "copyOf", "([II)[I")) {
+        const new_len = try f.popInt();
+        const src = try arrayOf(f, (try f.popRef()) orelse return error.NullPointer);
+        if (new_len < 0) return error.NegativeArraySize;
+        const heap = f.heap orelse return error.UnsupportedOpcode;
+        const nlen: usize = @intCast(new_len);
+        const id = try heap.allocArray(.int, nlen);
+        const dst = try arrayOf(f, id);
+        const copy = @min(nlen, src.data.len);
+        var i: usize = 0;
+        while (i < copy) : (i += 1) dst.data[i] = src.data[i];
+        return f.push(.{ .reference = id });
+    }
+    if (eq2(name, desc, "equals", "([I[I)Z")) {
+        const b = try arrayOf(f, (try f.popRef()) orelse return error.NullPointer);
+        const a = try arrayOf(f, (try f.popRef()) orelse return error.NullPointer);
+        var eq = a.data.len == b.data.len;
+        if (eq) for (a.data, b.data) |x, y| {
+            if (x.int != y.int) {
+                eq = false;
+                break;
+            }
+        };
+        return f.pushInt(if (eq) 1 else 0);
+    }
+    return error.UnsupportedOpcode;
+}
+
 fn integerIntrinsic(f: *Frame, name: []const u8, desc: []const u8) RunError!void {
     if (eq2(name, desc, "bitCount", "(I)I")) return f.pushInt(@popCount(try f.popInt()));
     if (eq2(name, desc, "numberOfLeadingZeros", "(I)I")) return f.pushInt(@clz(@as(u32, @bitCast(try f.popInt()))));
@@ -1166,6 +1224,7 @@ fn invokeStatic(f: *Frame, cls: *const Class, code: []const u8) RunError!void {
     if (std.mem.eql(u8, owner_name, "java/lang/System")) return systemIntrinsic(f, mname, mdesc);
     if (std.mem.eql(u8, owner_name, "java/lang/Integer")) return integerIntrinsic(f, mname, mdesc);
     if (std.mem.eql(u8, owner_name, "java/lang/Long")) return longIntrinsic(f, mname, mdesc);
+    if (std.mem.eql(u8, owner_name, "java/util/Arrays")) return arraysIntrinsic(f, mname, mdesc);
     const tclass = try resolveClass(f, cls, try refClassName(cls, ref.class_index));
     const tr = tclass.resolve(mname, mdesc) orelse return error.MethodNotFound;
     const target = tr.method;

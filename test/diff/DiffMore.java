@@ -1,3 +1,4 @@
+import java.util.Arrays;
 public class DiffMore {
     static int nanCmp() { double d = 0.0 / 0.0; return (d < 1.0 ? 1 : 0) + (d > 1.0 ? 10 : 0) + (d == d ? 100 : 0) + (d != d ? 1000 : 0); }
     static int nanCmpF() { float f = 0.0f / 0.0f; return (f <= 1.0f ? 1 : 0) + (f >= 1.0f ? 10 : 0) + (f < f ? 100 : 0); }
@@ -60,4 +61,9 @@ public class DiffMore {
     static int lBits() { long x = 0xF0F0F0F0F0F0F0F0L; return Long.bitCount(x) * 100 + Long.numberOfTrailingZeros(x); }
     static int iMinMax() { return Integer.max(-5, 3) * 100 + Integer.min(-5, 3) + Integer.signum(-99) * 10; }
     static int bitLoop() { int s = 0; for (int i = 1; i <= 1000; i++) s += Integer.bitCount(i) + Integer.numberOfTrailingZeros(i); return s; }
+
+    static int sortTest() { int[] a = { 5, 3, 8, 1, 9, 2, 7, 4, 6, 0 }; Arrays.sort(a); int s = 0; for (int v : a) s = s * 10 + v; return s; }
+    static int sortBig() { int[] a = new int[500]; int x = 12345; for (int i = 0; i < 500; i++) { x = (x * 1103515245 + 12345) & 0x7fffffff; a[i] = x % 1000; } Arrays.sort(a); int s = 0; for (int i = 1; i < 500; i++) if (a[i - 1] > a[i]) s++; return s * 100000 + a[0] + a[499]; }
+    static int fillCopy() { int[] a = new int[6]; Arrays.fill(a, 7); int[] b = Arrays.copyOf(a, 10); int s = 0; for (int v : b) s += v; return s * 10 + b.length; }
+    static int eqTest() { int[] a = { 1, 2, 3 }; int[] b = { 1, 2, 3 }; int[] c = { 1, 2, 4 }; return (Arrays.equals(a, b) ? 1 : 0) * 10 + (Arrays.equals(a, c) ? 1 : 0); }
 }
