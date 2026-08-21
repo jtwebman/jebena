@@ -381,6 +381,7 @@ fn collectMajor(f: *Frame) void {
         var it = heap.interned.valueIterator();
         while (it.next()) |vp| markObject(heap, vp.*);
     }
+    for (f.loader.mirrors.items) |m| if (m) |id| markObject(heap, id);
 
     // 2. Assign new ids to live objects (compact order); free the dead.
     const forwarding = heap.gpa.alloc(u32, heap.objects.items.len) catch return;
@@ -415,6 +416,9 @@ fn collectMajor(f: *Frame) void {
         var it = heap.interned.valueIterator();
         while (it.next()) |vp| vp.* = forwarding[vp.*];
     }
+    for (f.loader.mirrors.items) |*m| if (m.*) |id| {
+        m.* = forwarding[id];
+    };
 
     // 4. Move live objects (and their generation/remembered bits) to new slots.
     for (heap.objects.items, 0..) |maybe, oid| {
@@ -473,6 +477,7 @@ fn collectMinor(f: *Frame) void {
         var it = heap.interned.valueIterator();
         while (it.next()) |vp| markYoungObject(heap, vp.*);
     }
+    for (f.loader.mirrors.items) |m| if (m) |mid| markYoungObject(heap, mid);
     var id: u32 = 0;
     while (id < heap.objects.items.len) : (id += 1) {
         if (heap.remembered.items[id]) {
@@ -606,6 +611,9 @@ pub const Loader = struct {
     classes: std.ArrayList(*const Class) = .empty,
     statics: std.ArrayList([]Value) = .empty,
     initialized: std.ArrayList(bool) = .empty,
+    /// java.lang.Class mirror id per class (lazy, one per class). A GC root:
+    /// marked by both collectors and remapped by the compacting major collector.
+    mirrors: std.ArrayList(?u32) = .empty,
 
     pub fn init(gpa: std.mem.Allocator) Loader {
         return .{ .gpa = gpa };
@@ -615,6 +623,7 @@ pub const Loader = struct {
         self.statics.deinit(self.gpa);
         self.classes.deinit(self.gpa);
         self.initialized.deinit(self.gpa);
+        self.mirrors.deinit(self.gpa);
     }
     pub fn register(self: *Loader, class: *const Class) !void {
         const st = try self.gpa.alloc(Value, class.static_fields.len);
@@ -622,6 +631,7 @@ pub const Loader = struct {
         try self.classes.append(self.gpa, class);
         try self.statics.append(self.gpa, st);
         try self.initialized.append(self.gpa, false);
+        try self.mirrors.append(self.gpa, null);
     }
     fn indexOf(self: *const Loader, class: *const Class) ?usize {
         for (self.classes.items, 0..) |c, i| {
@@ -2331,11 +2341,72 @@ fn systemIntrinsic(f: *Frame, name: []const u8, desc: []const u8) RunError!void 
 /// after normal method resolution. `slots` holds the arguments (slot 0 is the
 /// receiver for instance methods). Returns error.UnsupportedOpcode for an
 /// unregistered native (a genuine "not implemented", surfaced loudly).
+fn classOf(heap: *Heap, id: u32) ?*const Class {
+    return switch (heap.get(id).*) {
+        .instance => |x| x.class,
+        .string => |x| x.class,
+        .boxed => |x| x.class,
+        .builder => |x| x.class,
+        else => null, // array / lambda: no user-visible class yet
+    };
+}
+fn getMirror(f: *Frame, cls: *const Class) RunError!u32 {
+    const heap = f.heap orelse return error.UnsupportedOpcode;
+    const idx = f.loader.indexOf(cls) orelse return error.LinkError;
+    if (f.loader.mirrors.items[idx]) |id| return id;
+    const class_class = f.loader.find("java/lang/Class") orelse return error.LinkError;
+    const mid = try heap.allocInstance(class_class);
+    const vi = class_class.findField("vmIndex") orelse return error.LinkError;
+    switch (heap.get(mid).*) {
+        .instance => |*inst| inst.fields[vi] = .{ .int = @intCast(idx) },
+        else => return error.LinkError,
+    }
+    f.loader.mirrors.items[idx] = mid;
+    return mid;
+}
+fn mirrorClass(f: *Frame, mirror_id: u32) RunError!*const Class {
+    const heap = f.heap orelse return error.UnsupportedOpcode;
+    const class_class = f.loader.find("java/lang/Class") orelse return error.LinkError;
+    const vi = class_class.findField("vmIndex") orelse return error.LinkError;
+    const idx: usize = switch (heap.get(mirror_id).*) {
+        .instance => |inst| @intCast(inst.fields[vi].int),
+        else => return error.LinkError,
+    };
+    if (idx >= f.loader.classes.items.len) return error.LinkError;
+    return f.loader.classes.items[idx];
+}
+fn pushDottedName(f: *Frame, internal: []const u8, simple: bool) RunError!void {
+    // internal form uses '/'; Java getName uses '.'. simple=last component only.
+    const heap = f.heap orelse return error.UnsupportedOpcode;
+    var start: usize = 0;
+    if (simple) {
+        var i: usize = internal.len;
+        while (i > 0) : (i -= 1) {
+            if (internal[i - 1] == '/') {
+                start = i;
+                break;
+            }
+        }
+    }
+    var tmp: std.ArrayList(i32) = .empty;
+    defer tmp.deinit(heap.gpa);
+    for (internal[start..]) |c| tmp.append(heap.gpa, if (c == '/') '.' else c) catch return error.OutOfMemory;
+    try f.push(.{ .reference = try makeString(f, tmp.items) });
+}
 fn nativeInvoke(f: *Frame, owner: *const Class, method: *const Class.Method, slots: []const Value) RunError!void {
     const on = owner.name;
     const mn = method.name;
     const md = method.descriptor;
     if (std.mem.eql(u8, on, "java/lang/Object")) {
+        if (eq2(mn, md, "getClass", "()Ljava/lang/Class;")) {
+            const recv = switch (slots[0]) {
+                .reference => |r| r orelse return error.NullPointer,
+                else => return error.TypeMismatch,
+            };
+            const heap = f.heap orelse return error.UnsupportedOpcode;
+            const rc = classOf(heap, recv) orelse return error.LinkError;
+            return f.push(.{ .reference = try getMirror(f, rc) });
+        }
         if (eq2(mn, md, "identityHashCode", "(Ljava/lang/Object;)I")) {
             const arg = slots[method.params[0].slot];
             const r = switch (arg) {
@@ -2344,6 +2415,15 @@ fn nativeInvoke(f: *Frame, owner: *const Class, method: *const Class.Method, slo
             };
             return f.pushInt(if (r) |id| @bitCast(id) else 0);
         }
+    }
+    if (std.mem.eql(u8, on, "java/lang/Class")) {
+        const recv = switch (slots[0]) {
+            .reference => |r| r orelse return error.NullPointer,
+            else => return error.TypeMismatch,
+        };
+        const rc = try mirrorClass(f, recv);
+        if (eq2(mn, md, "getName", "()Ljava/lang/String;")) return pushDottedName(f, rc.name, false);
+        if (eq2(mn, md, "getSimpleName", "()Ljava/lang/String;")) return pushDottedName(f, rc.name, true);
     }
     if (std.mem.eql(u8, on, "java/lang/Double")) {
         const d = slots[method.params[0].slot];

@@ -97,4 +97,37 @@ public final class Integer extends Number {
     public static Integer valueOf(String s) {
         return valueOf(parseInt(s));
     }
+
+    private static String toUnsignedString(int i, int shift) {
+        if (i == 0) {
+            return "0";
+        }
+        int mask = (1 << shift) - 1;
+        char[] buf = new char[32];
+        int p = 32;
+        int v = i;
+        while (v != 0) {
+            int d = v & mask;
+            buf[--p] = (char) (d < 10 ? ('0' + d) : ('a' + d - 10));
+            v >>>= shift;
+        }
+        int len = 32 - p;
+        char[] r = new char[len];
+        for (int k = 0; k < len; k++) {
+            r[k] = buf[p + k];
+        }
+        return new String(r);
+    }
+
+    public static String toHexString(int i) {
+        return toUnsignedString(i, 4);
+    }
+
+    public static String toOctalString(int i) {
+        return toUnsignedString(i, 3);
+    }
+
+    public static String toBinaryString(int i) {
+        return toUnsignedString(i, 1);
+    }
 }

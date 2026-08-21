@@ -18,6 +18,12 @@ public class Object {
         return identityHashCode(this);
     }
 
+    public native Class getClass();
+
+    public String toString() {
+        return getClass().getName() + "@" + Integer.toHexString(hashCode());
+    }
+
     // VM-provided: a stable identity hash for the object. Wired to Zig until the
     // real object-header hash lands.
     static native int identityHashCode(Object o);

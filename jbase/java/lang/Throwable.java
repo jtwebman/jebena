@@ -22,4 +22,10 @@ public class Throwable {
     public String getLocalizedMessage() {
         return getMessage();
     }
+
+    public String toString() {
+        String n = getClass().getName();
+        String m = detailMessage;
+        return (m != null) ? (n + ": " + m) : n;
+    }
 }

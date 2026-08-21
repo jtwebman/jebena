@@ -142,6 +142,21 @@ public class JBaseSmoke {
         Float fa = 2.5f;
         r += (int) (fa.floatValue() * 4); // 10
         if (fa.equals(Float.valueOf(2.5f))) r += 600;
+
+        // getClass() + Class + real toString (hash-independent parts only).
+        r += "hello".getClass().getName().length();       // "java.lang.String" -> 16
+        r += "hello".getClass().getSimpleName().length();  // "String" -> 6
+        if ("a".getClass() == "b".getClass()) r += 111;    // one mirror per class
+        Integer bx = 5;
+        r += bx.getClass().getName().length();             // "java.lang.Integer" -> 17
+        r += Integer.toHexString(255).length();            // "ff" -> 2
+        if (Integer.toHexString(255).equals("ff")) r += 9;
+        r += Integer.toHexString(-1).length();             // "ffffffff" -> 8
+        if (Integer.toBinaryString(5).equals("101")) r += 13;
+        RuntimeException ex = new RuntimeException("boom");
+        if (ex.toString().equals("java.lang.RuntimeException: boom")) r += 17;
+        NumberFormatException nfe = new NumberFormatException("bad");
+        if (nfe.toString().equals("java.lang.NumberFormatException: bad")) r += 19;
         return r;
     }
 }
