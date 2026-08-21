@@ -1924,7 +1924,7 @@ test "object-capable interpreter survives arbitrary bytecode (heap + class conte
         rand.bytes(buf[0..len]);
         const ms = rand.intRangeAtMost(u16, 0, 16);
         const ml = rand.intRangeAtMost(u16, 0, 8);
-        var heap = Heap{ .gpa = testing.allocator };
+        var heap = Heap{ .gpa = testing.allocator, .gc_interval = 4 }; // GC aggressively
         defer heap.deinit();
         var loader = Loader.init(testing.allocator);
         defer loader.deinit();
