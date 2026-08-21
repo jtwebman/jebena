@@ -1,6 +1,6 @@
 package java.lang;
 
-public final class Long extends Number {
+public final class Long extends Number implements Comparable<Long> {
     private final long value;
 
     public Long(long value) {

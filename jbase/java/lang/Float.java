@@ -1,6 +1,6 @@
 package java.lang;
 
-public final class Float extends Number {
+public final class Float extends Number implements Comparable<Float> {
     private final float value;
 
     public Float(float value) {

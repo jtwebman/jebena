@@ -6,7 +6,7 @@ package java.lang;
  * String(char[]) copies. Methods are ordinary bytecode over `value` — the Zig
  * string intrinsic now only backs the bootstrap stub, not this real class.
  */
-public final class String implements CharSequence {
+public final class String implements CharSequence, Comparable<String> {
     private final char[] value;
 
     public String(char[] v) {

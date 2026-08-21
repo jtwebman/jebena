@@ -1,6 +1,6 @@
 package java.lang;
 
-public final class Double extends Number {
+public final class Double extends Number implements Comparable<Double> {
     private final double value;
 
     public Double(double value) {

@@ -1,6 +1,6 @@
 package java.lang;
 
-public final class Character {
+public final class Character implements Comparable<Character> {
     private final char value;
 
     public Character(char value) {

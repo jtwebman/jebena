@@ -1,6 +1,6 @@
 package java.lang;
 
-public final class Byte extends Number {
+public final class Byte extends Number implements Comparable<Byte> {
     private final byte value;
 
     public Byte(byte value) {

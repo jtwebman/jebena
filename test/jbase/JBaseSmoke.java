@@ -280,6 +280,33 @@ public class JBaseSmoke {
             big.append(i).append(',');  // growth stress
         }
         r += big.length();
+
+        // Comparable + Comparator + Collections.
+        java.util.List<Integer> nums = new java.util.ArrayList<>();
+        int[] seed = { 5, 2, 8, 1, 9, 3, 7 };
+        for (int v : seed) {
+            nums.add(v);
+        }
+        java.util.Collections.sort(nums);          // natural ordering (Comparable)
+        int packed = 0;
+        for (int x : nums) {
+            packed = packed * 10 + x;              // 1235789
+        }
+        r += packed % 1000000;
+        java.util.Collections.sort(nums, (p, q) -> q - p); // reverse via Comparator
+        r += nums.get(0);                          // 9
+        java.util.Collections.reverse(nums);       // ascending again
+        r += nums.get(0);                          // 1
+        r += java.util.Collections.max(nums);      // 9
+        r += java.util.Collections.min(nums);      // 1
+
+        java.util.List<String> strs = new java.util.ArrayList<>();
+        strs.add("banana");
+        strs.add("apple");
+        strs.add("cherry");
+        java.util.Collections.sort(strs);          // natural String ordering
+        r += strs.get(0).charAt(0);                // 'a' = 97
+        r += java.util.Collections.max(strs).charAt(0); // 'c' = 99
         return r;
     }
 }

@@ -5,7 +5,7 @@ package java.lang;
  * value; valueOf caches -128..127 so autoboxed small ints are ==, matching the
  * spec. The cache is an ordinary static field (a GC root), built in <clinit>.
  */
-public final class Integer extends Number {
+public final class Integer extends Number implements Comparable<Integer> {
     private final int value;
 
     public Integer(int value) {
