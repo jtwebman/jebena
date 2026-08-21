@@ -2343,6 +2343,39 @@ fn systemIntrinsic(f: *Frame, name: []const u8, desc: []const u8) RunError!void 
 /// after normal method resolution. `slots` holds the arguments (slot 0 is the
 /// receiver for instance methods). Returns error.UnsupportedOpcode for an
 /// unregistered native (a genuine "not implemented", surfaced loudly).
+fn writeStringToFd(f: *Frame, fd: i32, sid: u32) RunError!void {
+    const heap = f.heap orelse return error.UnsupportedOpcode;
+    var chars: std.ArrayList(i32) = .empty;
+    defer chars.deinit(heap.gpa);
+    try appendStringObj(&chars, heap, sid);
+    var bytes: std.ArrayList(u8) = .empty;
+    defer bytes.deinit(heap.gpa);
+    var ebuf: [4]u8 = undefined;
+    for (chars.items) |c| {
+        const cp: u21 = @intCast(@as(u32, @bitCast(c)) & 0xFFFF);
+        if (cp >= 0xD800 and cp <= 0xDFFF) {
+            bytes.append(heap.gpa, '?') catch return error.OutOfMemory;
+            continue;
+        }
+        const n = std.unicode.utf8Encode(cp, &ebuf) catch {
+            bytes.append(heap.gpa, '?') catch return error.OutOfMemory;
+            continue;
+        };
+        bytes.appendSlice(heap.gpa, ebuf[0..n]) catch return error.OutOfMemory;
+    }
+    const handle: i32 = @intCast(fd);
+    _ = std.os.linux.write(handle, bytes.items.ptr, bytes.items.len);
+}
+fn nowMillis() i64 {
+    var ts: std.os.linux.timespec = undefined;
+    _ = std.os.linux.clock_gettime(@enumFromInt(0), &ts); // CLOCK_REALTIME
+    return @as(i64, ts.sec) * 1000 + @divTrunc(@as(i64, ts.nsec), 1_000_000);
+}
+fn nowNanos() i64 {
+    var ts: std.os.linux.timespec = undefined;
+    _ = std.os.linux.clock_gettime(@enumFromInt(1), &ts); // CLOCK_MONOTONIC
+    return @as(i64, ts.sec) * 1_000_000_000 + @as(i64, ts.nsec);
+}
 fn classOf(heap: *Heap, id: u32) ?*const Class {
     return switch (heap.get(id).*) {
         .instance => |x| x.class,
@@ -2416,6 +2449,68 @@ fn nativeInvoke(f: *Frame, owner: *const Class, method: *const Class.Method, slo
                 else => null,
             };
             return f.pushInt(if (r) |id| @bitCast(id) else 0);
+        }
+    }
+    if (std.mem.eql(u8, on, "java/io/PrintStream")) {
+        if (eq2(mn, md, "writeString", "(ILjava/lang/String;)V")) {
+            const fd = slots[method.params[0].slot].int;
+            const sref = switch (slots[method.params[1].slot]) {
+                .reference => |r| r orelse return,
+                else => return error.TypeMismatch,
+            };
+            return writeStringToFd(f, fd, sref);
+        }
+    }
+    if (std.mem.eql(u8, on, "java/lang/System")) {
+        if (eq2(mn, md, "currentTimeMillis", "()J")) return f.pushLong(nowMillis());
+        if (eq2(mn, md, "nanoTime", "()J")) return f.pushLong(nowNanos());
+        if (eq2(mn, md, "identityHashCode", "(Ljava/lang/Object;)I")) {
+            const r = switch (slots[method.params[0].slot]) {
+                .reference => |x| x,
+                else => null,
+            };
+            return f.pushInt(if (r) |id| @bitCast(id) else 0);
+        }
+        if (eq2(mn, md, "arraycopy", "(Ljava/lang/Object;ILjava/lang/Object;II)V")) {
+            const heap = f.heap orelse return error.UnsupportedOpcode;
+            const src = switch (slots[method.params[0].slot]) {
+                .reference => |r| r orelse return error.NullPointer,
+                else => return error.TypeMismatch,
+            };
+            const src_pos = slots[method.params[1].slot].int;
+            const dest = switch (slots[method.params[2].slot]) {
+                .reference => |r| r orelse return error.NullPointer,
+                else => return error.TypeMismatch,
+            };
+            const dest_pos = slots[method.params[3].slot].int;
+            const length = slots[method.params[4].slot].int;
+            const sa = switch (heap.get(src).*) {
+                .array => |*a| a,
+                else => return error.LinkError,
+            };
+            const da = switch (heap.get(dest).*) {
+                .array => |*a| a,
+                else => return error.LinkError,
+            };
+            if (length < 0 or src_pos < 0 or dest_pos < 0) return error.ArrayIndexOutOfBounds;
+            const len: usize = @intCast(length);
+            const sp: usize = @intCast(src_pos);
+            const dp: usize = @intCast(dest_pos);
+            if (sp + len > sa.data.len or dp + len > da.data.len) return error.ArrayIndexOutOfBounds;
+            if (dp <= sp) {
+                var i: usize = 0;
+                while (i < len) : (i += 1) da.data[dp + i] = sa.data[sp + i];
+            } else {
+                var i: usize = len;
+                while (i > 0) {
+                    i -= 1;
+                    da.data[dp + i] = sa.data[sp + i];
+                }
+            }
+            if (da.elem == .reference) {
+                for (da.data[dp .. dp + len]) |v| writeBarrier(heap, dest, v);
+            }
+            return;
         }
     }
     if (std.mem.eql(u8, on, "java/lang/Class")) {
