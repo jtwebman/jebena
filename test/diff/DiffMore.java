@@ -47,4 +47,9 @@ public class DiffMore {
     static int mHypot() { return (int) Math.hypot(3.0, 4.0) + (int) (Math.hypot(5.0, 12.0)); }
     static int mExp() { return (int) (Math.exp(1.0) * 1000) + (int) (Math.sin(0.0) * 1000) + (int) (Math.cos(0.0) * 1000); }
     static int mMixed() { double d = 0; for (int i = 1; i <= 20; i++) d += Math.sqrt(i) * Math.abs(i - 10); return (int) d; }
+
+    static int copy() { int[] a = { 1, 2, 3, 4, 5 }; int[] b = new int[5]; System.arraycopy(a, 1, b, 0, 3); return b[0] * 10000 + b[1] * 1000 + b[2] * 100 + b[3] * 10 + b[4]; }
+    static int copyOverlap() { int[] a = { 1, 2, 3, 4, 5, 6, 7, 8 }; System.arraycopy(a, 0, a, 2, 4); int s = 0; for (int v : a) s = s * 10 + v; return s; }
+    static int copyGrow() { int[] a = { 5, 6, 7 }; for (int k = 0; k < 6; k++) { int[] b = new int[a.length * 2]; System.arraycopy(a, 0, b, 0, a.length); a = b; } int s = 0; for (int v : a) s += v; return s; }
+    static int copyLong() { long[] a = { 10L, 20L, 30L }; long[] b = new long[3]; System.arraycopy(a, 0, b, 0, 3); return (int) (b[0] + b[1] + b[2]); }
 }

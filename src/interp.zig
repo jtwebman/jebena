@@ -1048,6 +1048,46 @@ fn mathIntrinsic(f: *Frame, name: []const u8, desc: []const u8) RunError!void {
     return error.UnsupportedOpcode;
 }
 
+fn systemIntrinsic(f: *Frame, name: []const u8, desc: []const u8) RunError!void {
+    if (eq2(name, desc, "arraycopy", "(Ljava/lang/Object;ILjava/lang/Object;II)V")) {
+        const length = try f.popInt();
+        const dest_pos = try f.popInt();
+        const dest = (try f.popRef()) orelse return error.NullPointer;
+        const src_pos = try f.popInt();
+        const src = (try f.popRef()) orelse return error.NullPointer;
+        const heap = f.heap orelse return error.UnsupportedOpcode;
+        const sa = switch (heap.get(src).*) {
+            .array => |*a| a,
+            else => return error.LinkError,
+        };
+        const da = switch (heap.get(dest).*) {
+            .array => |*a| a,
+            else => return error.LinkError,
+        };
+        if (length < 0 or src_pos < 0 or dest_pos < 0) return error.ArrayIndexOutOfBounds;
+        const len: usize = @intCast(length);
+        const sp: usize = @intCast(src_pos);
+        const dp: usize = @intCast(dest_pos);
+        if (sp + len > sa.data.len or dp + len > da.data.len) return error.ArrayIndexOutOfBounds;
+        // memmove semantics (handle overlap)
+        if (dp <= sp) {
+            var i: usize = 0;
+            while (i < len) : (i += 1) da.data[dp + i] = sa.data[sp + i];
+        } else {
+            var i: usize = len;
+            while (i > 0) {
+                i -= 1;
+                da.data[dp + i] = sa.data[sp + i];
+            }
+        }
+        if (da.elem == .reference) {
+            for (da.data[dp .. dp + len]) |v| writeBarrier(heap, dest, v);
+        }
+        return;
+    }
+    return error.UnsupportedOpcode;
+}
+
 fn invokeStatic(f: *Frame, cls: *const Class, code: []const u8) RunError!void {
     const idx = try u16At(code, f.pc + 1);
     const mref = cls.cp.get(idx) catch return error.LinkError;
@@ -1061,9 +1101,9 @@ fn invokeStatic(f: *Frame, cls: *const Class, code: []const u8) RunError!void {
     };
     const mname = cls.cp.utf8(nat.name_index) catch return error.LinkError;
     const mdesc = cls.cp.utf8(nat.descriptor_index) catch return error.LinkError;
-    if (std.mem.eql(u8, try refClassName(cls, ref.class_index), "java/lang/Math")) {
-        return mathIntrinsic(f, mname, mdesc);
-    }
+    const owner_name = try refClassName(cls, ref.class_index);
+    if (std.mem.eql(u8, owner_name, "java/lang/Math")) return mathIntrinsic(f, mname, mdesc);
+    if (std.mem.eql(u8, owner_name, "java/lang/System")) return systemIntrinsic(f, mname, mdesc);
     const tclass = try resolveClass(f, cls, try refClassName(cls, ref.class_index));
     const tr = tclass.resolve(mname, mdesc) orelse return error.MethodNotFound;
     const target = tr.method;
