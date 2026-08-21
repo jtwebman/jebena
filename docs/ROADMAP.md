@@ -44,7 +44,7 @@ Steps (each a loop iteration or few):
 - [ ] extract java.base .class files from the installed JDK (jmods/modules)
 - [ ] load real java/lang/Object (identity hashCode, getClass, equals/hashCode)
 - [ ] a native-method registry: methods marked ACC_NATIVE dispatch to Zig intrinsics
-- [~] clean-room java.lang.String (char[]): ldc/concat/substring/indexOf/startsWith/compareTo real; GC-rooted literal interning so == matches java (jbase-smoke differential). Remaining: valueOf/case/trim methods
+- [x] clean-room java.lang.String (char[]): full method set as real bytecode (concat/substring/indexOf(int,String)/lastIndexOf/startsWith/endsWith/compareTo/equalsIgnoreCase/trim/toUpperCase/toLowerCase/replace/toCharArray/valueOf) + invokedynamic concat + GC-rooted interning; all string producers representation-aware (newString->makeString). jbase-smoke matches OpenJDK
 - [ ] real java/lang/Class + Object.getClass (minimal)
 - [ ] real java.util: Objects, AbstractCollection/List, ArrayList, HashMap, HashSet,
       LinkedList, Arrays.asList, Optional (mostly pure Java once Object/arrays work)

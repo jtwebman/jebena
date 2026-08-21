@@ -76,6 +76,20 @@ public class JBaseSmoke {
         if (p1 == p2) r += 800000;
         String xv = "x";
         if ((xv + "y") != "xy") r += 5; // runtime concat -> fresh, not interned
+
+        // Remaining String methods (each auto-validated against real java).
+        r += "HeLLo".toUpperCase().length();       // "HELLO" -> 5
+        r += "HeLLo".toLowerCase().charAt(0);      // 'h' -> 104
+        if ("Hello".equalsIgnoreCase("hello")) r += 900;
+        r += "  hi  ".trim().length();             // 2
+        r += String.valueOf(12345).length();       // "12345" -> 5
+        r += String.valueOf(true).length();        // "true" -> 4
+        r += String.valueOf(3.5).length();         // "3.5" -> 3
+        r += "banana".lastIndexOf('a');            // 5
+        if ("test.java".endsWith(".java")) r += 42;
+        r += "abcabc".replace('a', 'x').indexOf('x'); // 0
+        r += "hello world".indexOf("world");       // 6
+        r += String.valueOf('Z').charAt(0);        // 'Z' -> 90
         return r;
     }
 }

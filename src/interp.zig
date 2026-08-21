@@ -1913,10 +1913,10 @@ fn indexOfSub(s: []const i32, needle: []const i32) i32 {
     return -1;
 }
 fn newString(f: *Frame, chars: []const i32) RunError!u32 {
-    const heap = f.heap orelse return error.UnsupportedOpcode;
-    const str_class = f.loader.find("java/lang/String") orelse return error.LinkError;
-    const dup = heap.gpa.dupe(i32, chars) catch return error.OutOfMemory;
-    return heap.putString(str_class, dup);
+    // Representation-aware: real char[]-backed String when String is the real
+    // loaded class, else a StringObj for the bootstrap stub. All string producers
+    // route through here so a jbase run never mixes StringObj into real String.
+    return makeString(f, chars);
 }
 
 fn lessThanInt(_: void, a: Value, b: Value) bool {
@@ -2320,6 +2320,12 @@ fn nativeInvoke(f: *Frame, owner: *const Class, method: *const Class.Method, slo
             };
             return f.pushInt(if (r) |id| @bitCast(id) else 0);
         }
+    }
+    if (std.mem.eql(u8, on, "java/lang/String")) {
+        if (eq2(mn, md, "valueOf", "(I)Ljava/lang/String;")) return floatStringInt(f, @as(i64, slots[method.params[0].slot].int));
+        if (eq2(mn, md, "valueOf", "(J)Ljava/lang/String;")) return floatStringInt(f, slots[method.params[0].slot].long);
+        if (eq2(mn, md, "valueOf", "(D)Ljava/lang/String;")) return floatString(f, f64, slots[method.params[0].slot].double);
+        if (eq2(mn, md, "valueOf", "(F)Ljava/lang/String;")) return floatString(f, f32, slots[method.params[0].slot].float);
     }
     if (std.mem.eql(u8, on, "java/lang/Math")) {
         // Double math is native in the spec (StrictMath). Same computations as the

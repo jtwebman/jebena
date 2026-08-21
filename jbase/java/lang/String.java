@@ -118,4 +118,129 @@ public final class String {
         }
         return true;
     }
+    public boolean endsWith(String suffix) {
+        int slen = suffix.value.length;
+        if (slen > value.length) {
+            return false;
+        }
+        int off = value.length - slen;
+        for (int i = 0; i < slen; i++) {
+            if (value[off + i] != suffix.value[i]) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    public int lastIndexOf(int ch) {
+        for (int i = value.length - 1; i >= 0; i--) {
+            if (value[i] == ch) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    public int indexOf(String str) {
+        int n = str.value.length;
+        if (n == 0) {
+            return 0;
+        }
+        int last = value.length - n;
+        for (int i = 0; i <= last; i++) {
+            int j = 0;
+            while (j < n && value[i + j] == str.value[j]) {
+                j++;
+            }
+            if (j == n) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    public boolean equalsIgnoreCase(String s) {
+        if (s == null || value.length != s.value.length) {
+            return false;
+        }
+        for (int i = 0; i < value.length; i++) {
+            char a = value[i];
+            char b = s.value[i];
+            if (a != b && lower(a) != lower(b)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static char lower(char c) {
+        return (c >= 'A' && c <= 'Z') ? (char) (c + 32) : c;
+    }
+
+    public char[] toCharArray() {
+        char[] r = new char[value.length];
+        for (int i = 0; i < value.length; i++) {
+            r[i] = value[i];
+        }
+        return r;
+    }
+
+    public String trim() {
+        int start = 0;
+        int end = value.length;
+        while (start < end && value[start] <= ' ') {
+            start++;
+        }
+        while (end > start && value[end - 1] <= ' ') {
+            end--;
+        }
+        return substring(start, end);
+    }
+
+    public String toUpperCase() {
+        char[] r = new char[value.length];
+        for (int i = 0; i < value.length; i++) {
+            char c = value[i];
+            r[i] = (c >= 'a' && c <= 'z') ? (char) (c - 32) : c;
+        }
+        return new String(r);
+    }
+
+    public String toLowerCase() {
+        char[] r = new char[value.length];
+        for (int i = 0; i < value.length; i++) {
+            r[i] = lower(value[i]);
+        }
+        return new String(r);
+    }
+
+    public String replace(char oldChar, char newChar) {
+        char[] r = new char[value.length];
+        for (int i = 0; i < value.length; i++) {
+            r[i] = (value[i] == oldChar) ? newChar : value[i];
+        }
+        return new String(r);
+    }
+
+    public static String valueOf(char c) {
+        char[] r = { c };
+        return new String(r);
+    }
+
+    public static String valueOf(boolean b) {
+        return b ? "true" : "false";
+    }
+
+    public static String valueOf(char[] data) {
+        return new String(data);
+    }
+
+    // Numeric valueOf reuse the VM's decimal/shortest-float formatting.
+    public static native String valueOf(int i);
+
+    public static native String valueOf(long l);
+
+    public static native String valueOf(double d);
+
+    public static native String valueOf(float f);
 }
