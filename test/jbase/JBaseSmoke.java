@@ -90,6 +90,21 @@ public class JBaseSmoke {
         r += "abcabc".replace('a', 'x').indexOf('x'); // 0
         r += "hello world".indexOf("world");       // 6
         r += String.valueOf('Z').charAt(0);        // 'Z' -> 90
+
+        // Boxing: real Integer instances, valueOf cache identity, autobox/unbox.
+        Integer ia = 127;  // autobox -> Integer.valueOf(127) (cached)
+        Integer ib = 127;
+        Integer ic = 128;  // not cached
+        Integer id2 = 128;
+        if (ia == ib) r += 1000000;   // cached -> same instance
+        if (ic != id2) r += 2000000;  // uncached -> distinct instances
+        if (ia.equals(ib)) r += 3000;
+        r += ia.intValue();           // 127
+        r += ic + id2;                // unbox both -> 256
+        r += Integer.parseInt("4567");
+        r += Integer.valueOf(99).intValue();
+        r += Integer.valueOf(5).compareTo(Integer.valueOf(9)); // -1
+        r += Integer.toString(789).length();  // 3
         return r;
     }
 }
