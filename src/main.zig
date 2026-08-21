@@ -74,6 +74,7 @@ fn cmdRun(gpa: std.mem.Allocator, io: std.Io, it: *std.process.Args.Iterator) !v
     const a = arena.allocator();
 
     var loader = IC.Loader.init(gpa);
+    loader.io = io; // portable IO handle for System.out / clocks
     defer loader.deinit();
 
     // Parse the provided class files first. Any class supplied as real bytecode

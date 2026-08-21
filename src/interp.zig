@@ -614,6 +614,9 @@ pub const Loader = struct {
     /// java.lang.Class mirror id per class (lazy, one per class). A GC root:
     /// marked by both collectors and remapped by the compacting major collector.
     mirrors: std.ArrayList(?u32) = .empty,
+    /// Portable IO handle for OS-boundary natives (System.out write, clocks).
+    /// Null under unit tests, which never call those natives.
+    io: ?std.Io = null,
 
     pub fn init(gpa: std.mem.Allocator) Loader {
         return .{ .gpa = gpa };
@@ -2363,18 +2366,9 @@ fn writeStringToFd(f: *Frame, fd: i32, sid: u32) RunError!void {
         };
         bytes.appendSlice(heap.gpa, ebuf[0..n]) catch return error.OutOfMemory;
     }
-    const handle: i32 = @intCast(fd);
-    _ = std.os.linux.write(handle, bytes.items.ptr, bytes.items.len);
-}
-fn nowMillis() i64 {
-    var ts: std.os.linux.timespec = undefined;
-    _ = std.os.linux.clock_gettime(@enumFromInt(0), &ts); // CLOCK_REALTIME
-    return @as(i64, ts.sec) * 1000 + @divTrunc(@as(i64, ts.nsec), 1_000_000);
-}
-fn nowNanos() i64 {
-    var ts: std.os.linux.timespec = undefined;
-    _ = std.os.linux.clock_gettime(@enumFromInt(1), &ts); // CLOCK_MONOTONIC
-    return @as(i64, ts.sec) * 1_000_000_000 + @as(i64, ts.nsec);
+    const io = f.loader.io orelse return; // no IO bound (unit tests): drop output
+    const file = if (fd == 2) std.Io.File.stderr() else std.Io.File.stdout();
+    file.writeStreamingAll(io, bytes.items) catch {};
 }
 fn classOf(heap: *Heap, id: u32) ?*const Class {
     return switch (heap.get(id).*) {
@@ -2462,8 +2456,14 @@ fn nativeInvoke(f: *Frame, owner: *const Class, method: *const Class.Method, slo
         }
     }
     if (std.mem.eql(u8, on, "java/lang/System")) {
-        if (eq2(mn, md, "currentTimeMillis", "()J")) return f.pushLong(nowMillis());
-        if (eq2(mn, md, "nanoTime", "()J")) return f.pushLong(nowNanos());
+        if (eq2(mn, md, "currentTimeMillis", "()J")) {
+            const io = f.loader.io orelse return f.pushLong(0);
+            return f.pushLong(std.Io.Clock.now(.real, io).toMilliseconds());
+        }
+        if (eq2(mn, md, "nanoTime", "()J")) {
+            const io = f.loader.io orelse return f.pushLong(0);
+            return f.pushLong(@truncate(std.Io.Clock.now(.awake, io).toNanoseconds()));
+        }
         if (eq2(mn, md, "identityHashCode", "(Ljava/lang/Object;)I")) {
             const r = switch (slots[method.params[0].slot]) {
                 .reference => |x| x,
