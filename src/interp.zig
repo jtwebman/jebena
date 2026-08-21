@@ -207,7 +207,8 @@ pub const LambdaObj = struct {
     impl_desc: []const u8,
     captures: []Value,
 };
-pub const HeapObj = union(enum) { instance: Instance, array: Array, string: StringObj, lambda: LambdaObj };
+pub const BuilderObj = struct { class: *const Class, buf: []i32, len: usize }; // mutable StringBuilder
+pub const HeapObj = union(enum) { instance: Instance, array: Array, string: StringObj, lambda: LambdaObj, builder: BuilderObj };
 
 const stub_cp_entries = [_]constant_pool.Constant{.unusable};
 const stub_return_code = [_]u8{0xb1}; // just `return`
@@ -247,6 +248,7 @@ pub const Heap = struct {
             .array => |x| self.gpa.free(x.data),
             .string => |x| self.gpa.free(x.chars),
             .lambda => |x| self.gpa.free(x.captures),
+            .builder => |x| self.gpa.free(x.buf),
         };
         self.objects.deinit(self.gpa);
         self.marked.deinit(self.gpa);
@@ -286,6 +288,10 @@ pub const Heap = struct {
     pub fn putLambda(self: *Heap, l: LambdaObj) !u32 {
         return self.put(.{ .lambda = l });
     }
+    pub fn putBuilder(self: *Heap, class: *const Class) !u32 {
+        const buf = try self.gpa.alloc(i32, 16);
+        return self.put(.{ .builder = .{ .class = class, .buf = buf, .len = 0 } });
+    }
     pub fn get(self: *Heap, id: u32) *HeapObj {
         return if (self.objects.items[id]) |*o| o else unreachable;
     }
@@ -310,6 +316,7 @@ fn markObject(heap: *Heap, id: u32) void {
         .array => |x| if (x.elem == .reference) for (x.data) |v| markValue(heap, v),
         .string => {},
         .lambda => |x| for (x.captures) |v| markValue(heap, v),
+        .builder => {},
     }
 }
 fn remapValuePtr(v: *Value, forwarding: []const u32) void {
@@ -335,6 +342,7 @@ fn remapObject(obj: *HeapObj, forwarding: []const u32) void {
         .array => |*x| if (x.elem == .reference) for (x.data) |*v| remapValuePtr(v, forwarding),
         .string => {},
         .lambda => |*x| for (x.captures) |*v| remapValuePtr(v, forwarding),
+        .builder => {},
     }
 }
 
@@ -371,6 +379,7 @@ fn collectMajor(f: *Frame) void {
                     .array => |x| heap.gpa.free(x.data),
                     .string => |x| heap.gpa.free(x.chars),
                     .lambda => |x| heap.gpa.free(x.captures),
+                    .builder => |x| heap.gpa.free(x.buf),
                 }
                 heap.objects.items[old] = null;
             }
@@ -417,6 +426,7 @@ fn markYoungObject(heap: *Heap, id: u32) void {
         .array => |x| if (x.elem == .reference) for (x.data) |v| markYoungValue(heap, v),
         .string => {},
         .lambda => |x| for (x.captures) |v| markYoungValue(heap, v),
+        .builder => {},
     }
 }
 /// Fast, non-moving collection of the young generation. Roots into the young gen
@@ -443,6 +453,7 @@ fn collectMinor(f: *Frame) void {
                 .array => |x| if (x.elem == .reference) for (x.data) |v| markYoungValue(heap, v),
                 .string => {},
                 .lambda => |x| for (x.captures) |v| markYoungValue(heap, v),
+                .builder => {},
             };
         }
     }
@@ -458,6 +469,7 @@ fn collectMinor(f: *Frame) void {
                         .array => |x| heap.gpa.free(x.data),
                         .string => |x| heap.gpa.free(x.chars),
                         .lambda => |x| heap.gpa.free(x.captures),
+                        .builder => |x| heap.gpa.free(x.buf),
                     }
                     heap.objects.items[id] = null;
                     heap.free_list.append(heap.gpa, id) catch {};
@@ -794,6 +806,10 @@ fn doNew(f: *Frame, cls: *const Class, code: []const u8) RunError!void {
     maybeCollect(f);
     const heap = f.heap orelse return error.UnsupportedOpcode;
     const tclass = try resolveClass(f, cls, try refClassName(cls, try u16At(code, f.pc + 1)));
+    if (std.mem.eql(u8, tclass.name, "java/lang/StringBuilder") or std.mem.eql(u8, tclass.name, "java/lang/StringBuffer")) {
+        try f.push(.{ .reference = try heap.putBuilder(tclass) });
+        return;
+    }
     try f.push(.{ .reference = try heap.allocInstance(tclass) });
 }
 
@@ -938,6 +954,7 @@ fn invokeInstance(f: *Frame, cls: *const Class, code: []const u8, is_special: bo
     const mdesc = cls.cp.utf8(nat.descriptor_index) catch return error.LinkError;
 
     if (std.mem.eql(u8, cname, "java/lang/String")) return stringIntrinsic(f, mname, mdesc);
+    if (std.mem.eql(u8, cname, "java/lang/StringBuilder") or std.mem.eql(u8, cname, "java/lang/StringBuffer")) return builderIntrinsic(f, mname, mdesc);
 
     // Bootstrap stub: java/lang/Object.<init> is a no-op (we have no JDK loaded).
     if (is_special and std.mem.eql(u8, mname, "<init>") and std.mem.eql(u8, cname, "java/lang/Object")) {
@@ -1344,6 +1361,78 @@ fn strChars(heap: *Heap, id: u32) RunError![]i32 {
         else => error.LinkError,
     };
 }
+fn builderRef(heap: *Heap, id: u32) RunError!*BuilderObj {
+    return switch (heap.get(id).*) {
+        .builder => |*b| b,
+        else => error.LinkError,
+    };
+}
+fn builderAppend(heap: *Heap, b: *BuilderObj, chars: []const i32) RunError!void {
+    if (b.len + chars.len > b.buf.len) {
+        const newcap = @max(b.len + chars.len, b.buf.len * 2 + 8);
+        b.buf = heap.gpa.realloc(b.buf, newcap) catch return error.OutOfMemory;
+    }
+    @memcpy(b.buf[b.len .. b.len + chars.len], chars);
+    b.len += chars.len;
+}
+fn builderIntrinsic(f: *Frame, mname: []const u8, mdesc: []const u8) RunError!void {
+    const heap = f.heap orelse return error.UnsupportedOpcode;
+    if (std.mem.eql(u8, mname, "<init>")) {
+        const mt = descriptor.parseMethodDescriptor(heap.gpa, mdesc) catch return error.LinkError;
+        defer heap.gpa.free(mt.params);
+        var tmp: std.ArrayList(i32) = .empty;
+        defer tmp.deinit(heap.gpa);
+        if (mt.params.len == 1) {
+            const v = try f.popKind(fieldKind(mt.params[0]));
+            try appendArg(&tmp, heap, v, mt.params[0]);
+        } else if (mt.params.len != 0) {
+            // e.g. (I) initial-capacity: ignore the capacity
+            _ = try f.popKind(fieldKind(mt.params[0]));
+        }
+        const oid = (try f.popRef()) orelse return error.NullPointer;
+        const b = try builderRef(heap, oid);
+        if (tmp.items.len > 0) try builderAppend(heap, b, tmp.items);
+        return;
+    }
+    if (std.mem.eql(u8, mname, "append")) {
+        const mt = descriptor.parseMethodDescriptor(heap.gpa, mdesc) catch return error.LinkError;
+        defer heap.gpa.free(mt.params);
+        if (mt.params.len != 1) return error.UnsupportedOpcode;
+        var tmp: std.ArrayList(i32) = .empty;
+        defer tmp.deinit(heap.gpa);
+        const v = try f.popKind(fieldKind(mt.params[0]));
+        try appendArg(&tmp, heap, v, mt.params[0]);
+        const oid = (try f.popRef()) orelse return error.NullPointer;
+        try builderAppend(heap, try builderRef(heap, oid), tmp.items);
+        try f.push(.{ .reference = oid }); // append returns this
+        return;
+    }
+    if (eq2(mname, mdesc, "toString", "()Ljava/lang/String;")) {
+        const oid = (try f.popRef()) orelse return error.NullPointer;
+        const b = try builderRef(heap, oid);
+        try f.push(.{ .reference = try newString(f, b.buf[0..b.len]) });
+        return;
+    }
+    if (eq2(mname, mdesc, "length", "()I")) {
+        const b = try builderRef(heap, (try f.popRef()) orelse return error.NullPointer);
+        return f.pushInt(@intCast(b.len));
+    }
+    if (eq2(mname, mdesc, "charAt", "(I)C")) {
+        const idx = try f.popInt();
+        const b = try builderRef(heap, (try f.popRef()) orelse return error.NullPointer);
+        if (idx < 0 or idx >= b.len) return error.ArrayIndexOutOfBounds;
+        return f.pushInt(b.buf[@intCast(idx)]);
+    }
+    if (eq2(mname, mdesc, "reverse", "()Ljava/lang/StringBuilder;")) {
+        const oid = (try f.popRef()) orelse return error.NullPointer;
+        const b = try builderRef(heap, oid);
+        std.mem.reverse(i32, b.buf[0..b.len]);
+        try f.push(.{ .reference = oid });
+        return;
+    }
+    return error.UnsupportedOpcode;
+}
+
 fn stringIntrinsic(f: *Frame, name: []const u8, desc: []const u8) RunError!void {
     const heap = f.heap orelse return error.UnsupportedOpcode;
     if (eq2(name, desc, "length", "()I")) return f.pushInt(@intCast((try strChars(heap, (try f.popRef()) orelse return error.NullPointer)).len));
@@ -2506,6 +2595,7 @@ fn exec(alloc: std.mem.Allocator, class: ?*const Class, heap: ?*Heap, loader: *L
                 .instance => |x| result = if (isInstanceOf(x.class, target)) 1 else 0,
                 .string => |x| result = if (isInstanceOf(x.class, target)) 1 else 0,
                 .lambda => |x| result = if (std.mem.eql(u8, x.iface, target)) 1 else 0,
+                .builder => |x| result = if (isInstanceOf(x.class, target)) 1 else 0,
                 .array => {}, // array instanceof: not modeled -> 0
             };
             try f.pushInt(result);
@@ -2521,6 +2611,7 @@ fn exec(alloc: std.mem.Allocator, class: ?*const Class, heap: ?*Heap, loader: *L
                 .instance => |x| if (!isInstanceOf(x.class, target)) return error.LinkError, // ClassCastException (no JDK class yet)
                 .string => |x| if (!isInstanceOf(x.class, target)) return error.LinkError,
                 .lambda => {},
+                .builder => {},
                 .array => {},
             };
             try f.push(.{ .reference = r });

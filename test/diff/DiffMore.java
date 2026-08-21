@@ -88,4 +88,10 @@ public class DiffMore {
     static int concatLoop() { String s = ""; for (int i = 0; i < 20; i++) s = s + i + ","; return s.length() * 100 + s.indexOf("15"); }
     static int concatStr() { String a = "Hello"; String b = "World"; String s = a + ", " + b + "!"; return s.length() * 100 + s.charAt(7); }
     static int concatNeg() { int a = -5; long b = -100L; String s = "a=" + a + " b=" + b; return s.length() * 10 + s.indexOf('-'); }
+
+    static int sbBasic() { StringBuilder sb = new StringBuilder(); sb.append("x=").append(42).append(", ok=").append(true).append(", c=").append('Z'); String r = sb.toString(); return r.length() * 100 + sb.length() + r.charAt(2); }
+    static int sbLoop() { StringBuilder sb = new StringBuilder(); for (int i = 0; i < 30; i++) sb.append(i).append(','); String s = sb.toString(); return s.length() * 100 + s.indexOf("15"); }
+    static int sbChain() { String s = new StringBuilder("abc").append(123).append("def").reverse().toString(); return s.length() * 1000 + s.charAt(0); }
+    static int sbInit() { StringBuilder a = new StringBuilder("hello"); StringBuilder b = new StringBuilder(); b.append(a.toString()).append("!"); return b.length() * 100 + b.toString().charAt(5); }
+    static int sbLong() { StringBuilder sb = new StringBuilder(); sb.append(9999999999L).append('|').append(-42); String s = sb.toString(); return s.length() * 100 + s.indexOf('|'); }
 }
