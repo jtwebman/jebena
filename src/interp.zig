@@ -219,10 +219,18 @@ pub const Heap = struct {
     /// stable across collection (non-moving GC).
     objects: std.ArrayList(?HeapObj) = .empty,
     marked: std.ArrayList(bool) = .empty,
+    /// Generation: true = old (survived a minor collection).
+    old: std.ArrayList(bool) = .empty,
+    /// Remembered set: old objects that may hold references to young objects
+    /// (maintained by the write barrier). Parallel to `objects`.
+    remembered: std.ArrayList(bool) = .empty,
     free_list: std.ArrayList(u32) = .empty,
     allocs_since_gc: usize = 0,
-    /// Collect after this many allocations. Default is effectively off.
+    minor_count: usize = 0,
+    /// Minor collection after this many allocations. Default is effectively off.
     gc_interval: usize = 1 << 20,
+    /// A major (compacting) collection every this many minors.
+    minors_per_major: usize = 8,
 
     pub fn deinit(self: *Heap) void {
         for (self.objects.items) |maybe| if (maybe) |o| switch (o) {
@@ -231,6 +239,8 @@ pub const Heap = struct {
         };
         self.objects.deinit(self.gpa);
         self.marked.deinit(self.gpa);
+        self.old.deinit(self.gpa);
+        self.remembered.deinit(self.gpa);
         self.free_list.deinit(self.gpa);
     }
     fn put(self: *Heap, obj: HeapObj) !u32 {
@@ -239,10 +249,14 @@ pub const Heap = struct {
             self.free_list.items.len -= 1;
             self.objects.items[id] = obj;
             self.marked.items[id] = false;
+            self.old.items[id] = false; // reused slot: new object is young
+            self.remembered.items[id] = false;
             return id;
         }
         try self.objects.append(self.gpa, obj);
         try self.marked.append(self.gpa, false);
+        try self.old.append(self.gpa, false);
+        try self.remembered.append(self.gpa, false);
         return @intCast(self.objects.items.len - 1);
     }
     pub fn allocInstance(self: *Heap, class: *const Class) !u32 {
@@ -308,7 +322,7 @@ fn remapObject(obj: *HeapObj, forwarding: []const u32) void {
 /// new id (roots via the frame parent-chain, statics, pending exception, and the
 /// live object graph). Non-fragmenting; ids change on each collection. Runs at a
 /// `new` safepoint. This is the reference-rewriting machinery LXR/Immix require.
-fn collect(f: *Frame) void {
+fn collectMajor(f: *Frame) void {
     const heap = f.heap orelse return;
     // 1. Mark reachable objects from all roots.
     for (heap.marked.items) |*m| m.* = false;
@@ -347,22 +361,105 @@ fn collect(f: *Frame) void {
     for (heap.objects.items) |*maybe| if (maybe.*) |*obj| remapObject(obj, forwarding);
     if (f.budget.pending) |eid| f.budget.pending = forwarding[eid];
 
-    // 4. Move live objects to their new positions (forwarding[old] <= old, and we
-    //    scan old in increasing order, so this never clobbers an unread slot).
-    for (heap.objects.items, 0..) |maybe, old| {
-        if (maybe) |obj| heap.objects.items[forwarding[old]] = obj;
+    // 4. Move live objects (and their generation/remembered bits) to new slots.
+    for (heap.objects.items, 0..) |maybe, oid| {
+        if (maybe) |obj| {
+            const nid = forwarding[oid];
+            heap.objects.items[nid] = obj;
+            heap.old.items[nid] = heap.old.items[oid];
+            heap.remembered.items[nid] = heap.remembered.items[oid];
+        }
     }
     heap.objects.items.len = live;
     heap.marked.items.len = live;
+    heap.old.items.len = live;
+    heap.remembered.items.len = live;
     heap.free_list.items.len = 0;
+}
+
+// --- Generational minor collection (non-moving mark-sweep of the young gen) ---
+
+fn markYoungValue(heap: *Heap, v: Value) void {
+    switch (v) {
+        .reference => |r| if (r) |id| markYoungObject(heap, id),
+        else => {},
+    }
+}
+fn markYoungObject(heap: *Heap, id: u32) void {
+    if (heap.old.items[id]) return; // old objects are not collected by a minor GC
+    if (heap.marked.items[id]) return;
+    heap.marked.items[id] = true;
+    switch (heap.get(id).*) {
+        .instance => |x| for (x.fields) |v| markYoungValue(heap, v),
+        .array => |x| if (x.elem == .reference) for (x.data) |v| markYoungValue(heap, v),
+    }
+}
+/// Fast, non-moving collection of the young generation. Roots into the young gen
+/// come from the frame chain, statics, the pending exception, and the remembered
+/// set (old objects that hold references to young objects). Survivors are promoted
+/// to the old generation. Since all survivors become old, no young objects remain
+/// afterward, so the remembered set is cleared.
+fn collectMinor(f: *Frame) void {
+    const heap = f.heap orelse return;
+    for (heap.marked.items) |*m| m.* = false;
+    var fr: ?*Frame = f;
+    while (fr) |ff| {
+        for (ff.stack[0..ff.sp]) |v| markYoungValue(heap, v);
+        for (ff.locals) |v| markYoungValue(heap, v);
+        fr = ff.parent;
+    }
+    for (f.loader.statics.items) |st| for (st) |v| markYoungValue(heap, v);
+    if (f.budget.pending) |eid| markYoungObject(heap, eid);
+    var id: u32 = 0;
+    while (id < heap.objects.items.len) : (id += 1) {
+        if (heap.remembered.items[id]) {
+            if (heap.objects.items[id]) |obj| switch (obj) {
+                .instance => |x| for (x.fields) |v| markYoungValue(heap, v),
+                .array => |x| if (x.elem == .reference) for (x.data) |v| markYoungValue(heap, v),
+            };
+        }
+    }
+    id = 0;
+    while (id < heap.objects.items.len) : (id += 1) {
+        if (heap.objects.items[id]) |obj| {
+            if (!heap.old.items[id]) {
+                if (heap.marked.items[id]) {
+                    heap.old.items[id] = true; // promote survivor
+                } else {
+                    switch (obj) {
+                        .instance => |x| heap.gpa.free(x.fields),
+                        .array => |x| heap.gpa.free(x.data),
+                    }
+                    heap.objects.items[id] = null;
+                    heap.free_list.append(heap.gpa, id) catch {};
+                }
+            }
+        }
+    }
+    for (heap.remembered.items) |*r| r.* = false;
+}
+
+/// Write barrier: record an old object that now references a young object.
+fn writeBarrier(heap: *Heap, target_id: u32, v: Value) void {
+    switch (v) {
+        .reference => |r| if (r) |vid| {
+            if (heap.old.items[target_id] and !heap.old.items[vid]) heap.remembered.items[target_id] = true;
+        },
+        else => {},
+    }
 }
 
 fn maybeCollect(f: *Frame) void {
     const heap = f.heap orelse return;
     heap.allocs_since_gc += 1;
     if (heap.allocs_since_gc >= heap.gc_interval) {
-        collect(f);
         heap.allocs_since_gc = 0;
+        heap.minor_count += 1;
+        if (heap.minors_per_major != 0 and heap.minor_count % heap.minors_per_major == 0) {
+            collectMajor(f);
+        } else {
+            collectMinor(f);
+        }
     }
 }
 
@@ -648,6 +745,7 @@ fn doPutField(f: *Frame, cls: *const Class, code: []const u8) RunError!void {
     };
     const fi = inst.class.findField(fname) orelse return error.LinkError;
     inst.fields[fi] = value;
+    writeBarrier(heap, oid, value);
 }
 
 fn atypeKind(atype: usize) RunError!Kind {
@@ -684,7 +782,7 @@ fn doArrayLength(f: *Frame) RunError!void {
     };
     try f.pushInt(@intCast(arr.data.len));
 }
-fn arrayIndex(f: *Frame) RunError!struct { arr: *Array, i: usize } {
+fn arrayIndex(f: *Frame) RunError!struct { arr: *Array, i: usize, oid: u32 } {
     const idx = try f.popInt();
     const oid = (try f.popRef()) orelse return error.NullPointer;
     const heap = f.heap orelse return error.UnsupportedOpcode;
@@ -695,7 +793,7 @@ fn arrayIndex(f: *Frame) RunError!struct { arr: *Array, i: usize } {
     if (idx < 0) return error.ArrayIndexOutOfBounds;
     const ui: usize = @intCast(idx);
     if (ui >= arr.data.len) return error.ArrayIndexOutOfBounds;
-    return .{ .arr = arr, .i = ui };
+    return .{ .arr = arr, .i = ui, .oid = oid };
 }
 
 fn invokeInstance(f: *Frame, cls: *const Class, code: []const u8, is_special: bool) RunError!void {
@@ -1511,6 +1609,7 @@ fn exec(alloc: std.mem.Allocator, class: ?*const Class, heap: ?*Heap, loader: *L
             const v = try f.pop();
             const ai = try arrayIndex(&f);
             ai.arr.data[ai.i] = v;
+            if (f.heap) |hp| writeBarrier(hp, ai.oid, v);
             f.pc += 1;
             continue :sw try step(&f, code);
         },
@@ -2338,4 +2437,39 @@ test "finally blocks (try-catch-finally, normal + exceptional + nested)" {
     // nestedFinally(-1): throw, inner-finally +10 = 10, outer catch +100 = 110
     b = Budget{};
     try testing.expectEqual(Value{ .int = 110 }, (try runInLoader(&loader, &fin, "nestedFinally", "(I)I", &.{.{ .int = -1 }}, &b)).?);
+}
+
+test "generational GC: write barrier keeps old->young references alive" {
+    var cfn = try ClassFile.parse(testing.allocator, @embedFile("testdata/Node.class"));
+    defer cfn.deinit();
+    var cfg = try ClassFile.parse(testing.allocator, @embedFile("testdata/GenTest.class"));
+    defer cfg.deinit();
+    var aa = std.heap.ArenaAllocator.init(testing.allocator);
+    defer aa.deinit();
+    const node = try Class.init(testing.allocator, aa.allocator(), &cfn, null);
+    const gt = try Class.init(testing.allocator, aa.allocator(), &cfg, null);
+    var loader = Loader.init(testing.allocator);
+    defer loader.deinit();
+    try loader.register(&node);
+    try loader.register(&gt);
+
+    // oldToYoung(100): keeper is promoted to old, then keeper.next = young node.
+    // With the barrier, the young node survives minor GCs -> 42. Without it, the
+    // node would be swept and this would return garbage or crash.
+    {
+        var heap = Heap{ .gpa = testing.allocator, .gc_interval = 4, .minors_per_major = 6 };
+        defer heap.deinit();
+        var b = Budget{};
+        try testing.expectEqual(Value{ .int = 42 }, (try runInLoaderWithHeap(&loader, &gt, "oldToYoung", "(I)I", &.{.{ .int = 100 }}, &b, &heap)).?);
+    }
+    // garbageStaysSmall(2000): all Nodes are garbage; minor GC keeps the table tiny.
+    {
+        var heap = Heap{ .gpa = testing.allocator, .gc_interval = 8, .minors_per_major = 6 };
+        defer heap.deinit();
+        var b = Budget{};
+        const r = try runInLoaderWithHeap(&loader, &gt, "garbageStaysSmall", "(I)I", &.{.{ .int = 2000 }}, &b, &heap);
+        // sum of i for i in 0..1999 = 1999000
+        try testing.expectEqual(Value{ .int = 1999000 }, r.?);
+        try testing.expect(heap.liveCount() < 64);
+    }
 }
