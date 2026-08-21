@@ -52,4 +52,12 @@ public class DiffMore {
     static int copyOverlap() { int[] a = { 1, 2, 3, 4, 5, 6, 7, 8 }; System.arraycopy(a, 0, a, 2, 4); int s = 0; for (int v : a) s = s * 10 + v; return s; }
     static int copyGrow() { int[] a = { 5, 6, 7 }; for (int k = 0; k < 6; k++) { int[] b = new int[a.length * 2]; System.arraycopy(a, 0, b, 0, a.length); a = b; } int s = 0; for (int v : a) s += v; return s; }
     static int copyLong() { long[] a = { 10L, 20L, 30L }; long[] b = new long[3]; System.arraycopy(a, 0, b, 0, 3); return (int) (b[0] + b[1] + b[2]); }
+
+    static int iBits() { int x = 0xF0F0F0F0; return Integer.bitCount(x) * 1000 + Integer.numberOfLeadingZeros(x) * 10 + Integer.numberOfTrailingZeros(x); }
+    static int iBits2() { return Integer.highestOneBit(0x1234) + Integer.lowestOneBit(0x1234) + Integer.reverseBytes(0x12345678) / 65536; }
+    static int iRotate() { int x = 0x12345678; return Integer.rotateLeft(x, 8) ^ Integer.rotateRight(x, 8); }
+    static int iReverse() { return Integer.reverse(1) + Integer.reverse(-2147483648); }
+    static int lBits() { long x = 0xF0F0F0F0F0F0F0F0L; return Long.bitCount(x) * 100 + Long.numberOfTrailingZeros(x); }
+    static int iMinMax() { return Integer.max(-5, 3) * 100 + Integer.min(-5, 3) + Integer.signum(-99) * 10; }
+    static int bitLoop() { int s = 0; for (int i = 1; i <= 1000; i++) s += Integer.bitCount(i) + Integer.numberOfTrailingZeros(i); return s; }
 }

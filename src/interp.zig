@@ -1048,6 +1048,66 @@ fn mathIntrinsic(f: *Frame, name: []const u8, desc: []const u8) RunError!void {
     return error.UnsupportedOpcode;
 }
 
+fn integerIntrinsic(f: *Frame, name: []const u8, desc: []const u8) RunError!void {
+    if (eq2(name, desc, "bitCount", "(I)I")) return f.pushInt(@popCount(try f.popInt()));
+    if (eq2(name, desc, "numberOfLeadingZeros", "(I)I")) return f.pushInt(@clz(@as(u32, @bitCast(try f.popInt()))));
+    if (eq2(name, desc, "numberOfTrailingZeros", "(I)I")) return f.pushInt(@ctz(@as(u32, @bitCast(try f.popInt()))));
+    if (eq2(name, desc, "reverse", "(I)I")) return f.pushInt(@bitReverse(try f.popInt()));
+    if (eq2(name, desc, "reverseBytes", "(I)I")) return f.pushInt(@byteSwap(try f.popInt()));
+    if (eq2(name, desc, "highestOneBit", "(I)I")) {
+        const x = @as(u32, @bitCast(try f.popInt()));
+        const r: u32 = if (x == 0) 0 else @as(u32, 1) << @intCast(31 - @clz(x));
+        return f.pushInt(@bitCast(r));
+    }
+    if (eq2(name, desc, "lowestOneBit", "(I)I")) {
+        const x = try f.popInt();
+        return f.pushInt(x & (0 -% x));
+    }
+    if (eq2(name, desc, "rotateLeft", "(II)I")) {
+        const d = try f.popInt();
+        const x = @as(u32, @bitCast(try f.popInt()));
+        return f.pushInt(@bitCast(std.math.rotl(u32, x, d)));
+    }
+    if (eq2(name, desc, "rotateRight", "(II)I")) {
+        const d = try f.popInt();
+        const x = @as(u32, @bitCast(try f.popInt()));
+        return f.pushInt(@bitCast(std.math.rotr(u32, x, d)));
+    }
+    if (eq2(name, desc, "max", "(II)I")) {
+        const b = try f.popInt();
+        const a = try f.popInt();
+        return f.pushInt(@max(a, b));
+    }
+    if (eq2(name, desc, "min", "(II)I")) {
+        const b = try f.popInt();
+        const a = try f.popInt();
+        return f.pushInt(@min(a, b));
+    }
+    if (eq2(name, desc, "signum", "(I)I")) {
+        const x = try f.popInt();
+        return f.pushInt(if (x > 0) @as(i32, 1) else if (x < 0) @as(i32, -1) else 0);
+    }
+    return error.UnsupportedOpcode;
+}
+fn longIntrinsic(f: *Frame, name: []const u8, desc: []const u8) RunError!void {
+    if (eq2(name, desc, "bitCount", "(J)I")) return f.pushInt(@popCount(try f.popLong()));
+    if (eq2(name, desc, "numberOfLeadingZeros", "(J)I")) return f.pushInt(@clz(@as(u64, @bitCast(try f.popLong()))));
+    if (eq2(name, desc, "numberOfTrailingZeros", "(J)I")) return f.pushInt(@ctz(@as(u64, @bitCast(try f.popLong()))));
+    if (eq2(name, desc, "reverse", "(J)J")) return f.pushLong(@bitReverse(try f.popLong()));
+    if (eq2(name, desc, "reverseBytes", "(J)J")) return f.pushLong(@byteSwap(try f.popLong()));
+    if (eq2(name, desc, "max", "(JJ)J")) {
+        const b = try f.popLong();
+        const a = try f.popLong();
+        return f.pushLong(@max(a, b));
+    }
+    if (eq2(name, desc, "min", "(JJ)J")) {
+        const b = try f.popLong();
+        const a = try f.popLong();
+        return f.pushLong(@min(a, b));
+    }
+    return error.UnsupportedOpcode;
+}
+
 fn systemIntrinsic(f: *Frame, name: []const u8, desc: []const u8) RunError!void {
     if (eq2(name, desc, "arraycopy", "(Ljava/lang/Object;ILjava/lang/Object;II)V")) {
         const length = try f.popInt();
@@ -1104,6 +1164,8 @@ fn invokeStatic(f: *Frame, cls: *const Class, code: []const u8) RunError!void {
     const owner_name = try refClassName(cls, ref.class_index);
     if (std.mem.eql(u8, owner_name, "java/lang/Math")) return mathIntrinsic(f, mname, mdesc);
     if (std.mem.eql(u8, owner_name, "java/lang/System")) return systemIntrinsic(f, mname, mdesc);
+    if (std.mem.eql(u8, owner_name, "java/lang/Integer")) return integerIntrinsic(f, mname, mdesc);
+    if (std.mem.eql(u8, owner_name, "java/lang/Long")) return longIntrinsic(f, mname, mdesc);
     const tclass = try resolveClass(f, cls, try refClassName(cls, ref.class_index));
     const tr = tclass.resolve(mname, mdesc) orelse return error.MethodNotFound;
     const target = tr.method;
