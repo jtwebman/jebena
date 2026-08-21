@@ -26,7 +26,7 @@ Working list. Check off as done; commit each. Ordered roughly by dependency.
 - [ ] structural bytecode checks wired into verify (branch targets, etc.)
 
 ## Class loading / linking
-- [ ] a ClassLoader-ish registry; resolve other classes (not just same-class)
+- [x] Loader registry + cross-class resolution (statics, new, invokestatic, instance dispatch on receiver class); [ ] classpath search + superclass hierarchy walk
 - [ ] lazy resolution + quickening (per 02 design)
 
 ## Infra

@@ -69,6 +69,7 @@ const Frame = struct {
     pc: usize = 0,
     budget: *Budget,
     heap: ?*Heap = null,
+    loader: *Loader = undefined,
 
     fn push(f: *Frame, v: Value) RunError!void {
         if (f.sp >= f.stack.len) return error.StackOverflow;
@@ -208,7 +209,6 @@ fn defaultValue(k: Kind) Value {
 pub const Heap = struct {
     gpa: std.mem.Allocator,
     objects: std.ArrayList(HeapObj) = .empty,
-    statics: []Value = &.{},
 
     pub fn deinit(self: *Heap) void {
         for (self.objects.items) |o| switch (o) {
@@ -216,7 +216,6 @@ pub const Heap = struct {
             .array => |x| self.gpa.free(x.data),
         };
         self.objects.deinit(self.gpa);
-        if (self.statics.len != 0) self.gpa.free(self.statics);
     }
     pub fn allocInstance(self: *Heap, class: *const Class) !u32 {
         const fields = try self.gpa.alloc(Value, class.instance_fields.len);
@@ -272,6 +271,60 @@ fn branch(pc: usize, offset: i32, code_len: usize) RunError!usize {
     if (target < 0 or target >= code_len) return error.BadBranch;
     return @intCast(target);
 }
+
+/// A class registry: name -> Class, with per-class mutable static storage and
+/// lazy <clinit>. This is the beginning of a class loader; classes are still
+/// preloaded by the caller (no classpath search yet).
+pub const Loader = struct {
+    gpa: std.mem.Allocator,
+    classes: std.ArrayList(*const Class) = .empty,
+    statics: std.ArrayList([]Value) = .empty,
+    initialized: std.ArrayList(bool) = .empty,
+
+    pub fn init(gpa: std.mem.Allocator) Loader {
+        return .{ .gpa = gpa };
+    }
+    pub fn deinit(self: *Loader) void {
+        for (self.statics.items) |st| self.gpa.free(st);
+        self.statics.deinit(self.gpa);
+        self.classes.deinit(self.gpa);
+        self.initialized.deinit(self.gpa);
+    }
+    pub fn register(self: *Loader, class: *const Class) !void {
+        const st = try self.gpa.alloc(Value, class.static_fields.len);
+        for (st, class.static_fields) |*sv, sf| sv.* = defaultValue(sf.kind);
+        try self.classes.append(self.gpa, class);
+        try self.statics.append(self.gpa, st);
+        try self.initialized.append(self.gpa, false);
+    }
+    fn indexOf(self: *const Loader, class: *const Class) ?usize {
+        for (self.classes.items, 0..) |c, i| {
+            if (c == class) return i;
+        }
+        return null;
+    }
+    pub fn find(self: *const Loader, name: []const u8) ?*const Class {
+        for (self.classes.items) |c| {
+            if (std.mem.eql(u8, c.name, name)) return c;
+        }
+        return null;
+    }
+    fn staticsOf(self: *Loader, class: *const Class) RunError![]Value {
+        const i = self.indexOf(class) orelse return error.LinkError;
+        return self.statics.items[i];
+    }
+    /// Run <clinit> once for `class` (and register it if unseen).
+    fn ensureInit(self: *Loader, class: *const Class, heap: *Heap, budget: *Budget) RunError!void {
+        const i = self.indexOf(class) orelse return error.LinkError;
+        if (self.initialized.items[i]) return;
+        self.initialized.items[i] = true;
+        if (class.find("<clinit>", "()V")) |ci| {
+            if (ci.code) |cc| {
+                _ = try exec(self.gpa, class, heap, self, budget, cc.code, cc.max_stack, cc.max_locals, &.{});
+            }
+        }
+    }
+};
 
 pub const Class = struct {
     gpa: std.mem.Allocator,
@@ -378,17 +431,6 @@ pub const Class = struct {
         return null;
     }
 
-    fn initStatics(self: *const Class, heap: *Heap, budget: *Budget) RunError!void {
-        heap.statics = try self.gpa.alloc(Value, self.static_fields.len);
-        for (heap.statics, self.static_fields) |*sv, sf| sv.* = defaultValue(sf.kind);
-        // Run the class initializer if present (sets non-constant statics).
-        if (self.find("<clinit>", "()V")) |ci| {
-            if (ci.code) |cc| {
-                _ = try exec(self.gpa, self, heap, budget, cc.code, cc.max_stack, cc.max_locals, &.{});
-            }
-        }
-    }
-
     fn find(self: *const Class, name: []const u8, desc: []const u8) ?*const Method {
         for (self.methods) |*m| {
             if (std.mem.eql(u8, m.name, name) and std.mem.eql(u8, m.descriptor, desc)) return m;
@@ -396,26 +438,11 @@ pub const Class = struct {
         return null;
     }
 
-    /// Lay out logical argument values into a slot buffer (category-2 gets a top).
-    fn layoutArgs(m: *const Method, args: []const Value, out: []Value) RunError!usize {
-        if (args.len != m.params.len) return error.LinkError;
-        for (m.params, 0..) |p, i| {
-            out[p.slot] = args[i];
-            if (p.kind == .long or p.kind == .double) out[p.slot + 1] = .top;
-        }
-        return m.arg_slots;
-    }
-
     pub fn callStaticValues(self: *const Class, name: []const u8, desc: []const u8, args: []const Value, budget: *Budget) RunError!?Value {
-        const m = self.find(name, desc) orelse return error.MethodNotFound;
-        const c = m.code orelse return error.LinkError;
-        var slots: [256]Value = undefined;
-        if (m.arg_slots > slots.len) return error.LinkError;
-        const n = try layoutArgs(m, args, &slots);
-        var heap = Heap{ .gpa = self.gpa };
-        defer heap.deinit();
-        try self.initStatics(&heap, budget);
-        return exec(self.gpa, self, &heap, budget, c.code, c.max_stack, c.max_locals, slots[0..n]);
+        var loader = Loader.init(self.gpa);
+        defer loader.deinit();
+        try loader.register(self);
+        return runInLoader(&loader, self, name, desc, args, budget);
     }
 
     /// Convenience for int-argument methods with a fresh budget.
@@ -452,9 +479,8 @@ fn fieldName(cls: *const Class, cp_index: u16) RunError![]const u8 {
 
 fn doNew(f: *Frame, cls: *const Class, code: []const u8) RunError!void {
     const heap = f.heap orelse return error.UnsupportedOpcode;
-    const cname = try refClassName(cls, try u16At(code, f.pc + 1));
-    if (!std.mem.eql(u8, cname, cls.name)) return error.UnsupportedOpcode; // only self-class for now
-    try f.push(.{ .reference = try heap.allocInstance(cls) });
+    const tclass = try resolveClass(f, cls, try refClassName(cls, try u16At(code, f.pc + 1)));
+    try f.push(.{ .reference = try heap.allocInstance(tclass) });
 }
 
 fn doGetField(f: *Frame, cls: *const Class, code: []const u8) RunError!void {
@@ -549,26 +575,81 @@ fn invokeInstance(f: *Frame, cls: *const Class, code: []const u8, is_special: bo
         return;
     }
 
-    // Single-class resolution (true virtual dispatch across a hierarchy is future work).
-    const target = cls.find(mname, mdesc) orelse return error.MethodNotFound;
+    // Declared class (from the ref) gives the param layout. Pop args + this.
+    const dclass = try resolveClass(f, cls, cname);
+    const decl = dclass.find(mname, mdesc) orelse return error.MethodNotFound;
     var slots: [256]Value = undefined;
-    if (target.arg_slots > slots.len) return error.LinkError;
-    var i: usize = target.params.len;
+    if (decl.arg_slots > slots.len) return error.LinkError;
+    var i: usize = decl.params.len;
     while (i > 0) {
         i -= 1;
-        const p = target.params[i];
+        const p = decl.params[i];
         slots[p.slot] = try f.popKind(p.kind);
         if (p.kind == .long or p.kind == .double) slots[p.slot + 1] = .top;
     }
     const oid = (try f.popRef()) orelse return error.NullPointer;
     slots[0] = .{ .reference = oid };
 
+    // Dispatch: invokespecial uses the declared class; invokevirtual uses the
+    // receiver's actual class (single-level: no superclass walk yet).
+    const heap = f.heap orelse return error.UnsupportedOpcode;
+    const rclass = if (is_special) dclass else switch (heap.get(oid).*) {
+        .instance => |x| x.class,
+        else => return error.LinkError,
+    };
+    const target = rclass.find(mname, mdesc) orelse return error.MethodNotFound;
+
     if (f.budget.depth >= f.budget.max_depth) return error.CallDepthExceeded;
     f.budget.depth += 1;
     defer f.budget.depth -= 1;
     const cc = target.code orelse return error.LinkError;
-    const ret = try exec(cls.gpa, cls, f.heap, f.budget, cc.code, cc.max_stack, cc.max_locals, slots[0..target.arg_slots]);
+    const ret = try exec(rclass.gpa, rclass, f.heap, f.loader, f.budget, cc.code, cc.max_stack, cc.max_locals, slots[0..decl.arg_slots]);
     if (ret) |rv| try f.pushKind(rv);
+}
+
+const FieldRefInfo = struct { class_name: []const u8, field_name: []const u8 };
+fn fieldRef(cls: *const Class, cp_index: u16) RunError!FieldRefInfo {
+    const c = cls.cp.get(cp_index) catch return error.LinkError;
+    const ref = switch (c.*) {
+        .fieldref => |r| r,
+        else => return error.LinkError,
+    };
+    const nat = switch ((cls.cp.get(ref.name_and_type_index) catch return error.LinkError).*) {
+        .name_and_type => |x| x,
+        else => return error.LinkError,
+    };
+    return .{
+        .class_name = try refClassName(cls, ref.class_index),
+        .field_name = cls.cp.utf8(nat.name_index) catch return error.LinkError,
+    };
+}
+
+fn resolveClass(f: *Frame, current: *const Class, name: []const u8) RunError!*const Class {
+    if (std.mem.eql(u8, name, current.name)) return current;
+    return f.loader.find(name) orelse error.LinkError;
+}
+
+fn layoutArgs(m: *const Class.Method, args: []const Value, out: []Value) RunError!usize {
+    if (args.len != m.params.len) return error.LinkError;
+    for (m.params, 0..) |p, i| {
+        out[p.slot] = args[i];
+        if (p.kind == .long or p.kind == .double) out[p.slot + 1] = .top;
+    }
+    return m.arg_slots;
+}
+
+/// Run a static method by name in a (multi-class) loader. Initializes all
+/// registered classes first (eager; lazy init is future work).
+pub fn runInLoader(loader: *Loader, class: *const Class, name: []const u8, desc: []const u8, args: []const Value, budget: *Budget) RunError!?Value {
+    var heap = Heap{ .gpa = loader.gpa };
+    defer heap.deinit();
+    for (loader.classes.items) |c| try loader.ensureInit(c, &heap, budget);
+    const m = class.find(name, desc) orelse return error.MethodNotFound;
+    const c = m.code orelse return error.LinkError;
+    var slots: [256]Value = undefined;
+    if (m.arg_slots > slots.len) return error.LinkError;
+    const n = try layoutArgs(m, args, &slots);
+    return exec(loader.gpa, class, &heap, loader, budget, c.code, c.max_stack, c.max_locals, slots[0..n]);
 }
 
 fn invokeStatic(f: *Frame, cls: *const Class, code: []const u8) RunError!void {
@@ -584,17 +665,16 @@ fn invokeStatic(f: *Frame, cls: *const Class, code: []const u8) RunError!void {
     };
     const mname = cls.cp.utf8(nat.name_index) catch return error.LinkError;
     const mdesc = cls.cp.utf8(nat.descriptor_index) catch return error.LinkError;
-    const target = cls.find(mname, mdesc) orelse return error.MethodNotFound;
+    const tclass = try resolveClass(f, cls, try refClassName(cls, ref.class_index));
+    const target = tclass.find(mname, mdesc) orelse return error.MethodNotFound;
 
-    // Pop args (reverse order) into the callee's slot layout.
     var slots: [256]Value = undefined;
     if (target.arg_slots > slots.len) return error.LinkError;
     var i: usize = target.params.len;
     while (i > 0) {
         i -= 1;
         const p = target.params[i];
-        const v = try f.popKind(p.kind);
-        slots[p.slot] = v;
+        slots[p.slot] = try f.popKind(p.kind);
         if (p.kind == .long or p.kind == .double) slots[p.slot + 1] = .top;
     }
 
@@ -602,7 +682,7 @@ fn invokeStatic(f: *Frame, cls: *const Class, code: []const u8) RunError!void {
     f.budget.depth += 1;
     defer f.budget.depth -= 1;
     const c = target.code orelse return error.LinkError;
-    const ret = try exec(cls.gpa, cls, f.heap, f.budget, c.code, c.max_stack, c.max_locals, slots[0..target.arg_slots]);
+    const ret = try exec(tclass.gpa, tclass, f.heap, f.loader, f.budget, c.code, c.max_stack, c.max_locals, slots[0..target.arg_slots]);
     if (ret) |rv| try f.pushKind(rv);
 }
 
@@ -623,7 +703,7 @@ fn loadConstant2(f: *Frame, class: ?*const Class, index: u16) RunError!void {
     }
 }
 
-fn exec(alloc: std.mem.Allocator, class: ?*const Class, heap: ?*Heap, budget: *Budget, code: []const u8, max_stack: u16, max_locals: u16, arg_slots: []const Value) RunError!?Value {
+fn exec(alloc: std.mem.Allocator, class: ?*const Class, heap: ?*Heap, loader: *Loader, budget: *Budget, code: []const u8, max_stack: u16, max_locals: u16, arg_slots: []const Value) RunError!?Value {
     if (arg_slots.len > max_locals) return error.BadLocal;
     const stack = try alloc.alloc(Value, max_stack);
     defer alloc.free(stack);
@@ -632,7 +712,7 @@ fn exec(alloc: std.mem.Allocator, class: ?*const Class, heap: ?*Heap, budget: *B
     for (locals) |*l| l.* = .{ .int = 0 };
     for (arg_slots, 0..) |v, i| locals[i] = v;
 
-    var f = Frame{ .stack = stack, .locals = locals, .budget = budget, .heap = heap };
+    var f = Frame{ .stack = stack, .locals = locals, .budget = budget, .heap = heap, .loader = loader };
 
     sw: switch (try opAt(code, f.pc)) {
         .nop => {
@@ -1262,20 +1342,20 @@ fn exec(alloc: std.mem.Allocator, class: ?*const Class, heap: ?*Heap, budget: *B
         },
         .getstatic => {
             const cls = class orelse return error.UnsupportedOpcode;
-            const hp = f.heap orelse return error.UnsupportedOpcode;
-            const fname = try fieldName(cls, try u16At(code, f.pc + 1));
-            const si = cls.findStatic(fname) orelse return error.LinkError;
-            try f.pushKind(hp.statics[si]);
+            const fr = try fieldRef(cls, try u16At(code, f.pc + 1));
+            const dcls = try resolveClass(&f, cls, fr.class_name);
+            const si = dcls.findStatic(fr.field_name) orelse return error.LinkError;
+            try f.pushKind((try f.loader.staticsOf(dcls))[si]);
             f.pc += 3;
             continue :sw try step(&f, code);
         },
         .putstatic => {
             const cls = class orelse return error.UnsupportedOpcode;
-            const hp = f.heap orelse return error.UnsupportedOpcode;
-            const fname = try fieldName(cls, try u16At(code, f.pc + 1));
-            const si = cls.findStatic(fname) orelse return error.LinkError;
-            const kind = cls.static_fields[si].kind;
-            hp.statics[si] = try f.popKind(kind);
+            const fr = try fieldRef(cls, try u16At(code, f.pc + 1));
+            const dcls = try resolveClass(&f, cls, fr.class_name);
+            const si = dcls.findStatic(fr.field_name) orelse return error.LinkError;
+            const kind = dcls.static_fields[si].kind;
+            (try f.loader.staticsOf(dcls))[si] = try f.popKind(kind);
             f.pc += 3;
             continue :sw try step(&f, code);
         },
@@ -1303,10 +1383,12 @@ pub fn runInt(a: std.mem.Allocator, code: []const u8, max_stack: u16, max_locals
 }
 pub fn runIntBudgeted(a: std.mem.Allocator, code: []const u8, max_stack: u16, max_locals: u16, args: []const i32, max_steps: usize) RunError!?i32 {
     var b = Budget{ .max_steps = max_steps };
+    var loader = Loader.init(a);
+    defer loader.deinit();
     var buf: [64]Value = undefined;
     if (args.len > buf.len) return error.BadLocal;
     for (args, 0..) |x, i| buf[i] = .{ .int = x };
-    const r = try exec(a, null, null, &b, code, max_stack, max_locals, buf[0..args.len]);
+    const r = try exec(a, null, null, &loader, &b, code, max_stack, max_locals, buf[0..args.len]);
     return if (r) |v| switch (v) {
         .int => |x| x,
         else => error.TypeMismatch,
@@ -1675,10 +1757,41 @@ test "object-capable interpreter survives arbitrary bytecode (heap + class conte
         const ml = rand.intRangeAtMost(u16, 0, 8);
         var heap = Heap{ .gpa = testing.allocator };
         defer heap.deinit();
+        var loader = Loader.init(testing.allocator);
+        defer loader.deinit();
+        try loader.register(&cls);
         var b = Budget{ .max_steps = 3000 };
         // Random bytecode against a real class + heap. Any error is fine; a crash,
         // leak, or out-of-bounds is not. References cannot be forged from ints, so
         // heap access stays valid.
-        _ = exec(testing.allocator, &cls, &heap, &b, buf[0..len], ms, ml, &.{}) catch {};
+        _ = exec(testing.allocator, &cls, &heap, &loader, &b, buf[0..len], ms, ml, &.{}) catch {};
     }
+}
+
+test "multi-class: A references B (static call, static field, new, instance method)" {
+    const bytes_a = @embedFile("testdata/A.class");
+    const bytes_b = @embedFile("testdata/B.class");
+    var cfa = try ClassFile.parse(testing.allocator, bytes_a);
+    defer cfa.deinit();
+    var cfb = try ClassFile.parse(testing.allocator, bytes_b);
+    defer cfb.deinit();
+    var aa = std.heap.ArenaAllocator.init(testing.allocator);
+    defer aa.deinit();
+    const clsA = try Class.init(testing.allocator, aa.allocator(), &cfa);
+    const clsB = try Class.init(testing.allocator, aa.allocator(), &cfb);
+
+    var loader = Loader.init(testing.allocator);
+    defer loader.deinit();
+    try loader.register(&clsA);
+    try loader.register(&clsB);
+
+    var b = Budget{};
+    // A.useSquares(3) = B.square(3) + B.square(4) = 9 + 16 = 25  (cross-class invokestatic)
+    try testing.expectEqual(Value{ .int = 25 }, (try runInLoader(&loader, &clsA, "useSquares", "(I)I", &.{.{ .int = 3 }}, &b)).?);
+    // A.makeAndGet(42): new B(42).get() = 42  (cross-class new + <init> + invokevirtual)
+    b = Budget{};
+    try testing.expectEqual(Value{ .int = 42 }, (try runInLoader(&loader, &clsA, "makeAndGet", "(I)I", &.{.{ .int = 42 }}, &b)).?);
+    // A.viaCounter(3,4): B.counter += 3 (=3), then += 4 (=7); returns 7  (cross-class static field)
+    b = Budget{};
+    try testing.expectEqual(Value{ .int = 7 }, (try runInLoader(&loader, &clsA, "viaCounter", "(II)I", &.{ .{ .int = 3 }, .{ .int = 4 } }, &b)).?);
 }
