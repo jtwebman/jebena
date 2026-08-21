@@ -279,11 +279,38 @@ fn markObject(heap: *Heap, id: u32) void {
         .array => |x| if (x.elem == .reference) for (x.data) |v| markValue(heap, v),
     }
 }
-/// Stop-the-world mark-sweep. Roots: every active frame's operand stack and
-/// locals (walked via the parent chain), all static fields, and any pending
-/// exception. Runs at a `new` safepoint, so all frames are live on the stack.
+fn remapValuePtr(v: *Value, forwarding: []const u32) void {
+    switch (v.*) {
+        .reference => |r| if (r) |id| {
+            v.* = .{ .reference = forwarding[id] };
+        },
+        else => {},
+    }
+}
+fn remapRoots(f: *Frame, forwarding: []const u32) void {
+    var fr: ?*Frame = f;
+    while (fr) |ff| {
+        for (ff.stack[0..ff.sp]) |*v| remapValuePtr(v, forwarding);
+        for (ff.locals) |*v| remapValuePtr(v, forwarding);
+        fr = ff.parent;
+    }
+    for (f.loader.statics.items) |st| for (st) |*v| remapValuePtr(v, forwarding);
+}
+fn remapObject(obj: *HeapObj, forwarding: []const u32) void {
+    switch (obj.*) {
+        .instance => |*x| for (x.fields) |*v| remapValuePtr(v, forwarding),
+        .array => |*x| if (x.elem == .reference) for (x.data) |*v| remapValuePtr(v, forwarding),
+    }
+}
+
+/// Stop-the-world mark-COMPACT (a moving collector). Live objects are compacted
+/// to the front of the table and every reference is rewritten to the object's
+/// new id (roots via the frame parent-chain, statics, pending exception, and the
+/// live object graph). Non-fragmenting; ids change on each collection. Runs at a
+/// `new` safepoint. This is the reference-rewriting machinery LXR/Immix require.
 fn collect(f: *Frame) void {
     const heap = f.heap orelse return;
+    // 1. Mark reachable objects from all roots.
     for (heap.marked.items) |*m| m.* = false;
     var fr: ?*Frame = f;
     while (fr) |ff| {
@@ -294,20 +321,42 @@ fn collect(f: *Frame) void {
     for (f.loader.statics.items) |st| for (st) |v| markValue(heap, v);
     if (f.budget.pending) |eid| markObject(heap, eid);
 
-    var id: u32 = 0;
-    while (id < heap.objects.items.len) : (id += 1) {
-        if (heap.objects.items[id]) |obj| {
-            if (!heap.marked.items[id]) {
+    // 2. Assign new ids to live objects (compact order); free the dead.
+    const forwarding = heap.gpa.alloc(u32, heap.objects.items.len) catch return;
+    defer heap.gpa.free(forwarding);
+    var new_id: u32 = 0;
+    for (heap.objects.items, 0..) |maybe, old| {
+        if (maybe) |obj| {
+            if (heap.marked.items[old]) {
+                forwarding[old] = new_id;
+                new_id += 1;
+            } else {
                 switch (obj) {
                     .instance => |x| heap.gpa.free(x.fields),
                     .array => |x| heap.gpa.free(x.data),
                 }
-                heap.objects.items[id] = null;
-                heap.free_list.append(heap.gpa, id) catch {};
+                heap.objects.items[old] = null;
             }
         }
     }
+    const live = new_id;
+
+    // 3. Rewrite every reference to its object's new id (objects still at old
+    //    positions; only dead slots are null).
+    remapRoots(f, forwarding);
+    for (heap.objects.items) |*maybe| if (maybe.*) |*obj| remapObject(obj, forwarding);
+    if (f.budget.pending) |eid| f.budget.pending = forwarding[eid];
+
+    // 4. Move live objects to their new positions (forwarding[old] <= old, and we
+    //    scan old in increasing order, so this never clobbers an unread slot).
+    for (heap.objects.items, 0..) |maybe, old| {
+        if (maybe) |obj| heap.objects.items[forwarding[old]] = obj;
+    }
+    heap.objects.items.len = live;
+    heap.marked.items.len = live;
+    heap.free_list.items.len = 0;
 }
+
 fn maybeCollect(f: *Frame) void {
     const heap = f.heap orelse return;
     heap.allocs_since_gc += 1;
@@ -1261,6 +1310,24 @@ fn exec(alloc: std.mem.Allocator, class: ?*const Class, heap: ?*Heap, loader: *L
             f.pc = try branch(f.pc, try s16(code, f.pc + 1), code.len);
             continue :sw try step(&f, code);
         },
+        .ifnull, .ifnonnull => |o| {
+            const r = try f.popRef();
+            const take = if (o == .ifnull) (r == null) else (r != null);
+            if (take) {
+                f.pc = try branch(f.pc, try s16(code, f.pc + 1), code.len);
+            } else f.pc += 3;
+            continue :sw try step(&f, code);
+        },
+        .if_acmpeq, .if_acmpne => |o| {
+            const b = try f.popRef();
+            const a2 = try f.popRef();
+            const eq = (a2 == null and b == null) or (a2 != null and b != null and a2.? == b.?);
+            const take = if (o == .if_acmpeq) eq else !eq;
+            if (take) {
+                f.pc = try branch(f.pc, try s16(code, f.pc + 1), code.len);
+            } else f.pc += 3;
+            continue :sw try step(&f, code);
+        },
         .tableswitch => {
             const key = try f.popInt();
             const p = f.pc + 1 + switchPad(f.pc);
@@ -2146,5 +2213,32 @@ test "GC: garbage is reclaimed, reachable objects survive" {
         try testing.expectEqual(Value{ .int = 250000 }, r.?);
         // The array + its 500 live elements survived: live count is ~501.
         try testing.expect(heap.liveCount() >= 500);
+    }
+}
+
+test "moving GC: linked-list survives compaction with correct next-pointer remap" {
+    var cf = try ClassFile.parse(testing.allocator, @embedFile("testdata/Node.class"));
+    defer cf.deinit();
+    var aa = std.heap.ArenaAllocator.init(testing.allocator);
+    defer aa.deinit();
+    const node = try Class.init(testing.allocator, aa.allocator(), &cf, null);
+    var loader = Loader.init(testing.allocator);
+    defer loader.deinit();
+    try loader.register(&node);
+
+    // listSum(100): builds a 100-node list while GC compacts (moving nodes and
+    // rewriting every `next` pointer). Traversal must still visit all nodes -> 5050.
+    {
+        var heap = Heap{ .gpa = testing.allocator, .gc_interval = 8 };
+        defer heap.deinit();
+        var b = Budget{};
+        try testing.expectEqual(Value{ .int = 5050 }, (try runInLoaderWithHeap(&loader, &node, "listSum", "(I)I", &.{.{ .int = 100 }}, &b, &heap)).?);
+    }
+    // listSumTwice(50): 2 * (50*51/2) = 2550; first list is reclaimed between builds.
+    {
+        var heap = Heap{ .gpa = testing.allocator, .gc_interval = 8 };
+        defer heap.deinit();
+        var b = Budget{};
+        try testing.expectEqual(Value{ .int = 2550 }, (try runInLoaderWithHeap(&loader, &node, "listSumTwice", "(I)I", &.{.{ .int = 50 }}, &b, &heap)).?);
     }
 }
