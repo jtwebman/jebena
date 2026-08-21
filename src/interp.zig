@@ -43,6 +43,8 @@ pub const RunError = error{
     MethodNotFound,
     LinkError,
     NullPointer,
+    NegativeArraySize,
+    ArrayIndexOutOfBounds,
     Truncated,
 } || bc.DecodeError || std.mem.Allocator.Error;
 
@@ -189,32 +191,44 @@ const Frame = struct {
     }
 };
 
-pub const Object = struct { class: *const Class, fields: []Value };
+pub const Instance = struct { class: *const Class, fields: []Value };
+pub const Array = struct { elem: Kind, data: []Value };
+pub const HeapObj = union(enum) { instance: Instance, array: Array };
+
+fn defaultValue(k: Kind) Value {
+    return switch (k) {
+        .int => .{ .int = 0 },
+        .long => .{ .long = 0 },
+        .float => .{ .float = 0 },
+        .double => .{ .double = 0 },
+        .reference => .{ .reference = null },
+    };
+}
 
 pub const Heap = struct {
     gpa: std.mem.Allocator,
-    objects: std.ArrayList(Object) = .empty,
+    objects: std.ArrayList(HeapObj) = .empty,
 
     pub fn deinit(self: *Heap) void {
-        for (self.objects.items) |o| self.gpa.free(o.fields);
+        for (self.objects.items) |o| switch (o) {
+            .instance => |x| self.gpa.free(x.fields),
+            .array => |x| self.gpa.free(x.data),
+        };
         self.objects.deinit(self.gpa);
     }
-    fn defaultValue(k: Kind) Value {
-        return switch (k) {
-            .int => .{ .int = 0 },
-            .long => .{ .long = 0 },
-            .float => .{ .float = 0 },
-            .double => .{ .double = 0 },
-            .reference => .{ .reference = null },
-        };
-    }
-    pub fn alloc(self: *Heap, class: *const Class) !u32 {
+    pub fn allocInstance(self: *Heap, class: *const Class) !u32 {
         const fields = try self.gpa.alloc(Value, class.instance_fields.len);
         for (fields, class.instance_fields) |*fv, fd| fv.* = defaultValue(fd.kind);
-        try self.objects.append(self.gpa, .{ .class = class, .fields = fields });
+        try self.objects.append(self.gpa, .{ .instance = .{ .class = class, .fields = fields } });
         return @intCast(self.objects.items.len - 1);
     }
-    pub fn get(self: *Heap, id: u32) *Object {
+    pub fn allocArray(self: *Heap, elem: Kind, len: usize) !u32 {
+        const data = try self.gpa.alloc(Value, len);
+        for (data) |*d| d.* = defaultValue(elem);
+        try self.objects.append(self.gpa, .{ .array = .{ .elem = elem, .data = data } });
+        return @intCast(self.objects.items.len - 1);
+    }
+    pub fn get(self: *Heap, id: u32) *HeapObj {
         return &self.objects.items[id];
     }
 };
@@ -412,16 +426,19 @@ fn doNew(f: *Frame, cls: *const Class, code: []const u8) RunError!void {
     const heap = f.heap orelse return error.UnsupportedOpcode;
     const cname = try refClassName(cls, try u16At(code, f.pc + 1));
     if (!std.mem.eql(u8, cname, cls.name)) return error.UnsupportedOpcode; // only self-class for now
-    try f.push(.{ .reference = try heap.alloc(cls) });
+    try f.push(.{ .reference = try heap.allocInstance(cls) });
 }
 
 fn doGetField(f: *Frame, cls: *const Class, code: []const u8) RunError!void {
     const heap = f.heap orelse return error.UnsupportedOpcode;
     const fname = try fieldName(cls, try u16At(code, f.pc + 1));
     const oid = (try f.popRef()) orelse return error.NullPointer;
-    const obj = heap.get(oid);
-    const fi = obj.class.findField(fname) orelse return error.LinkError;
-    try f.push(obj.fields[fi]);
+    const inst = switch (heap.get(oid).*) {
+        .instance => |*x| x,
+        else => return error.LinkError,
+    };
+    const fi = inst.class.findField(fname) orelse return error.LinkError;
+    try f.push(inst.fields[fi]);
 }
 
 fn doPutField(f: *Frame, cls: *const Class, code: []const u8) RunError!void {
@@ -429,9 +446,58 @@ fn doPutField(f: *Frame, cls: *const Class, code: []const u8) RunError!void {
     const fname = try fieldName(cls, try u16At(code, f.pc + 1));
     const value = try f.pop();
     const oid = (try f.popRef()) orelse return error.NullPointer;
-    const obj = heap.get(oid);
-    const fi = obj.class.findField(fname) orelse return error.LinkError;
-    obj.fields[fi] = value;
+    const inst = switch (heap.get(oid).*) {
+        .instance => |*x| x,
+        else => return error.LinkError,
+    };
+    const fi = inst.class.findField(fname) orelse return error.LinkError;
+    inst.fields[fi] = value;
+}
+
+fn atypeKind(atype: usize) RunError!Kind {
+    return switch (atype) {
+        4, 5, 8, 9, 10 => .int, // boolean, char, byte, short, int
+        6 => .float,
+        7 => .double,
+        11 => .long,
+        else => error.LinkError,
+    };
+}
+fn doNewArray(f: *Frame, code: []const u8) RunError!void {
+    const heap = f.heap orelse return error.UnsupportedOpcode;
+    const kind = try atypeKind(try u8At(code, f.pc + 1));
+    const len = try f.popInt();
+    if (len < 0) return error.NegativeArraySize;
+    try f.push(.{ .reference = try heap.allocArray(kind, @intCast(len)) });
+}
+fn doANewArray(f: *Frame, code: []const u8) RunError!void {
+    const heap = f.heap orelse return error.UnsupportedOpcode;
+    _ = try u16At(code, f.pc + 1); // element class ignored; references are uniform here
+    const len = try f.popInt();
+    if (len < 0) return error.NegativeArraySize;
+    try f.push(.{ .reference = try heap.allocArray(.reference, @intCast(len)) });
+}
+fn doArrayLength(f: *Frame) RunError!void {
+    const heap = f.heap orelse return error.UnsupportedOpcode;
+    const oid = (try f.popRef()) orelse return error.NullPointer;
+    const arr = switch (heap.get(oid).*) {
+        .array => |a| a,
+        else => return error.LinkError,
+    };
+    try f.pushInt(@intCast(arr.data.len));
+}
+fn arrayIndex(f: *Frame) RunError!struct { arr: *Array, i: usize } {
+    const idx = try f.popInt();
+    const oid = (try f.popRef()) orelse return error.NullPointer;
+    const heap = f.heap orelse return error.UnsupportedOpcode;
+    const arr = switch (heap.get(oid).*) {
+        .array => |*a| a,
+        else => return error.LinkError,
+    };
+    if (idx < 0) return error.ArrayIndexOutOfBounds;
+    const ui: usize = @intCast(idx);
+    if (ui >= arr.data.len) return error.ArrayIndexOutOfBounds;
+    return .{ .arr = arr, .i = ui };
 }
 
 fn invokeInstance(f: *Frame, cls: *const Class, code: []const u8, is_special: bool) RunError!void {
@@ -1035,6 +1101,107 @@ fn exec(alloc: std.mem.Allocator, class: ?*const Class, heap: ?*Heap, budget: *B
             continue :sw try step(&f, code);
         },
         .areturn => return try f.pop(),
+        .newarray => {
+            try doNewArray(&f, code);
+            f.pc += 2;
+            continue :sw try step(&f, code);
+        },
+        .anewarray => {
+            try doANewArray(&f, code);
+            f.pc += 3;
+            continue :sw try step(&f, code);
+        },
+        .arraylength => {
+            try doArrayLength(&f);
+            f.pc += 1;
+            continue :sw try step(&f, code);
+        },
+        .iaload, .baload, .caload, .saload => {
+            const ai = try arrayIndex(&f);
+            try f.pushInt(ai.arr.data[ai.i].int);
+            f.pc += 1;
+            continue :sw try step(&f, code);
+        },
+        .laload => {
+            const ai = try arrayIndex(&f);
+            try f.pushLong(ai.arr.data[ai.i].long);
+            f.pc += 1;
+            continue :sw try step(&f, code);
+        },
+        .faload => {
+            const ai = try arrayIndex(&f);
+            try f.pushFloat(ai.arr.data[ai.i].float);
+            f.pc += 1;
+            continue :sw try step(&f, code);
+        },
+        .daload => {
+            const ai = try arrayIndex(&f);
+            try f.pushDouble(ai.arr.data[ai.i].double);
+            f.pc += 1;
+            continue :sw try step(&f, code);
+        },
+        .aaload => {
+            const ai = try arrayIndex(&f);
+            try f.push(ai.arr.data[ai.i]);
+            f.pc += 1;
+            continue :sw try step(&f, code);
+        },
+        .iastore => {
+            const v = try f.popInt();
+            const ai = try arrayIndex(&f);
+            ai.arr.data[ai.i] = .{ .int = v };
+            f.pc += 1;
+            continue :sw try step(&f, code);
+        },
+        .bastore => {
+            const v = try f.popInt();
+            const ai = try arrayIndex(&f);
+            ai.arr.data[ai.i] = .{ .int = @as(i8, @truncate(v)) };
+            f.pc += 1;
+            continue :sw try step(&f, code);
+        },
+        .castore => {
+            const v = try f.popInt();
+            const ai = try arrayIndex(&f);
+            ai.arr.data[ai.i] = .{ .int = @as(u16, @truncate(@as(u32, @bitCast(v)))) };
+            f.pc += 1;
+            continue :sw try step(&f, code);
+        },
+        .sastore => {
+            const v = try f.popInt();
+            const ai = try arrayIndex(&f);
+            ai.arr.data[ai.i] = .{ .int = @as(i16, @truncate(v)) };
+            f.pc += 1;
+            continue :sw try step(&f, code);
+        },
+        .lastore => {
+            const v = try f.popLong();
+            const ai = try arrayIndex(&f);
+            ai.arr.data[ai.i] = .{ .long = v };
+            f.pc += 1;
+            continue :sw try step(&f, code);
+        },
+        .fastore => {
+            const v = try f.popFloat();
+            const ai = try arrayIndex(&f);
+            ai.arr.data[ai.i] = .{ .float = v };
+            f.pc += 1;
+            continue :sw try step(&f, code);
+        },
+        .dastore => {
+            const v = try f.popDouble();
+            const ai = try arrayIndex(&f);
+            ai.arr.data[ai.i] = .{ .double = v };
+            f.pc += 1;
+            continue :sw try step(&f, code);
+        },
+        .aastore => {
+            const v = try f.pop();
+            const ai = try arrayIndex(&f);
+            ai.arr.data[ai.i] = v;
+            f.pc += 1;
+            continue :sw try step(&f, code);
+        },
         .new => {
             const cls = class orelse return error.UnsupportedOpcode;
             try doNew(&f, cls, code);
@@ -1377,4 +1544,31 @@ test "object model: construct, mutate fields, virtual + special dispatch (Point)
     try testing.expectEqual(Value{ .int = 49 }, (try cls.callStatic("dist2", "(II)I", &.{ 3, 4 })).?);
     // a few more
     try testing.expectEqual(Value{ .int = 2 }, (try cls.callStatic("make", "(II)I", &.{ -1, 0 })).?); // bump->(0,1); (0+1)*2 = 2
+}
+
+test "arrays: sumSquares, firstLast, length, long array, byte truncation" {
+    var cf: ClassFile = undefined;
+    var arena: std.heap.ArenaAllocator = undefined;
+    const cls = try loadClass("testdata/Arr.class", &cf, &arena);
+    defer cf.deinit();
+    defer arena.deinit();
+    // sum of i*i for i in 0..9 = 285
+    try testing.expectEqual(Value{ .int = 285 }, (try cls.callStatic("sumSquares", "(I)I", &.{10})).?);
+    try testing.expectEqual(Value{ .int = 30 }, (try cls.callStatic("firstLast", "(I)I", &.{5})).?);
+    try testing.expectEqual(Value{ .int = 7 }, (try cls.callStatic("len", "(I)I", &.{7})).?);
+    try testing.expectEqual(Value{ .long = 1000000000001 }, (try cls.callStatic("larr", "()J", &.{})).?);
+    // (byte)200 = -56, + 5 = -51
+    try testing.expectEqual(Value{ .int = -51 }, (try cls.callStatic("bytes", "()I", &.{})).?);
+}
+
+test "arrays: index out of bounds and negative size are trapped" {
+    var cf: ClassFile = undefined;
+    var arena: std.heap.ArenaAllocator = undefined;
+    const cls = try loadClass("testdata/Arr.class", &cf, &arena);
+    defer cf.deinit();
+    defer arena.deinit();
+    // firstLast(0): new int[0], then a[0]=10 -> out of bounds
+    try testing.expectError(error.ArrayIndexOutOfBounds, cls.callStatic("firstLast", "(I)I", &.{0}));
+    // len(-1): negative array size
+    try testing.expectError(error.NegativeArraySize, cls.callStatic("len", "(I)I", &.{-1}));
 }
