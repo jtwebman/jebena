@@ -327,6 +327,35 @@ public class JBaseSmoke {
         java.util.List<Integer> alist = java.util.Arrays.asList(objs);
         r += alist.size();                                   // 3
         r += java.util.Arrays.toString(objs).length();      // "[10, 20, 30]" len
+
+        // LinkedList as List + Deque.
+        java.util.LinkedList<Integer> ll = new java.util.LinkedList<>();
+        ll.add(1);
+        ll.add(2);
+        ll.add(3);
+        r += ll.size();               // 3
+        r += ll.get(1);               // 2
+        ll.addFirst(0);               // [0,1,2,3]
+        ll.addLast(4);                // [0,1,2,3,4]
+        r += ll.getFirst() + ll.getLast(); // 4
+        r += ll.removeFirst();        // 0
+        r += ll.removeLast();         // 4 -> [1,2,3]
+        ll.push(9);                   // [9,1,2,3]
+        r += ll.pop();                // 9 -> [1,2,3]
+        int lsum = 0;
+        for (int o : ll) {
+            lsum += o;
+        }
+        r += lsum;                    // 6
+        r += ll.toString().length();  // "[1, 2, 3]" -> 9
+        java.util.Deque<Integer> dq = new java.util.LinkedList<>();
+        dq.offer(10);
+        dq.offer(20);
+        dq.push(5);                   // [5,10,20]
+        r += dq.poll();               // 5
+        r += dq.peek();               // 10
+        r += dq.pollLast();           // 20
+        r += dq.size();               // 1
         return r;
     }
 }
