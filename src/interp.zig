@@ -45,6 +45,7 @@ pub const RunError = error{
     NullPointer,
     NegativeArraySize,
     ArrayIndexOutOfBounds,
+    JavaException,
     Truncated,
 } || bc.DecodeError || std.mem.Allocator.Error;
 
@@ -53,6 +54,8 @@ pub const Budget = struct {
     max_steps: usize = 100_000_000,
     depth: usize = 0,
     max_depth: usize = 1024,
+    /// Exception object id currently propagating up the native call stack.
+    pending: ?u32 = null,
 };
 
 fn isTop(v: Value) bool {
@@ -196,6 +199,9 @@ pub const Instance = struct { class: *const Class, fields: []Value };
 pub const Array = struct { elem: Kind, data: []Value };
 pub const HeapObj = union(enum) { instance: Instance, array: Array };
 
+const stub_cp_entries = [_]constant_pool.Constant{.unusable};
+const stub_return_code = [_]u8{0xb1}; // just `return`
+
 fn defaultValue(k: Kind) Value {
     return switch (k) {
         .int => .{ .int = 0 },
@@ -320,7 +326,7 @@ pub const Loader = struct {
         self.initialized.items[i] = true;
         if (class.find("<clinit>", "()V")) |ci| {
             if (ci.code) |cc| {
-                _ = try exec(self.gpa, class, heap, self, budget, cc.code, cc.max_stack, cc.max_locals, &.{});
+                _ = try exec(self.gpa, class, heap, self, budget, cc.code, cc.max_stack, cc.max_locals, &.{}, cc.exception_table);
             }
         }
     }
@@ -610,7 +616,7 @@ fn invokeInstance(f: *Frame, cls: *const Class, code: []const u8, is_special: bo
     f.budget.depth += 1;
     defer f.budget.depth -= 1;
     const cc = target.code orelse return error.LinkError;
-    const ret = try exec(rclass.gpa, rclass, f.heap, f.loader, f.budget, cc.code, cc.max_stack, cc.max_locals, slots[0..decl.arg_slots]);
+    const ret = try exec(rclass.gpa, rclass, f.heap, f.loader, f.budget, cc.code, cc.max_stack, cc.max_locals, slots[0..decl.arg_slots], cc.exception_table);
     if (ret) |rv| try f.pushKind(rv);
 }
 
@@ -656,7 +662,7 @@ pub fn runInLoader(loader: *Loader, class: *const Class, name: []const u8, desc:
     var slots: [256]Value = undefined;
     if (m.arg_slots > slots.len) return error.LinkError;
     const n = try layoutArgs(m, args, &slots);
-    return exec(loader.gpa, class, &heap, loader, budget, c.code, c.max_stack, c.max_locals, slots[0..n]);
+    return exec(loader.gpa, class, &heap, loader, budget, c.code, c.max_stack, c.max_locals, slots[0..n], c.exception_table);
 }
 
 fn invokeStatic(f: *Frame, cls: *const Class, code: []const u8) RunError!void {
@@ -689,7 +695,7 @@ fn invokeStatic(f: *Frame, cls: *const Class, code: []const u8) RunError!void {
     f.budget.depth += 1;
     defer f.budget.depth -= 1;
     const c = target.code orelse return error.LinkError;
-    const ret = try exec(tclass.gpa, tclass, f.heap, f.loader, f.budget, c.code, c.max_stack, c.max_locals, slots[0..target.arg_slots]);
+    const ret = try exec(tclass.gpa, tclass, f.heap, f.loader, f.budget, c.code, c.max_stack, c.max_locals, slots[0..target.arg_slots], c.exception_table);
     if (ret) |rv| try f.pushKind(rv);
 }
 
@@ -710,7 +716,42 @@ fn loadConstant2(f: *Frame, class: ?*const Class, index: u16) RunError!void {
     }
 }
 
-fn exec(alloc: std.mem.Allocator, class: ?*const Class, heap: ?*Heap, loader: *Loader, budget: *Budget, code: []const u8, max_stack: u16, max_locals: u16, arg_slots: []const Value) RunError!?Value {
+fn isInstanceOf(cls: *const Class, target_name: []const u8) bool {
+    var c: ?*const Class = cls;
+    while (c) |cc| {
+        if (std.mem.eql(u8, cc.name, target_name)) return true;
+        c = cc.super;
+    }
+    return false;
+}
+
+/// Search `exceptions` for a handler covering f.pc that catches `exc_id`. On a
+/// match, clears the operand stack, pushes the exception, jumps to the handler,
+/// and returns true. Otherwise returns false (caller propagates).
+fn handleException(f: *Frame, class: ?*const Class, exceptions: []const attribute_decode.ExceptionTableEntry, exc_id: u32) RunError!bool {
+    const cls = class orelse return false;
+    const heap = f.heap orelse return false;
+    const exc_class = switch (heap.get(exc_id).*) {
+        .instance => |x| x.class,
+        else => return error.LinkError,
+    };
+    for (exceptions) |e| {
+        if (f.pc < e.start_pc or f.pc >= e.end_pc) continue;
+        const matches = if (e.catch_type == 0) true else blk: {
+            const cn = cls.cp.classNameOf(e.catch_type) catch break :blk false;
+            break :blk isInstanceOf(exc_class, cn);
+        };
+        if (matches) {
+            f.sp = 0;
+            try f.push(.{ .reference = exc_id });
+            f.pc = e.handler_pc;
+            return true;
+        }
+    }
+    return false;
+}
+
+fn exec(alloc: std.mem.Allocator, class: ?*const Class, heap: ?*Heap, loader: *Loader, budget: *Budget, code: []const u8, max_stack: u16, max_locals: u16, arg_slots: []const Value, exceptions: []const attribute_decode.ExceptionTableEntry) RunError!?Value {
     if (arg_slots.len > max_locals) return error.BadLocal;
     const stack = try alloc.alloc(Value, max_stack);
     defer alloc.free(stack);
@@ -1337,20 +1378,38 @@ fn exec(alloc: std.mem.Allocator, class: ?*const Class, heap: ?*Heap, loader: *L
         },
         .invokespecial => {
             const cls = class orelse return error.UnsupportedOpcode;
-            try invokeInstance(&f, cls, code, true);
+            invokeInstance(&f, cls, code, true) catch |e| {
+                if (e == error.JavaException and try handleException(&f, class, exceptions, f.budget.pending.?)) {
+                    f.budget.pending = null;
+                    continue :sw try step(&f, code);
+                }
+                return e;
+            };
             f.pc += 3;
             continue :sw try step(&f, code);
         },
         .invokevirtual => {
             const cls = class orelse return error.UnsupportedOpcode;
-            try invokeInstance(&f, cls, code, false);
+            invokeInstance(&f, cls, code, false) catch |e| {
+                if (e == error.JavaException and try handleException(&f, class, exceptions, f.budget.pending.?)) {
+                    f.budget.pending = null;
+                    continue :sw try step(&f, code);
+                }
+                return e;
+            };
             f.pc += 3;
             continue :sw try step(&f, code);
         },
         .invokeinterface => {
             const cls = class orelse return error.UnsupportedOpcode;
-            try invokeInstance(&f, cls, code, false); // dispatch on the receiver's class
-            f.pc += 5; // opcode + index(2) + count(1) + zero(1)
+            invokeInstance(&f, cls, code, false) catch |e| {
+                if (e == error.JavaException and try handleException(&f, class, exceptions, f.budget.pending.?)) {
+                    f.budget.pending = null;
+                    continue :sw try step(&f, code);
+                }
+                return e;
+            };
+            f.pc += 5;
             continue :sw try step(&f, code);
         },
         .getstatic => {
@@ -1374,9 +1433,21 @@ fn exec(alloc: std.mem.Allocator, class: ?*const Class, heap: ?*Heap, loader: *L
         },
         .invokestatic => {
             const cls = class orelse return error.UnsupportedOpcode;
-            try invokeStatic(&f, cls, code);
+            invokeStatic(&f, cls, code) catch |e| {
+                if (e == error.JavaException and try handleException(&f, class, exceptions, f.budget.pending.?)) {
+                    f.budget.pending = null;
+                    continue :sw try step(&f, code);
+                }
+                return e;
+            };
             f.pc += 3;
             continue :sw try step(&f, code);
+        },
+        .athrow => {
+            const eid = (try f.popRef()) orelse return error.NullPointer;
+            if (try handleException(&f, class, exceptions, eid)) continue :sw try step(&f, code);
+            f.budget.pending = eid;
+            return error.JavaException;
         },
         .ireturn => return .{ .int = try f.popInt() },
         .lreturn => return .{ .long = try f.popLong() },
@@ -1401,7 +1472,7 @@ pub fn runIntBudgeted(a: std.mem.Allocator, code: []const u8, max_stack: u16, ma
     var buf: [64]Value = undefined;
     if (args.len > buf.len) return error.BadLocal;
     for (args, 0..) |x, i| buf[i] = .{ .int = x };
-    const r = try exec(a, null, null, &loader, &b, code, max_stack, max_locals, buf[0..args.len]);
+    const r = try exec(a, null, null, &loader, &b, code, max_stack, max_locals, buf[0..args.len], &.{});
     return if (r) |v| switch (v) {
         .int => |x| x,
         else => error.TypeMismatch,
@@ -1777,7 +1848,7 @@ test "object-capable interpreter survives arbitrary bytecode (heap + class conte
         // Random bytecode against a real class + heap. Any error is fine; a crash,
         // leak, or out-of-bounds is not. References cannot be forged from ints, so
         // heap access stays valid.
-        _ = exec(testing.allocator, &cls, &heap, &loader, &b, buf[0..len], ms, ml, &.{}) catch {};
+        _ = exec(testing.allocator, &cls, &heap, &loader, &b, buf[0..len], ms, ml, &.{}, &.{}) catch {};
     }
 }
 
@@ -1860,4 +1931,94 @@ test "interfaces: invokeinterface dispatches on the concrete class" {
     var b = Budget{};
     // sumAreas(3,4) = 3*3 + 4*4 = 25, both via invokeinterface Shape.area()
     try testing.expectEqual(Value{ .int = 25 }, (try runInLoader(&loader, &uses, "sumAreas", "(II)I", &.{ .{ .int = 3 }, .{ .int = 4 } }, &b)).?);
+}
+
+fn makeStub(gpa: std.mem.Allocator, arena: std.mem.Allocator, name: []const u8, super_name: ?[]const u8, super: ?*const Class) !Class {
+    const methods = try arena.alloc(Class.Method, 1);
+    methods[0] = .{
+        .name = "<init>",
+        .descriptor = "()V",
+        .code = .{ .max_stack = 0, .max_locals = 1, .code = &stub_return_code, .exception_table = &.{}, .attributes = &.{} },
+        .params = &.{},
+        .arg_slots = 1,
+        .ret = null,
+        .is_static = false,
+    };
+    return Class{
+        .gpa = gpa,
+        .cp = .{ .entries = &stub_cp_entries },
+        .name = name,
+        .super = super,
+        .super_name = super_name,
+        .methods = methods,
+        .instance_fields = &.{},
+        .static_fields = &.{},
+    };
+}
+
+test "exceptions: throw + same-frame catch (exact and superclass)" {
+    var aa = std.heap.ArenaAllocator.init(testing.allocator);
+    defer aa.deinit();
+    const a = aa.allocator();
+    const ga = testing.allocator;
+
+    // Stub java.lang exception hierarchy: Object <- Throwable <- Exception <- RuntimeException
+    const objS = try makeStub(ga, a, "java/lang/Object", null, null);
+    const thrS = try makeStub(ga, a, "java/lang/Throwable", "java/lang/Object", &objS);
+    const excS = try makeStub(ga, a, "java/lang/Exception", "java/lang/Throwable", &thrS);
+    const rteS = try makeStub(ga, a, "java/lang/RuntimeException", "java/lang/Exception", &excS);
+
+    var cfm = try ClassFile.parse(ga, @embedFile("testdata/MyErr.class"));
+    defer cfm.deinit();
+    var cfe = try ClassFile.parse(ga, @embedFile("testdata/Exc.class"));
+    defer cfe.deinit();
+    const myErr = try Class.init(ga, a, &cfm, &rteS); // MyErr extends RuntimeException
+    const exc = try Class.init(ga, a, &cfe, null);
+
+    var loader = Loader.init(ga);
+    defer loader.deinit();
+    for ([_]*const Class{ &objS, &thrS, &excS, &rteS, &myErr, &exc }) |c| try loader.register(c);
+
+    var b = Budget{};
+    // f(-3): throws MyErr(-3), caught by catch(MyErr) -> e.code() = -3
+    try testing.expectEqual(Value{ .int = -3 }, (try runInLoader(&loader, &exc, "f", "(I)I", &.{.{ .int = -3 }}, &b)).?);
+    // f(5): no throw -> 10
+    b = Budget{};
+    try testing.expectEqual(Value{ .int = 10 }, (try runInLoader(&loader, &exc, "f", "(I)I", &.{.{ .int = 5 }}, &b)).?);
+    // g(-2): throws MyErr, caught by catch(RuntimeException) [superclass match] -> -1
+    b = Budget{};
+    try testing.expectEqual(Value{ .int = -1 }, (try runInLoader(&loader, &exc, "g", "(I)I", &.{.{ .int = -2 }}, &b)).?);
+    // g(4): no throw -> 4
+    b = Budget{};
+    try testing.expectEqual(Value{ .int = 4 }, (try runInLoader(&loader, &exc, "g", "(I)I", &.{.{ .int = 4 }}, &b)).?);
+}
+
+test "exceptions: cross-frame propagation and uncaught escape" {
+    var aa = std.heap.ArenaAllocator.init(testing.allocator);
+    defer aa.deinit();
+    const a = aa.allocator();
+    const ga = testing.allocator;
+    const objS = try makeStub(ga, a, "java/lang/Object", null, null);
+    const thrS = try makeStub(ga, a, "java/lang/Throwable", "java/lang/Object", &objS);
+    const excS = try makeStub(ga, a, "java/lang/Exception", "java/lang/Throwable", &thrS);
+    const rteS = try makeStub(ga, a, "java/lang/RuntimeException", "java/lang/Exception", &excS);
+    var cfm = try ClassFile.parse(ga, @embedFile("testdata/MyErr.class"));
+    defer cfm.deinit();
+    var cf2 = try ClassFile.parse(ga, @embedFile("testdata/Exc2.class"));
+    defer cf2.deinit();
+    const myErr = try Class.init(ga, a, &cfm, &rteS);
+    const exc2 = try Class.init(ga, a, &cf2, null);
+    var loader = Loader.init(ga);
+    defer loader.deinit();
+    for ([_]*const Class{ &objS, &thrS, &excS, &rteS, &myErr, &exc2 }) |c| try loader.register(c);
+
+    var b = Budget{};
+    // caller(-5): thrower(-5) throws MyErr(-5) up one frame; caught -> code()-1 = -6
+    try testing.expectEqual(Value{ .int = -6 }, (try runInLoader(&loader, &exc2, "caller", "(I)I", &.{.{ .int = -5 }}, &b)).?);
+    // caller(4): thrower(4)=4 *3 = 12
+    b = Budget{};
+    try testing.expectEqual(Value{ .int = 12 }, (try runInLoader(&loader, &exc2, "caller", "(I)I", &.{.{ .int = 4 }}, &b)).?);
+    // uncaught(-1): propagates out with no handler -> error.JavaException at the boundary
+    b = Budget{};
+    try testing.expectError(error.JavaException, runInLoader(&loader, &exc2, "uncaught", "(I)I", &.{.{ .int = -1 }}, &b));
 }
