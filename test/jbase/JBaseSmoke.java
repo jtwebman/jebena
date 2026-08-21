@@ -356,6 +356,50 @@ public class JBaseSmoke {
         r += dq.peek();               // 10
         r += dq.pollLast();           // 20
         r += dq.size();               // 1
+
+        // TreeMap: sorted iteration (via standard keySet) + navigation.
+        java.util.TreeMap<Integer, Integer> tm = new java.util.TreeMap<>();
+        int[] tkeys = { 5, 2, 8, 1, 9, 3 };
+        for (int k : tkeys) {
+            tm.put(k, k * 10);
+        }
+        StringBuilder tsb = new StringBuilder();
+        for (int k : tm.keySet()) {
+            tsb.append(k).append(',');   // sorted: 1,2,3,5,8,9,
+        }
+        r += tsb.toString().length();
+        r += tm.firstKey();              // 1
+        r += tm.lastKey();               // 9
+        r += tm.get(8);                  // 80
+        java.util.NavigableMap<Integer, Integer> nm = tm;
+        r += nm.ceilingKey(4);           // 5
+        r += nm.floorKey(4);             // 3
+        r += nm.higherKey(5);            // 8
+        r += nm.lowerKey(5);             // 3
+        tm.remove(5);
+        r += tm.size();                  // 5
+        r += tm.containsKey(5) ? 0 : 100;
+        int tvs = 0;
+        for (Object v : tm.values()) {
+            tvs += (Integer) v;          // 10+20+30+80+90 = 230
+        }
+        r += tvs;
+
+        // TreeSet: sorted, dedup.
+        java.util.TreeSet<Integer> ts = new java.util.TreeSet<>();
+        int[] svals = { 30, 10, 50, 20, 40, 10 };
+        for (int v : svals) {
+            ts.add(v);
+        }
+        r += ts.size();                  // 5
+        r += ts.first();                 // 10
+        r += ts.last();                  // 50
+        r += ts.ceiling(25);             // 30
+        int tssum = 0;
+        for (int o : ts) {
+            tssum += o;                  // 150
+        }
+        r += tssum;
         return r;
     }
 }
