@@ -34,6 +34,25 @@ public class JBaseSmoke {
         r += (int) Math.ceil(9.2);     // 10
         r += (int) Math.pow(2.0, 10.0); // 1024
         r += (int) Math.abs(-3.5);     // 3
-        return r; // expect 1267
+
+        // VM-thrown exceptions caught as our OWN clean-room exception classes.
+        try {
+            int q = 7 / 0;
+        } catch (ArithmeticException e) {
+            r += 3000;
+        }
+        try {
+            int[] arr = new int[2];
+            int y = arr[5];
+        } catch (ArrayIndexOutOfBoundsException e) {
+            r += 2000;
+        }
+        try {
+            int[] arr = new int[2];
+            int y = arr[5];
+        } catch (IndexOutOfBoundsException e) { // supertype catch of AIOOBE
+            r += 4000;
+        }
+        return r; // expect 10267
     }
 }
