@@ -200,7 +200,14 @@ const Frame = struct {
 pub const Instance = struct { class: *const Class, fields: []Value };
 pub const Array = struct { elem: Kind, data: []Value };
 pub const StringObj = struct { class: *const Class, chars: []i32 }; // UTF-16 code units
-pub const HeapObj = union(enum) { instance: Instance, array: Array, string: StringObj };
+pub const LambdaObj = struct {
+    iface: []const u8,
+    impl_class: []const u8,
+    impl_name: []const u8,
+    impl_desc: []const u8,
+    captures: []Value,
+};
+pub const HeapObj = union(enum) { instance: Instance, array: Array, string: StringObj, lambda: LambdaObj };
 
 const stub_cp_entries = [_]constant_pool.Constant{.unusable};
 const stub_return_code = [_]u8{0xb1}; // just `return`
@@ -239,6 +246,7 @@ pub const Heap = struct {
             .instance => |x| self.gpa.free(x.fields),
             .array => |x| self.gpa.free(x.data),
             .string => |x| self.gpa.free(x.chars),
+            .lambda => |x| self.gpa.free(x.captures),
         };
         self.objects.deinit(self.gpa);
         self.marked.deinit(self.gpa);
@@ -275,6 +283,9 @@ pub const Heap = struct {
     pub fn putString(self: *Heap, class: *const Class, chars: []i32) !u32 {
         return self.put(.{ .string = .{ .class = class, .chars = chars } });
     }
+    pub fn putLambda(self: *Heap, l: LambdaObj) !u32 {
+        return self.put(.{ .lambda = l });
+    }
     pub fn get(self: *Heap, id: u32) *HeapObj {
         return if (self.objects.items[id]) |*o| o else unreachable;
     }
@@ -298,6 +309,7 @@ fn markObject(heap: *Heap, id: u32) void {
         .instance => |x| for (x.fields) |v| markValue(heap, v),
         .array => |x| if (x.elem == .reference) for (x.data) |v| markValue(heap, v),
         .string => {},
+        .lambda => |x| for (x.captures) |v| markValue(heap, v),
     }
 }
 fn remapValuePtr(v: *Value, forwarding: []const u32) void {
@@ -322,6 +334,7 @@ fn remapObject(obj: *HeapObj, forwarding: []const u32) void {
         .instance => |*x| for (x.fields) |*v| remapValuePtr(v, forwarding),
         .array => |*x| if (x.elem == .reference) for (x.data) |*v| remapValuePtr(v, forwarding),
         .string => {},
+        .lambda => |*x| for (x.captures) |*v| remapValuePtr(v, forwarding),
     }
 }
 
@@ -357,6 +370,7 @@ fn collectMajor(f: *Frame) void {
                     .instance => |x| heap.gpa.free(x.fields),
                     .array => |x| heap.gpa.free(x.data),
                     .string => |x| heap.gpa.free(x.chars),
+                    .lambda => |x| heap.gpa.free(x.captures),
                 }
                 heap.objects.items[old] = null;
             }
@@ -402,6 +416,7 @@ fn markYoungObject(heap: *Heap, id: u32) void {
         .instance => |x| for (x.fields) |v| markYoungValue(heap, v),
         .array => |x| if (x.elem == .reference) for (x.data) |v| markYoungValue(heap, v),
         .string => {},
+        .lambda => |x| for (x.captures) |v| markYoungValue(heap, v),
     }
 }
 /// Fast, non-moving collection of the young generation. Roots into the young gen
@@ -427,6 +442,7 @@ fn collectMinor(f: *Frame) void {
                 .instance => |x| for (x.fields) |v| markYoungValue(heap, v),
                 .array => |x| if (x.elem == .reference) for (x.data) |v| markYoungValue(heap, v),
                 .string => {},
+                .lambda => |x| for (x.captures) |v| markYoungValue(heap, v),
             };
         }
     }
@@ -441,6 +457,7 @@ fn collectMinor(f: *Frame) void {
                         .instance => |x| heap.gpa.free(x.fields),
                         .array => |x| heap.gpa.free(x.data),
                         .string => |x| heap.gpa.free(x.chars),
+                        .lambda => |x| heap.gpa.free(x.captures),
                     }
                     heap.objects.items[id] = null;
                     heap.free_list.append(heap.gpa, id) catch {};
@@ -890,6 +907,20 @@ fn arrayIndex(f: *Frame) RunError!struct { arr: *Array, i: usize, oid: u32 } {
     return .{ .arr = arr, .i = ui, .oid = oid };
 }
 
+const ParamLayout = struct { params: []Class.Param, arg_slots: u16 };
+fn computeParams(gpa: std.mem.Allocator, mdesc: []const u8, is_static: bool) RunError!ParamLayout {
+    const mt = descriptor.parseMethodDescriptor(gpa, mdesc) catch return error.LinkError;
+    defer gpa.free(mt.params);
+    const params = gpa.alloc(Class.Param, mt.params.len) catch return error.OutOfMemory;
+    var slot: u16 = if (is_static) 0 else 1;
+    for (mt.params, 0..) |pt, k| {
+        const kind = fieldKind(pt);
+        params[k] = .{ .kind = kind, .slot = slot };
+        slot += if (kind == .long or kind == .double) 2 else 1;
+    }
+    return .{ .params = params, .arg_slots = slot };
+}
+
 fn invokeInstance(f: *Frame, cls: *const Class, code: []const u8, is_special: bool) RunError!void {
     const idx = try u16At(code, f.pc + 1);
     const c = cls.cp.get(idx) catch return error.LinkError;
@@ -914,25 +945,31 @@ fn invokeInstance(f: *Frame, cls: *const Class, code: []const u8, is_special: bo
         return;
     }
 
-    // Declared class (from the ref) gives the param layout. Pop args + this.
-    const dclass = try resolveClass(f, cls, cname);
-    const decl = dclass.find(mname, mdesc) orelse return error.MethodNotFound;
-    const slots = try dclass.gpa.alloc(Value, decl.arg_slots);
-    defer dclass.gpa.free(slots);
-    var i: usize = decl.params.len;
+    // Param layout from the descriptor (works even when the declared class/
+    // interface is only a stub -- important for functional interfaces).
+    const gpa = f.loader.gpa;
+    const pl = try computeParams(gpa, mdesc, false);
+    defer gpa.free(pl.params);
+    const slots = try gpa.alloc(Value, pl.arg_slots);
+    defer gpa.free(slots);
+    var i: usize = pl.params.len;
     while (i > 0) {
         i -= 1;
-        const p = decl.params[i];
+        const p = pl.params[i];
         slots[p.slot] = try f.popKind(p.kind);
         if (p.kind == .long or p.kind == .double) slots[p.slot + 1] = .top;
     }
     const oid = (try f.popRef()) orelse return error.NullPointer;
+    const heap = f.heap orelse return error.UnsupportedOpcode;
+    switch (heap.get(oid).*) {
+        .lambda => |lam| return dispatchLambda(f, lam, slots, pl.params),
+        else => {},
+    }
     slots[0] = .{ .reference = oid };
 
-    // Dispatch: invokespecial uses the declared class; invokevirtual uses the
-    // receiver's actual class (single-level: no superclass walk yet).
-    const heap = f.heap orelse return error.UnsupportedOpcode;
-    const rclass = if (is_special) dclass else switch (heap.get(oid).*) {
+    // Dispatch: invokespecial uses the declared class; invokevirtual/interface use
+    // the receiver's actual class.
+    const rclass = if (is_special) try resolveClass(f, cls, cname) else switch (heap.get(oid).*) {
         .instance => |x| x.class,
         .string => |x| x.class,
         else => return error.LinkError,
@@ -1176,7 +1213,81 @@ fn doInvokeDynamic(f: *Frame, cls: *const Class, code: []const u8) RunError!void
     if (std.mem.eql(u8, bclass, "java/lang/invoke/StringConcatFactory")) {
         return doStringConcat(f, cls, desc, bm, std.mem.eql(u8, bname, "makeConcatWithConstants"));
     }
+    if (std.mem.eql(u8, bclass, "java/lang/invoke/LambdaMetafactory")) {
+        return doLambda(f, cls, desc, bm);
+    }
     return error.UnsupportedOpcode;
+}
+fn doLambda(f: *Frame, cls: *const Class, desc: []const u8, bm: attribute_decode.BootstrapMethod) RunError!void {
+    const heap = f.heap orelse return error.UnsupportedOpcode;
+    const mt = descriptor.parseMethodDescriptor(heap.gpa, desc) catch return error.LinkError;
+    defer heap.gpa.free(mt.params);
+    const ret_ft = mt.ret orelse return error.LinkError;
+    const iface = switch (ret_ft.kind) {
+        .object => |n| n,
+        else => return error.LinkError,
+    };
+    if (bm.arguments.len < 2) return error.LinkError;
+    const mh = switch ((cls.cp.get(bm.arguments[1]) catch return error.LinkError).*) {
+        .method_handle => |x| x,
+        else => return error.LinkError,
+    };
+    const iref = switch ((cls.cp.get(mh.reference_index) catch return error.LinkError).*) {
+        .methodref => |r| r,
+        .interface_methodref => |r| r,
+        else => return error.LinkError,
+    };
+    const impl_class = try refClassName(cls, iref.class_index);
+    const inat = switch ((cls.cp.get(iref.name_and_type_index) catch return error.LinkError).*) {
+        .name_and_type => |x| x,
+        else => return error.LinkError,
+    };
+    const impl_name = cls.cp.utf8(inat.name_index) catch return error.LinkError;
+    const impl_desc = cls.cp.utf8(inat.descriptor_index) catch return error.LinkError;
+    const ncap = mt.params.len;
+    const captures = heap.gpa.alloc(Value, ncap) catch return error.OutOfMemory;
+    errdefer heap.gpa.free(captures);
+    var i: usize = ncap;
+    while (i > 0) {
+        i -= 1;
+        captures[i] = try f.popKind(fieldKind(mt.params[i]));
+    }
+    try f.push(.{ .reference = try heap.putLambda(.{
+        .iface = iface,
+        .impl_class = impl_class,
+        .impl_name = impl_name,
+        .impl_desc = impl_desc,
+        .captures = captures,
+    }) });
+}
+fn dispatchLambda(f: *Frame, lam: LambdaObj, sam_slots: []const Value, sam_params: []const Class.Param) RunError!void {
+    const impl_cls = f.loader.find(lam.impl_class) orelse return error.LinkError;
+    const ir = impl_cls.resolve(lam.impl_name, lam.impl_desc) orelse return error.MethodNotFound;
+    const impl = ir.method;
+    const owner = ir.owner;
+    const cc = impl.code orelse return error.LinkError;
+    var logical: [128]Value = undefined;
+    var n: usize = 0;
+    for (lam.captures) |c| {
+        logical[n] = c;
+        n += 1;
+    }
+    for (sam_params) |p| {
+        logical[n] = sam_slots[p.slot];
+        n += 1;
+    }
+    if (n != impl.params.len) return error.LinkError;
+    const islots = try owner.gpa.alloc(Value, impl.arg_slots);
+    defer owner.gpa.free(islots);
+    for (impl.params, 0..) |p, k| {
+        islots[p.slot] = logical[k];
+        if (p.kind == .long or p.kind == .double) islots[p.slot + 1] = .top;
+    }
+    if (f.budget.depth >= f.budget.max_depth) return error.CallDepthExceeded;
+    f.budget.depth += 1;
+    defer f.budget.depth -= 1;
+    const ret = try exec(owner.gpa, owner, f.heap, f.loader, f.budget, cc.code, cc.max_stack, cc.max_locals, islots, cc.exception_table, f);
+    if (ret) |rv| try f.pushKind(rv);
 }
 fn doStringConcat(f: *Frame, cls: *const Class, desc: []const u8, bm: attribute_decode.BootstrapMethod, with_constants: bool) RunError!void {
     const heap = f.heap orelse return error.UnsupportedOpcode;
@@ -2394,6 +2505,7 @@ fn exec(alloc: std.mem.Allocator, class: ?*const Class, heap: ?*Heap, loader: *L
             if (r) |id| switch (hp.get(id).*) {
                 .instance => |x| result = if (isInstanceOf(x.class, target)) 1 else 0,
                 .string => |x| result = if (isInstanceOf(x.class, target)) 1 else 0,
+                .lambda => |x| result = if (std.mem.eql(u8, x.iface, target)) 1 else 0,
                 .array => {}, // array instanceof: not modeled -> 0
             };
             try f.pushInt(result);
@@ -2408,6 +2520,7 @@ fn exec(alloc: std.mem.Allocator, class: ?*const Class, heap: ?*Heap, loader: *L
             if (r) |id| switch (hp.get(id).*) {
                 .instance => |x| if (!isInstanceOf(x.class, target)) return error.LinkError, // ClassCastException (no JDK class yet)
                 .string => |x| if (!isInstanceOf(x.class, target)) return error.LinkError,
+                .lambda => {},
                 .array => {},
             };
             try f.push(.{ .reference = r });
