@@ -464,6 +464,7 @@ pub const Class = struct {
     name: []const u8,
     super: ?*const Class,
     super_name: ?[]const u8,
+    interfaces: [][]const u8,
     methods: []Method,
     instance_fields: []Field,
     static_fields: []Field,
@@ -496,6 +497,8 @@ pub const Class = struct {
     pub fn init(gpa: std.mem.Allocator, arena: std.mem.Allocator, cf: *const ClassFile, super: ?*const Class) !Class {
         const cls_name = try cf.constant_pool.classNameOf(cf.this_class);
         const super_name: ?[]const u8 = if (cf.super_class != 0) try cf.constant_pool.classNameOf(cf.super_class) else null;
+        const interfaces = try arena.alloc([]const u8, cf.interfaces.len);
+        for (cf.interfaces, 0..) |ix, i| interfaces[i] = try cf.constant_pool.classNameOf(ix);
 
         // Instance (non-static) fields, in declaration order.
         var nfields: usize = 0;
@@ -552,7 +555,7 @@ pub const Class = struct {
                 .is_static = is_static,
             };
         }
-        return .{ .gpa = gpa, .cp = cf.constant_pool, .name = cls_name, .super = super, .super_name = super_name, .methods = methods, .instance_fields = instance_fields, .static_fields = static_fields };
+        return .{ .gpa = gpa, .cp = cf.constant_pool, .name = cls_name, .super = super, .super_name = super_name, .interfaces = interfaces, .methods = methods, .instance_fields = instance_fields, .static_fields = static_fields };
     }
 
     fn findField(self: *const Class, name: []const u8) ?usize {
@@ -854,6 +857,7 @@ fn isInstanceOf(cls: *const Class, target_name: []const u8) bool {
     var c: ?*const Class = cls;
     while (c) |cc| {
         if (std.mem.eql(u8, cc.name, target_name)) return true;
+        for (cc.interfaces) |iface| if (std.mem.eql(u8, iface, target_name)) return true;
         c = cc.super;
     }
     return false;
@@ -1564,6 +1568,38 @@ fn exec(alloc: std.mem.Allocator, class: ?*const Class, heap: ?*Heap, loader: *L
             f.pc += 5;
             continue :sw try step(&f, code);
         },
+        .instanceof => {
+            const cls = class orelse return error.UnsupportedOpcode;
+            const hp = f.heap orelse return error.UnsupportedOpcode;
+            const target = try refClassName(cls, try u16At(code, f.pc + 1));
+            const r = try f.popRef();
+            var result: i32 = 0;
+            if (r) |id| switch (hp.get(id).*) {
+                .instance => |x| result = if (isInstanceOf(x.class, target)) 1 else 0,
+                .array => {}, // array instanceof: not modeled -> 0
+            };
+            try f.pushInt(result);
+            f.pc += 3;
+            continue :sw try step(&f, code);
+        },
+        .checkcast => {
+            const cls = class orelse return error.UnsupportedOpcode;
+            const hp = f.heap orelse return error.UnsupportedOpcode;
+            const target = try refClassName(cls, try u16At(code, f.pc + 1));
+            const r = try f.popRef();
+            if (r) |id| switch (hp.get(id).*) {
+                .instance => |x| if (!isInstanceOf(x.class, target)) return error.LinkError, // ClassCastException (no JDK class yet)
+                .array => {},
+            };
+            try f.push(.{ .reference = r });
+            f.pc += 3;
+            continue :sw try step(&f, code);
+        },
+        .monitorenter, .monitorexit => {
+            _ = (try f.popRef()) orelse return error.NullPointer; // single-threaded: null-check only
+            f.pc += 1;
+            continue :sw try step(&f, code);
+        },
         .getstatic => {
             const cls = class orelse return error.UnsupportedOpcode;
             const fr = try fieldRef(cls, try u16At(code, f.pc + 1));
@@ -2102,6 +2138,7 @@ fn makeStub(gpa: std.mem.Allocator, arena: std.mem.Allocator, name: []const u8, 
         .name = name,
         .super = super,
         .super_name = super_name,
+        .interfaces = &.{},
         .methods = methods,
         .instance_fields = &.{},
         .static_fields = &.{},
@@ -2241,4 +2278,31 @@ test "moving GC: linked-list survives compaction with correct next-pointer remap
         var b = Budget{};
         try testing.expectEqual(Value{ .int = 2550 }, (try runInLoaderWithHeap(&loader, &node, "listSumTwice", "(I)I", &.{.{ .int = 50 }}, &b, &heap)).?);
     }
+}
+
+test "instanceof / checkcast with interface-aware subtyping" {
+    var cfsh = try ClassFile.parse(testing.allocator, @embedFile("testdata/Shape.class"));
+    defer cfsh.deinit();
+    var cfsq = try ClassFile.parse(testing.allocator, @embedFile("testdata/Square.class"));
+    defer cfsq.deinit();
+    var cfan = try ClassFile.parse(testing.allocator, @embedFile("testdata/Animal.class"));
+    defer cfan.deinit();
+    var cfc = try ClassFile.parse(testing.allocator, @embedFile("testdata/Cast.class"));
+    defer cfc.deinit();
+    var aa = std.heap.ArenaAllocator.init(testing.allocator);
+    defer aa.deinit();
+    const shape = try Class.init(testing.allocator, aa.allocator(), &cfsh, null);
+    const square = try Class.init(testing.allocator, aa.allocator(), &cfsq, null);
+    const animal = try Class.init(testing.allocator, aa.allocator(), &cfan, null);
+    const cast = try Class.init(testing.allocator, aa.allocator(), &cfc, null);
+    var loader = Loader.init(testing.allocator);
+    defer loader.deinit();
+    for ([_]*const Class{ &shape, &square, &animal, &cast }) |c| try loader.register(c);
+
+    var b = Budget{};
+    try testing.expectEqual(Value{ .int = 25 }, (try runInLoader(&loader, &cast, "castArea", "()I", &.{}, &b)).?);
+    b = Budget{};
+    try testing.expectEqual(Value{ .int = 1 }, (try runInLoader(&loader, &cast, "isShape", "()I", &.{}, &b)).?); // Square implements Shape
+    b = Budget{};
+    try testing.expectEqual(Value{ .int = 0 }, (try runInLoader(&loader, &cast, "isAnimal", "()I", &.{}, &b)).?); // Square is not Animal
 }
