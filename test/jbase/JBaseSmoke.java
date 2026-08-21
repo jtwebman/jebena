@@ -257,6 +257,29 @@ public class JBaseSmoke {
             esum += e.getKey().length();
         }
         r += esum;                   // 63
+
+        // Real StringBuilder (char[]-backed): chaining, all append overloads.
+        StringBuilder sb = new StringBuilder();
+        sb.append("Hello").append(", ").append("World").append('!').append(' ')
+          .append(42).append(' ').append(true).append(' ').append(3.5).append(' ').append(7L);
+        String built = sb.toString();
+        r += built.length();
+        if (built.equals("Hello, World! 42 true 3.5 7")) r += 1234;
+        r += sb.length();
+        StringBuilder rev = new StringBuilder("abcdef");
+        rev.reverse();
+        if (rev.toString().equals("fedcba")) r += 77;
+        StringBuilder ins = new StringBuilder("abc");
+        ins.insert(1, "XY");            // aXYbc
+        r += ins.toString().length();   // 5
+        r += ins.charAt(1);             // 'X' = 88
+        ins.deleteCharAt(0);            // XYbc
+        r += ins.length();              // 4
+        StringBuilder big = new StringBuilder();
+        for (int i = 0; i < 100; i++) {
+            big.append(i).append(',');  // growth stress
+        }
+        r += big.length();
         return r;
     }
 }

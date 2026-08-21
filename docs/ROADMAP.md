@@ -46,7 +46,7 @@ Steps (each a loop iteration or few):
 - [ ] a native-method registry: methods marked ACC_NATIVE dispatch to Zig intrinsics
 - [x] clean-room java.lang.String (char[]): full method set as real bytecode (concat/substring/indexOf(int,String)/lastIndexOf/startsWith/endsWith/compareTo/equalsIgnoreCase/trim/toUpperCase/toLowerCase/replace/toCharArray/valueOf) + invokedynamic concat + GC-rooted interning; all string producers representation-aware (newString->makeString). jbase-smoke matches OpenJDK
 - [ ] real java/lang/Class + Object.getClass (minimal)
-- [~] java.util: Objects, ArrayList(List), HashMap(Map), HashSet(Set) with Collection/List/Set/Map/Map.Entry interfaces (polymorphic declared types + invokeinterface work), keySet/values/entrySet views. Remaining: StringBuilder real, Collections/Comparable, LinkedList/TreeMap
+- [~] java.util: Objects, ArrayList(List), HashMap(Map), HashSet(Set) with Collection/List/Set/Map/Map.Entry interfaces (polymorphic declared types + invokeinterface work), keySet/values/entrySet views. Remaining: Comparable/Collections/Arrays, LinkedList/TreeMap. StringBuilder now real (char[])
       LinkedList, Arrays.asList, Optional (mostly pure Java once Object/arrays work)
 - [ ] real Number/Integer/Long/Double boxing classes
 - [ ] real java.lang.System (out as a working PrintStream to stderr), arraycopy (done)

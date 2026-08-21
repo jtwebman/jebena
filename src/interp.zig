@@ -870,7 +870,9 @@ fn doNew(f: *Frame, cls: *const Class, code: []const u8) RunError!void {
     maybeCollect(f);
     const heap = f.heap orelse return error.UnsupportedOpcode;
     const tclass = try resolveClass(f, cls, try refClassName(cls, try u16At(code, f.pc + 1)));
-    if (std.mem.eql(u8, tclass.name, "java/lang/StringBuilder") or std.mem.eql(u8, tclass.name, "java/lang/StringBuffer")) {
+    if (tclass.is_stub and (std.mem.eql(u8, tclass.name, "java/lang/StringBuilder") or std.mem.eql(u8, tclass.name, "java/lang/StringBuffer"))) {
+        // Stub path: the Zig builder intrinsic backs StringBuilder via a BuilderObj.
+        // A real (jbase) StringBuilder is an ordinary instance with char[] fields.
         try f.push(.{ .reference = try heap.putBuilder(tclass) });
         return;
     }
