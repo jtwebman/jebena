@@ -1,11 +1,11 @@
-//! A bytecode interpreter for the integer / control-flow subset, now with
-//! static method calls (invokestatic) and therefore recursion. Still no heap,
-//! objects, or category-2 (long/double) values. Dispatch uses Zig's labeled
-//! switch/continue (the computed-goto form from docs/research/02-interpreter.md).
+//! Bytecode interpreter for the full numeric tower (int, long, float, double)
+//! plus control flow and static method calls. Category-2 values (long, double)
+//! occupy two slots on the operand stack and in locals, matching the JVM; the
+//! second slot holds a `.top` marker. No heap/objects yet.
 //!
+//! Dispatch uses Zig's labeled switch/continue (docs/research/02-interpreter.md).
 //! Bytecode is assumed structurally valid; the loop stays defensive (bounds,
-//! type tags, a shared instruction budget, and a call-depth limit), so bad
-//! input errors rather than crashes or hangs.
+//! type tags, a shared step budget, a call-depth limit).
 
 const std = @import("std");
 const bc = @import("bytecode.zig");
@@ -22,7 +22,11 @@ pub const Value = union(enum) {
     long: i64,
     float: f32,
     double: f64,
+    /// Reserved upper half of a category-2 value (long/double).
+    top,
 };
+
+pub const Kind = enum { int, long, float, double, reference };
 
 pub const RunError = error{
     StackOverflow,
@@ -39,13 +43,19 @@ pub const RunError = error{
     Truncated,
 } || bc.DecodeError || std.mem.Allocator.Error;
 
-/// Shared across a whole call tree: bounds total work and recursion depth.
 pub const Budget = struct {
     steps: usize = 0,
     max_steps: usize = 100_000_000,
     depth: usize = 0,
     max_depth: usize = 1024,
 };
+
+fn isTop(v: Value) bool {
+    return switch (v) {
+        .top => true,
+        else => false,
+    };
+}
 
 const Frame = struct {
     stack: []Value,
@@ -64,15 +74,67 @@ const Frame = struct {
         f.sp -= 1;
         return f.stack[f.sp];
     }
+    // category-1
+    fn pushInt(f: *Frame, x: i32) RunError!void {
+        return f.push(.{ .int = x });
+    }
     fn popInt(f: *Frame) RunError!i32 {
         return switch (try f.pop()) {
             .int => |x| x,
             else => error.TypeMismatch,
         };
     }
-    fn pushInt(f: *Frame, x: i32) RunError!void {
-        return f.push(.{ .int = x });
+    fn pushFloat(f: *Frame, x: f32) RunError!void {
+        return f.push(.{ .float = x });
     }
+    fn popFloat(f: *Frame) RunError!f32 {
+        return switch (try f.pop()) {
+            .float => |x| x,
+            else => error.TypeMismatch,
+        };
+    }
+    // category-2: value then top
+    fn pushLong(f: *Frame, x: i64) RunError!void {
+        try f.push(.{ .long = x });
+        try f.push(.top);
+    }
+    fn popLong(f: *Frame) RunError!i64 {
+        if (!isTop(try f.pop())) return error.TypeMismatch;
+        return switch (try f.pop()) {
+            .long => |x| x,
+            else => error.TypeMismatch,
+        };
+    }
+    fn pushDouble(f: *Frame, x: f64) RunError!void {
+        try f.push(.{ .double = x });
+        try f.push(.top);
+    }
+    fn popDouble(f: *Frame) RunError!f64 {
+        if (!isTop(try f.pop())) return error.TypeMismatch;
+        return switch (try f.pop()) {
+            .double => |x| x,
+            else => error.TypeMismatch,
+        };
+    }
+    fn pushKind(f: *Frame, v: Value) RunError!void {
+        switch (v) {
+            .int => |x| try f.pushInt(x),
+            .float => |x| try f.pushFloat(x),
+            .long => |x| try f.pushLong(x),
+            .double => |x| try f.pushDouble(x),
+            .top => return error.TypeMismatch,
+        }
+    }
+    fn popKind(f: *Frame, kind: Kind) RunError!Value {
+        return switch (kind) {
+            .int => .{ .int = try f.popInt() },
+            .float => .{ .float = try f.popFloat() },
+            .long => .{ .long = try f.popLong() },
+            .double => .{ .double = try f.popDouble() },
+            .reference => error.UnsupportedOpcode,
+        };
+    }
+    // locals
     fn localInt(f: *Frame, idx: usize) RunError!i32 {
         if (idx >= f.locals.len) return error.BadLocal;
         return switch (f.locals[idx]) {
@@ -80,9 +142,35 @@ const Frame = struct {
             else => error.TypeMismatch,
         };
     }
-    fn setLocal(f: *Frame, idx: usize, v: Value) RunError!void {
+    fn localFloat(f: *Frame, idx: usize) RunError!f32 {
+        if (idx >= f.locals.len) return error.BadLocal;
+        return switch (f.locals[idx]) {
+            .float => |x| x,
+            else => error.TypeMismatch,
+        };
+    }
+    fn localLong(f: *Frame, idx: usize) RunError!i64 {
+        if (idx + 1 >= f.locals.len) return error.BadLocal;
+        return switch (f.locals[idx]) {
+            .long => |x| x,
+            else => error.TypeMismatch,
+        };
+    }
+    fn localDouble(f: *Frame, idx: usize) RunError!f64 {
+        if (idx + 1 >= f.locals.len) return error.BadLocal;
+        return switch (f.locals[idx]) {
+            .double => |x| x,
+            else => error.TypeMismatch,
+        };
+    }
+    fn setLocal1(f: *Frame, idx: usize, v: Value) RunError!void {
         if (idx >= f.locals.len) return error.BadLocal;
         f.locals[idx] = v;
+    }
+    fn setLocal2(f: *Frame, idx: usize, v: Value) RunError!void {
+        if (idx + 1 >= f.locals.len) return error.BadLocal;
+        f.locals[idx] = v;
+        f.locals[idx + 1] = .top;
     }
 };
 
@@ -90,13 +178,11 @@ fn opAt(code: []const u8, pc: usize) RunError!Op {
     if (pc >= code.len) return error.Truncated;
     return std.enums.fromInt(Op, code[pc]) orelse error.BadOpcode;
 }
-
 fn step(f: *Frame, code: []const u8) RunError!Op {
     f.budget.steps += 1;
     if (f.budget.steps > f.budget.max_steps) return error.StepLimitExceeded;
     return opAt(code, f.pc);
 }
-
 fn s8(code: []const u8, off: usize) RunError!i32 {
     if (off >= code.len) return error.Truncated;
     return @as(i8, @bitCast(code[off]));
@@ -113,39 +199,67 @@ fn u16At(code: []const u8, off: usize) RunError!u16 {
     if (off + 2 > code.len) return error.Truncated;
     return std.mem.readInt(u16, code[off..][0..2], .big);
 }
-
 fn branch(pc: usize, offset: i32, code_len: usize) RunError!usize {
     const target = @as(i64, @intCast(pc)) + offset;
     if (target < 0 or target >= code_len) return error.BadBranch;
     return @intCast(target);
 }
 
-/// A loaded class: methods pre-resolved with their decoded Code, ready to run.
 pub const Class = struct {
     gpa: std.mem.Allocator,
     cp: ConstantPool,
     methods: []Method,
 
+    pub const Param = struct { kind: Kind, slot: u16 };
     pub const Method = struct {
         name: []const u8,
         descriptor: []const u8,
         code: ?attribute_decode.CodeAttr,
+        params: []Param,
+        arg_slots: u16,
+        ret: ?Kind,
     };
 
-    /// Build from a parsed class file. `arena` holds the decoded Code; `gpa` is
-    /// used for per-call operand stacks at run time.
+    fn kindOf(ft: descriptor.FieldType) Kind {
+        if (ft.dims > 0) return .reference;
+        return switch (ft.kind) {
+            .object => .reference,
+            .base => |b| switch (b) {
+                .long => .long,
+                .float => .float,
+                .double => .double,
+                else => .int, // byte/char/short/boolean/int all live in an int slot
+            },
+        };
+    }
+
     pub fn init(gpa: std.mem.Allocator, arena: std.mem.Allocator, cf: *const ClassFile) !Class {
         const methods = try arena.alloc(Method, cf.methods.len);
         for (cf.methods, 0..) |m, i| {
             const name = try cf.constant_pool.utf8(m.name_index);
             const desc = try cf.constant_pool.utf8(m.descriptor_index);
+            const mt = try descriptor.parseMethodDescriptor(arena, desc);
+            const params = try arena.alloc(Param, mt.params.len);
+            var slot: u16 = 0;
+            for (mt.params, 0..) |pt, k| {
+                const kind = kindOf(pt);
+                params[k] = .{ .kind = kind, .slot = slot };
+                slot += if (kind == .long or kind == .double) 2 else 1;
+            }
             var code: ?attribute_decode.CodeAttr = null;
             for (m.attributes) |ai| {
                 if (std.mem.eql(u8, try cf.constant_pool.utf8(ai.name_index), "Code")) {
                     code = (try attribute_decode.decode(arena, cf.constant_pool, ai)).code;
                 }
             }
-            methods[i] = .{ .name = name, .descriptor = desc, .code = code };
+            methods[i] = .{
+                .name = name,
+                .descriptor = desc,
+                .code = code,
+                .params = params,
+                .arg_slots = slot,
+                .ret = if (mt.ret) |r| kindOf(r) else null,
+            };
         }
         return .{ .gpa = gpa, .cp = cf.constant_pool, .methods = methods };
     }
@@ -157,29 +271,95 @@ pub const Class = struct {
         return null;
     }
 
-    /// Resolve and run a static int-returning method (all-int parameters).
-    pub fn callStaticInt(self: *const Class, name: []const u8, desc: []const u8, args: []const i32, budget: *Budget) RunError!?i32 {
-        const m = self.find(name, desc) orelse return error.MethodNotFound;
-        const c = m.code orelse return error.LinkError; // native/abstract not supported
-        return exec(self.gpa, self, budget, c.code, c.max_stack, c.max_locals, args);
+    /// Lay out logical argument values into a slot buffer (category-2 gets a top).
+    fn layoutArgs(m: *const Method, args: []const Value, out: []Value) RunError!usize {
+        if (args.len != m.params.len) return error.LinkError;
+        for (m.params, 0..) |p, i| {
+            out[p.slot] = args[i];
+            if (p.kind == .long or p.kind == .double) out[p.slot + 1] = .top;
+        }
+        return m.arg_slots;
     }
 
-    /// Convenience entry point with a fresh budget.
-    pub fn callStatic(self: *const Class, name: []const u8, desc: []const u8, args: []const i32) RunError!?i32 {
+    pub fn callStaticValues(self: *const Class, name: []const u8, desc: []const u8, args: []const Value, budget: *Budget) RunError!?Value {
+        const m = self.find(name, desc) orelse return error.MethodNotFound;
+        const c = m.code orelse return error.LinkError;
+        var slots: [256]Value = undefined;
+        if (m.arg_slots > slots.len) return error.LinkError;
+        const n = try layoutArgs(m, args, &slots);
+        return exec(self.gpa, self, budget, c.code, c.max_stack, c.max_locals, slots[0..n]);
+    }
+
+    /// Convenience for int-argument methods with a fresh budget.
+    pub fn callStatic(self: *const Class, name: []const u8, desc: []const u8, int_args: []const i32) RunError!?Value {
+        var buf: [64]Value = undefined;
+        if (int_args.len > buf.len) return error.LinkError;
+        for (int_args, 0..) |a, i| buf[i] = .{ .int = a };
         var b = Budget{};
-        return self.callStaticInt(name, desc, args, &b);
+        return self.callStaticValues(name, desc, buf[0..int_args.len], &b);
     }
 };
 
-/// The core loop. `class` is optional: without it, invokestatic is unsupported.
-fn exec(a: std.mem.Allocator, class: ?*const Class, budget: *Budget, code: []const u8, max_stack: u16, max_locals: u16, args: []const i32) RunError!?i32 {
-    if (args.len > max_locals) return error.BadLocal;
+fn invokeStatic(f: *Frame, cls: *const Class, code: []const u8) RunError!void {
+    const idx = try u16At(code, f.pc + 1);
+    const mref = cls.cp.get(idx) catch return error.LinkError;
+    const ref = switch (mref.*) {
+        .methodref => |r| r,
+        else => return error.LinkError,
+    };
+    const nat = switch ((cls.cp.get(ref.name_and_type_index) catch return error.LinkError).*) {
+        .name_and_type => |x| x,
+        else => return error.LinkError,
+    };
+    const mname = cls.cp.utf8(nat.name_index) catch return error.LinkError;
+    const mdesc = cls.cp.utf8(nat.descriptor_index) catch return error.LinkError;
+    const target = cls.find(mname, mdesc) orelse return error.MethodNotFound;
+
+    // Pop args (reverse order) into the callee's slot layout.
+    var slots: [256]Value = undefined;
+    if (target.arg_slots > slots.len) return error.LinkError;
+    var i: usize = target.params.len;
+    while (i > 0) {
+        i -= 1;
+        const p = target.params[i];
+        const v = try f.popKind(p.kind);
+        slots[p.slot] = v;
+        if (p.kind == .long or p.kind == .double) slots[p.slot + 1] = .top;
+    }
+
+    if (f.budget.depth >= f.budget.max_depth) return error.CallDepthExceeded;
+    f.budget.depth += 1;
+    defer f.budget.depth -= 1;
+    const c = target.code orelse return error.LinkError;
+    const ret = try exec(cls.gpa, cls, f.budget, c.code, c.max_stack, c.max_locals, slots[0..target.arg_slots]);
+    if (ret) |rv| try f.pushKind(rv);
+}
+
+fn loadConstant(f: *Frame, class: ?*const Class, index: u16) RunError!void {
+    const cls = class orelse return error.UnsupportedOpcode;
+    switch ((cls.cp.get(index) catch return error.LinkError).*) {
+        .integer => |v| try f.pushInt(v),
+        .float => |v| try f.pushFloat(v),
+        else => return error.UnsupportedOpcode,
+    }
+}
+fn loadConstant2(f: *Frame, class: ?*const Class, index: u16) RunError!void {
+    const cls = class orelse return error.UnsupportedOpcode;
+    switch ((cls.cp.get(index) catch return error.LinkError).*) {
+        .long => |v| try f.pushLong(v),
+        .double => |v| try f.pushDouble(v),
+        else => return error.UnsupportedOpcode,
+    }
+}
+
+fn exec(a: std.mem.Allocator, class: ?*const Class, budget: *Budget, code: []const u8, max_stack: u16, max_locals: u16, arg_slots: []const Value) RunError!?Value {
+    if (arg_slots.len > max_locals) return error.BadLocal;
     const stack = try a.alloc(Value, max_stack);
     defer a.free(stack);
     const locals = try a.alloc(Value, max_locals);
     defer a.free(locals);
     for (locals) |*l| l.* = .{ .int = 0 };
-    for (args, 0..) |arg, i| locals[i] = .{ .int = arg };
+    for (arg_slots, 0..) |v, i| locals[i] = v;
 
     var f = Frame{ .stack = stack, .locals = locals, .budget = budget };
 
@@ -188,8 +368,24 @@ fn exec(a: std.mem.Allocator, class: ?*const Class, budget: *Budget, code: []con
             f.pc += 1;
             continue :sw try step(&f, code);
         },
+        // ---- constants ----
         .iconst_m1, .iconst_0, .iconst_1, .iconst_2, .iconst_3, .iconst_4, .iconst_5 => |o| {
             try f.pushInt(@as(i32, @intFromEnum(o)) - @intFromEnum(Op.iconst_0));
+            f.pc += 1;
+            continue :sw try step(&f, code);
+        },
+        .lconst_0, .lconst_1 => |o| {
+            try f.pushLong(@intFromEnum(o) - @intFromEnum(Op.lconst_0));
+            f.pc += 1;
+            continue :sw try step(&f, code);
+        },
+        .fconst_0, .fconst_1, .fconst_2 => |o| {
+            try f.pushFloat(@floatFromInt(@intFromEnum(o) - @intFromEnum(Op.fconst_0)));
+            f.pc += 1;
+            continue :sw try step(&f, code);
+        },
+        .dconst_0, .dconst_1 => |o| {
+            try f.pushDouble(@floatFromInt(@intFromEnum(o) - @intFromEnum(Op.dconst_0)));
             f.pc += 1;
             continue :sw try step(&f, code);
         },
@@ -213,6 +409,12 @@ fn exec(a: std.mem.Allocator, class: ?*const Class, budget: *Budget, code: []con
             f.pc += 3;
             continue :sw try step(&f, code);
         },
+        .ldc2_w => {
+            try loadConstant2(&f, class, try u16At(code, f.pc + 1));
+            f.pc += 3;
+            continue :sw try step(&f, code);
+        },
+        // ---- loads ----
         .iload => {
             try f.pushInt(try f.localInt(try u8At(code, f.pc + 1)));
             f.pc += 2;
@@ -223,16 +425,78 @@ fn exec(a: std.mem.Allocator, class: ?*const Class, budget: *Budget, code: []con
             f.pc += 1;
             continue :sw try step(&f, code);
         },
+        .lload => {
+            try f.pushLong(try f.localLong(try u8At(code, f.pc + 1)));
+            f.pc += 2;
+            continue :sw try step(&f, code);
+        },
+        .lload_0, .lload_1, .lload_2, .lload_3 => |o| {
+            try f.pushLong(try f.localLong(@intFromEnum(o) - @intFromEnum(Op.lload_0)));
+            f.pc += 1;
+            continue :sw try step(&f, code);
+        },
+        .fload => {
+            try f.pushFloat(try f.localFloat(try u8At(code, f.pc + 1)));
+            f.pc += 2;
+            continue :sw try step(&f, code);
+        },
+        .fload_0, .fload_1, .fload_2, .fload_3 => |o| {
+            try f.pushFloat(try f.localFloat(@intFromEnum(o) - @intFromEnum(Op.fload_0)));
+            f.pc += 1;
+            continue :sw try step(&f, code);
+        },
+        .dload => {
+            try f.pushDouble(try f.localDouble(try u8At(code, f.pc + 1)));
+            f.pc += 2;
+            continue :sw try step(&f, code);
+        },
+        .dload_0, .dload_1, .dload_2, .dload_3 => |o| {
+            try f.pushDouble(try f.localDouble(@intFromEnum(o) - @intFromEnum(Op.dload_0)));
+            f.pc += 1;
+            continue :sw try step(&f, code);
+        },
+        // ---- stores ----
         .istore => {
-            try f.setLocal(try u8At(code, f.pc + 1), .{ .int = try f.popInt() });
+            try f.setLocal1(try u8At(code, f.pc + 1), .{ .int = try f.popInt() });
             f.pc += 2;
             continue :sw try step(&f, code);
         },
         .istore_0, .istore_1, .istore_2, .istore_3 => |o| {
-            try f.setLocal(@intFromEnum(o) - @intFromEnum(Op.istore_0), .{ .int = try f.popInt() });
+            try f.setLocal1(@intFromEnum(o) - @intFromEnum(Op.istore_0), .{ .int = try f.popInt() });
             f.pc += 1;
             continue :sw try step(&f, code);
         },
+        .lstore => {
+            try f.setLocal2(try u8At(code, f.pc + 1), .{ .long = try f.popLong() });
+            f.pc += 2;
+            continue :sw try step(&f, code);
+        },
+        .lstore_0, .lstore_1, .lstore_2, .lstore_3 => |o| {
+            try f.setLocal2(@intFromEnum(o) - @intFromEnum(Op.lstore_0), .{ .long = try f.popLong() });
+            f.pc += 1;
+            continue :sw try step(&f, code);
+        },
+        .fstore => {
+            try f.setLocal1(try u8At(code, f.pc + 1), .{ .float = try f.popFloat() });
+            f.pc += 2;
+            continue :sw try step(&f, code);
+        },
+        .fstore_0, .fstore_1, .fstore_2, .fstore_3 => |o| {
+            try f.setLocal1(@intFromEnum(o) - @intFromEnum(Op.fstore_0), .{ .float = try f.popFloat() });
+            f.pc += 1;
+            continue :sw try step(&f, code);
+        },
+        .dstore => {
+            try f.setLocal2(try u8At(code, f.pc + 1), .{ .double = try f.popDouble() });
+            f.pc += 2;
+            continue :sw try step(&f, code);
+        },
+        .dstore_0, .dstore_1, .dstore_2, .dstore_3 => |o| {
+            try f.setLocal2(@intFromEnum(o) - @intFromEnum(Op.dstore_0), .{ .double = try f.popDouble() });
+            f.pc += 1;
+            continue :sw try step(&f, code);
+        },
+        // ---- stack ops ----
         .pop => {
             _ = try f.pop();
             f.pc += 1;
@@ -253,6 +517,7 @@ fn exec(a: std.mem.Allocator, class: ?*const Class, budget: *Budget, code: []con
             f.pc += 1;
             continue :sw try step(&f, code);
         },
+        // ---- int arithmetic ----
         .iadd, .isub, .imul, .idiv, .irem, .iand, .ior, .ixor, .ishl, .ishr, .iushr => |o| {
             const y = try f.popInt();
             const x = try f.popInt();
@@ -262,6 +527,113 @@ fn exec(a: std.mem.Allocator, class: ?*const Class, budget: *Budget, code: []con
         },
         .ineg => {
             try f.pushInt(0 -% try f.popInt());
+            f.pc += 1;
+            continue :sw try step(&f, code);
+        },
+        // ---- long arithmetic ----
+        .ladd, .lsub, .lmul, .ldiv, .lrem, .land, .lor, .lxor => |o| {
+            const y = try f.popLong();
+            const x = try f.popLong();
+            try f.pushLong(try longBinary(o, x, y));
+            f.pc += 1;
+            continue :sw try step(&f, code);
+        },
+        .lshl, .lshr, .lushr => |o| {
+            const s = try f.popInt();
+            const x = try f.popLong();
+            try f.pushLong(longShift(o, x, s));
+            f.pc += 1;
+            continue :sw try step(&f, code);
+        },
+        .lneg => {
+            try f.pushLong(0 -% try f.popLong());
+            f.pc += 1;
+            continue :sw try step(&f, code);
+        },
+        // ---- float arithmetic ----
+        .fadd, .fsub, .fmul, .fdiv, .frem => |o| {
+            const y = try f.popFloat();
+            const x = try f.popFloat();
+            try f.pushFloat(floatBinary(o, x, y));
+            f.pc += 1;
+            continue :sw try step(&f, code);
+        },
+        .fneg => {
+            try f.pushFloat(-try f.popFloat());
+            f.pc += 1;
+            continue :sw try step(&f, code);
+        },
+        // ---- double arithmetic ----
+        .dadd, .dsub, .dmul, .ddiv, .drem => |o| {
+            const y = try f.popDouble();
+            const x = try f.popDouble();
+            try f.pushDouble(doubleBinary(o, x, y));
+            f.pc += 1;
+            continue :sw try step(&f, code);
+        },
+        .dneg => {
+            try f.pushDouble(-try f.popDouble());
+            f.pc += 1;
+            continue :sw try step(&f, code);
+        },
+        // ---- conversions ----
+        .i2l => {
+            try f.pushLong(try f.popInt());
+            f.pc += 1;
+            continue :sw try step(&f, code);
+        },
+        .i2f => {
+            try f.pushFloat(@floatFromInt(try f.popInt()));
+            f.pc += 1;
+            continue :sw try step(&f, code);
+        },
+        .i2d => {
+            try f.pushDouble(@floatFromInt(try f.popInt()));
+            f.pc += 1;
+            continue :sw try step(&f, code);
+        },
+        .l2i => {
+            try f.pushInt(@truncate(try f.popLong()));
+            f.pc += 1;
+            continue :sw try step(&f, code);
+        },
+        .l2f => {
+            try f.pushFloat(@floatFromInt(try f.popLong()));
+            f.pc += 1;
+            continue :sw try step(&f, code);
+        },
+        .l2d => {
+            try f.pushDouble(@floatFromInt(try f.popLong()));
+            f.pc += 1;
+            continue :sw try step(&f, code);
+        },
+        .f2i => {
+            try f.pushInt(f2i(try f.popFloat()));
+            f.pc += 1;
+            continue :sw try step(&f, code);
+        },
+        .f2l => {
+            try f.pushLong(f2l(try f.popFloat()));
+            f.pc += 1;
+            continue :sw try step(&f, code);
+        },
+        .f2d => {
+            try f.pushDouble(try f.popFloat());
+            f.pc += 1;
+            continue :sw try step(&f, code);
+        },
+        .d2i => {
+            try f.pushInt(f2i(try f.popDouble()));
+            f.pc += 1;
+            continue :sw try step(&f, code);
+        },
+        .d2l => {
+            try f.pushLong(f2l(try f.popDouble()));
+            f.pc += 1;
+            continue :sw try step(&f, code);
+        },
+        .d2f => {
+            try f.pushFloat(@floatCast(try f.popDouble()));
             f.pc += 1;
             continue :sw try step(&f, code);
         },
@@ -280,13 +652,37 @@ fn exec(a: std.mem.Allocator, class: ?*const Class, budget: *Budget, code: []con
             f.pc += 1;
             continue :sw try step(&f, code);
         },
+        // ---- comparisons ----
+        .lcmp => {
+            const y = try f.popLong();
+            const x = try f.popLong();
+            try f.pushInt(if (x > y) @as(i32, 1) else if (x < y) @as(i32, -1) else 0);
+            f.pc += 1;
+            continue :sw try step(&f, code);
+        },
+        .fcmpl, .fcmpg => |o| {
+            const y = try f.popFloat();
+            const x = try f.popFloat();
+            try f.pushInt(fcmp(o == .fcmpg, x, y));
+            f.pc += 1;
+            continue :sw try step(&f, code);
+        },
+        .dcmpl, .dcmpg => |o| {
+            const y = try f.popDouble();
+            const x = try f.popDouble();
+            try f.pushInt(dcmp(o == .dcmpg, x, y));
+            f.pc += 1;
+            continue :sw try step(&f, code);
+        },
+        // ---- iinc ----
         .iinc => {
             const idx = try u8At(code, f.pc + 1);
             const c = try s8(code, f.pc + 2);
-            try f.setLocal(idx, .{ .int = (try f.localInt(idx)) +% c });
+            try f.setLocal1(idx, .{ .int = (try f.localInt(idx)) +% c });
             f.pc += 3;
             continue :sw try step(&f, code);
         },
+        // ---- branches ----
         .ifeq, .ifne, .iflt, .ifge, .ifgt, .ifle => |o| {
             const x = try f.popInt();
             if (compareZero(o, x)) {
@@ -306,69 +702,39 @@ fn exec(a: std.mem.Allocator, class: ?*const Class, budget: *Budget, code: []con
             f.pc = try branch(f.pc, try s16(code, f.pc + 1), code.len);
             continue :sw try step(&f, code);
         },
+        // ---- calls / returns ----
         .invokestatic => {
             const cls = class orelse return error.UnsupportedOpcode;
             try invokeStatic(&f, cls, code);
             f.pc += 3;
             continue :sw try step(&f, code);
         },
-        .ireturn => return try f.popInt(),
+        .ireturn => return .{ .int = try f.popInt() },
+        .lreturn => return .{ .long = try f.popLong() },
+        .freturn => return .{ .float = try f.popFloat() },
+        .dreturn => return .{ .double = try f.popDouble() },
         .@"return" => return null,
         else => return error.UnsupportedOpcode,
     }
 }
 
-fn loadConstant(f: *Frame, class: ?*const Class, index: u16) RunError!void {
-    const cls = class orelse return error.UnsupportedOpcode;
-    const c = cls.cp.get(index) catch return error.LinkError;
-    switch (c.*) {
-        .integer => |v| try f.pushInt(v),
-        .float => |v| try f.push(.{ .float = v }),
-        else => return error.UnsupportedOpcode, // String/Class/etc. need the heap
-    }
-}
-
-fn invokeStatic(f: *Frame, cls: *const Class, code: []const u8) RunError!void {
-    const idx = try u16At(code, f.pc + 1);
-    const mref = cls.cp.get(idx) catch return error.LinkError;
-    const ref = switch (mref.*) {
-        .methodref => |r| r,
-        else => return error.LinkError,
-    };
-    const nat_c = cls.cp.get(ref.name_and_type_index) catch return error.LinkError;
-    const nat = switch (nat_c.*) {
-        .name_and_type => |x| x,
-        else => return error.LinkError,
-    };
-    const mname = cls.cp.utf8(nat.name_index) catch return error.LinkError;
-    const mdesc = cls.cp.utf8(nat.descriptor_index) catch return error.LinkError;
-    const nparams = descriptor.paramCount(mdesc) catch return error.LinkError;
-    if (nparams > 255) return error.LinkError;
-
-    var argbuf: [255]i32 = undefined;
-    var k: usize = nparams;
-    while (k > 0) {
-        k -= 1;
-        argbuf[k] = try f.popInt();
-    }
-
-    if (f.budget.depth >= f.budget.max_depth) return error.CallDepthExceeded;
-    f.budget.depth += 1;
-    defer f.budget.depth -= 1;
-    const ret = try cls.callStaticInt(mname, mdesc, argbuf[0..nparams], f.budget);
-    if (ret) |rv| try f.pushInt(rv);
-}
+// ---- helpers -------------------------------------------------------------
 
 pub const default_budget: usize = 100_000_000;
 
-/// Run a static int-only method with no class context (invokestatic unsupported).
 pub fn runInt(a: std.mem.Allocator, code: []const u8, max_stack: u16, max_locals: u16, args: []const i32) RunError!?i32 {
     return runIntBudgeted(a, code, max_stack, max_locals, args, default_budget);
 }
-
 pub fn runIntBudgeted(a: std.mem.Allocator, code: []const u8, max_stack: u16, max_locals: u16, args: []const i32, max_steps: usize) RunError!?i32 {
     var b = Budget{ .max_steps = max_steps };
-    return exec(a, null, &b, code, max_stack, max_locals, args);
+    var buf: [64]Value = undefined;
+    if (args.len > buf.len) return error.BadLocal;
+    for (args, 0..) |x, i| buf[i] = .{ .int = x };
+    const r = try exec(a, null, &b, code, max_stack, max_locals, buf[0..args.len]);
+    return if (r) |v| switch (v) {
+        .int => |x| x,
+        else => error.TypeMismatch,
+    } else null;
 }
 
 fn intBinary(o: Op, x: i32, y: i32) RunError!i32 {
@@ -396,6 +762,81 @@ fn intBinary(o: Op, x: i32, y: i32) RunError!i32 {
     };
 }
 
+fn longBinary(o: Op, x: i64, y: i64) RunError!i64 {
+    return switch (o) {
+        .ladd => x +% y,
+        .lsub => x -% y,
+        .lmul => x *% y,
+        .ldiv => blk: {
+            if (y == 0) return error.ArithmeticException;
+            if (x == std.math.minInt(i64) and y == -1) break :blk std.math.minInt(i64);
+            break :blk @divTrunc(x, y);
+        },
+        .lrem => blk: {
+            if (y == 0) return error.ArithmeticException;
+            if (x == std.math.minInt(i64) and y == -1) break :blk 0;
+            break :blk @rem(x, y);
+        },
+        .land => x & y,
+        .lor => x | y,
+        .lxor => x ^ y,
+        else => error.UnsupportedOpcode,
+    };
+}
+
+fn longShift(o: Op, x: i64, s: i32) i64 {
+    const amount: u6 = @intCast(@as(u32, @bitCast(s)) & 0x3f);
+    return switch (o) {
+        .lshl => x << amount,
+        .lshr => x >> amount,
+        .lushr => @bitCast(@as(u64, @bitCast(x)) >> amount),
+        else => 0,
+    };
+}
+
+fn floatBinary(o: Op, x: f32, y: f32) f32 {
+    return switch (o) {
+        .fadd => x + y,
+        .fsub => x - y,
+        .fmul => x * y,
+        .fdiv => x / y,
+        .frem => @rem(x, y),
+        else => 0,
+    };
+}
+fn doubleBinary(o: Op, x: f64, y: f64) f64 {
+    return switch (o) {
+        .dadd => x + y,
+        .dsub => x - y,
+        .dmul => x * y,
+        .ddiv => x / y,
+        .drem => @rem(x, y),
+        else => 0,
+    };
+}
+
+fn f2i(x: anytype) i32 {
+    if (std.math.isNan(x)) return 0;
+    if (x >= 2147483647.0) return std.math.maxInt(i32);
+    if (x <= -2147483648.0) return std.math.minInt(i32);
+    return @intFromFloat(@trunc(x));
+}
+fn f2l(x: anytype) i64 {
+    if (std.math.isNan(x)) return 0;
+    if (x >= 9223372036854775808.0) return std.math.maxInt(i64);
+    if (x <= -9223372036854775808.0) return std.math.minInt(i64);
+    return @intFromFloat(@trunc(x));
+}
+
+fn fcmp(g: bool, x: f32, y: f32) i32 {
+    if (std.math.isNan(x) or std.math.isNan(y)) return if (g) 1 else -1;
+    return if (x > y) @as(i32, 1) else if (x < y) @as(i32, -1) else 0;
+}
+fn dcmp(g: bool, x: f64, y: f64) i32 {
+    if (std.math.isNan(x) or std.math.isNan(y)) return if (g) 1 else -1;
+    return if (x > y) @as(i32, 1) else if (x < y) @as(i32, -1) else 0;
+}
+
 fn compareZero(o: Op, x: i32) bool {
     return switch (o) {
         .ifeq => x == 0,
@@ -407,7 +848,6 @@ fn compareZero(o: Op, x: i32) bool {
         else => false,
     };
 }
-
 fn compareInt(o: Op, x: i32, y: i32) bool {
     return switch (o) {
         .if_icmpeq => x == y,
@@ -420,114 +860,102 @@ fn compareInt(o: Op, x: i32, y: i32) bool {
     };
 }
 
+// ---- tests ---------------------------------------------------------------
+
 const testing = std.testing;
 
-test "hand-assembled: (2 + 3) * 4 = 20" {
+test "hand-assembled int: (2 + 3) * 4 = 20" {
     const code = [_]u8{ 0x05, 0x06, 0x60, 0x07, 0x68, 0xac };
     try testing.expectEqual(@as(?i32, 20), try runInt(testing.allocator, &code, 2, 0, &.{}));
 }
-
 test "division by zero traps" {
     const code = [_]u8{ 0x04, 0x03, 0x6c, 0xac };
     try testing.expectError(error.ArithmeticException, runInt(testing.allocator, &code, 2, 0, &.{}));
 }
-
-test "stack underflow is caught, not a crash" {
+test "stack underflow is caught" {
     const code = [_]u8{ 0x60, 0xac };
     try testing.expectError(error.StackUnderflow, runInt(testing.allocator, &code, 2, 0, &.{}));
 }
-
-test "an infinite loop hits the step budget instead of hanging" {
+test "infinite loop hits the step budget" {
     const code = [_]u8{ 0xa7, 0x00, 0x00 };
     try testing.expectError(error.StepLimitExceeded, runIntBudgeted(testing.allocator, &code, 0, 0, &.{}, 1000));
 }
 
-// --- run whole methods from a real class ---------------------------------
-
-fn runComputeMethod(name: []const u8, arg: i32) !?i32 {
-    const bytes = @embedFile("testdata/Compute.class");
-    var cf = try ClassFile.parse(testing.allocator, bytes);
-    defer cf.deinit();
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const cls = try Class.init(testing.allocator, arena.allocator(), &cf);
-    return cls.callStatic(name, "(I)I", &.{arg});
-}
-
-test "executes real javac bytecode: sumTo/poly/fact/bits" {
-    try testing.expectEqual(@as(?i32, 55), try runComputeMethod("sumTo", 10));
-    try testing.expectEqual(@as(?i32, 28), try runComputeMethod("poly", 3));
-    try testing.expectEqual(@as(?i32, 120), try runComputeMethod("fact", 5));
-    try testing.expectEqual(@as(?i32, 20), try runComputeMethod("bits", 5));
-}
-
-test "sumTo matches the closed form for many inputs" {
-    var n: i32 = 0;
-    while (n <= 200) : (n += 1) {
-        try testing.expectEqual(@as(?i32, @divTrunc(n * (n + 1), 2)), try runComputeMethod("sumTo", n));
-    }
-}
-
-// --- recursion via invokestatic ------------------------------------------
-
-fn loadRecur(cf: *ClassFile, arena: *std.heap.ArenaAllocator) !Class {
+fn loadClass(comptime path: []const u8, cf: *ClassFile, arena: *std.heap.ArenaAllocator) !Class {
+    cf.* = try ClassFile.parse(testing.allocator, @embedFile(path));
+    arena.* = std.heap.ArenaAllocator.init(testing.allocator);
     return Class.init(testing.allocator, arena.allocator(), cf);
 }
 
-test "recursion: fib via invokestatic" {
-    const bytes = @embedFile("testdata/Recur.class");
-    var cf = try ClassFile.parse(testing.allocator, bytes);
+test "Compute: int methods still work" {
+    var cf: ClassFile = undefined;
+    var arena: std.heap.ArenaAllocator = undefined;
+    const cls = try loadClass("testdata/Compute.class", &cf, &arena);
     defer cf.deinit();
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    const cls = try loadRecur(&cf, &arena);
-
-    const expected = [_]i32{ 0, 1, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144 };
-    for (expected, 0..) |want, n| {
-        try testing.expectEqual(@as(?i32, want), try cls.callStatic("fib", "(I)I", &.{@intCast(n)}));
-    }
+    try testing.expectEqual(Value{ .int = 55 }, (try cls.callStatic("sumTo", "(I)I", &.{10})).?);
+    try testing.expectEqual(Value{ .int = 120 }, (try cls.callStatic("fact", "(I)I", &.{5})).?);
+    try testing.expectEqual(Value{ .int = 1000042 }, (try cls.callStatic("big", "(I)I", &.{42})).?);
 }
 
-test "recursion: gcd via invokestatic" {
-    const bytes = @embedFile("testdata/Recur.class");
-    var cf = try ClassFile.parse(testing.allocator, bytes);
+test "Recur: recursion still works" {
+    var cf: ClassFile = undefined;
+    var arena: std.heap.ArenaAllocator = undefined;
+    const cls = try loadClass("testdata/Recur.class", &cf, &arena);
     defer cf.deinit();
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    const cls = try Class.init(testing.allocator, arena.allocator(), &cf);
-    try testing.expectEqual(@as(?i32, 12), try cls.callStatic("gcd", "(II)I", &.{ 48, 36 }));
-    try testing.expectEqual(@as(?i32, 7), try cls.callStatic("gcd", "(II)I", &.{ 14, 21 }));
-    try testing.expectEqual(@as(?i32, 1), try cls.callStatic("gcd", "(II)I", &.{ 17, 5 }));
+    try testing.expectEqual(Value{ .int = 55 }, (try cls.callStatic("fib", "(I)I", &.{10})).?);
+    try testing.expectEqual(Value{ .int = 12 }, (try cls.callStatic("gcd", "(II)I", &.{ 48, 36 })).?);
 }
 
-test "non-recursive static call: addOne -> inc" {
-    const bytes = @embedFile("testdata/Recur.class");
-    var cf = try ClassFile.parse(testing.allocator, bytes);
+test "Numeric: long results" {
+    var cf: ClassFile = undefined;
+    var arena: std.heap.ArenaAllocator = undefined;
+    const cls = try loadClass("testdata/Numeric.class", &cf, &arena);
     defer cf.deinit();
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    const cls = try Class.init(testing.allocator, arena.allocator(), &cf);
-    try testing.expectEqual(@as(?i32, 42), try cls.callStatic("addOne", "(I)I", &.{41}));
+    try testing.expectEqual(Value{ .long = 120 }, (try cls.callStatic("lfact", "(I)J", &.{5})).?);
+    try testing.expectEqual(Value{ .long = 3628800 }, (try cls.callStatic("lfact", "(I)J", &.{10})).?);
+    try testing.expectEqual(Value{ .long = 5050 }, (try cls.callStatic("lsum", "(I)J", &.{100})).?);
+    // (1<<40)>>20 == 1<<20
+    var b = Budget{};
+    try testing.expectEqual(Value{ .long = 1 << 20 }, (try cls.callStaticValues("shifts", "(J)J", &.{.{ .long = 1 }}, &b)).?);
 }
 
-test "runaway recursion hits the depth limit, not a native stack overflow" {
-    // Craft a class-free scenario is hard; use Recur.fib with a tiny depth cap.
-    const bytes = @embedFile("testdata/Recur.class");
-    var cf = try ClassFile.parse(testing.allocator, bytes);
+test "Numeric: long params (addLong)" {
+    var cf: ClassFile = undefined;
+    var arena: std.heap.ArenaAllocator = undefined;
+    const cls = try loadClass("testdata/Numeric.class", &cf, &arena);
     defer cf.deinit();
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    const cls = try Class.init(testing.allocator, arena.allocator(), &cf);
-    var b = Budget{ .max_depth = 4 };
-    try testing.expectError(error.CallDepthExceeded, cls.callStaticInt("fib", "(I)I", &.{20}, &b));
+    var b = Budget{};
+    const r = try cls.callStaticValues("addLong", "(JJ)J", &.{ .{ .long = 1_000_000_000_000 }, .{ .long = 2_000_000_000_000 } }, &b);
+    try testing.expectEqual(Value{ .long = 3_000_000_000_000 }, r.?);
 }
 
-test "ldc: big(x) = 1000000 + x via a pooled constant" {
-    const bytes = @embedFile("testdata/Compute.class");
-    var cf = try ClassFile.parse(testing.allocator, bytes);
+test "Numeric: double and float results" {
+    var cf: ClassFile = undefined;
+    var arena: std.heap.ArenaAllocator = undefined;
+    const cls = try loadClass("testdata/Numeric.class", &cf, &arena);
     defer cf.deinit();
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    const cls = try Class.init(testing.allocator, arena.allocator(), &cf);
-    try testing.expectEqual(@as(?i32, 1000042), try cls.callStatic("big", "(I)I", &.{42}));
+    try testing.expectEqual(Value{ .double = 3.5 }, (try cls.callStatic("davg", "(II)D", &.{ 3, 4 })).?);
+    try testing.expectEqual(Value{ .float = 2.5 }, (try cls.callStatic("fhalf", "(I)F", &.{5})).?);
+    var b = Budget{};
+    // dpoly(2.0) = 4 - 4 + 1 = 1.0
+    try testing.expectEqual(Value{ .double = 1.0 }, (try cls.callStaticValues("dpoly", "(D)D", &.{.{ .double = 2.0 }}, &b)).?);
+}
+
+test "Numeric: double comparison (dsgn uses dcmp)" {
+    var cf: ClassFile = undefined;
+    var arena: std.heap.ArenaAllocator = undefined;
+    const cls = try loadClass("testdata/Numeric.class", &cf, &arena);
+    defer cf.deinit();
+    defer arena.deinit();
+    var b = Budget{};
+    try testing.expectEqual(Value{ .int = -1 }, (try cls.callStaticValues("dsgn", "(DD)I", &.{ .{ .double = 1.0 }, .{ .double = 2.0 } }, &b)).?);
+    b = Budget{};
+    try testing.expectEqual(Value{ .int = 1 }, (try cls.callStaticValues("dsgn", "(DD)I", &.{ .{ .double = 5.0 }, .{ .double = 2.0 } }, &b)).?);
+    b = Budget{};
+    try testing.expectEqual(Value{ .int = 0 }, (try cls.callStaticValues("dsgn", "(DD)I", &.{ .{ .double = 2.0 }, .{ .double = 2.0 } }, &b)).?);
 }

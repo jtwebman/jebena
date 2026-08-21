@@ -6,7 +6,7 @@ Working list. Check off as done; commit each. Ordered roughly by dependency.
 - [x] integer/control-flow subset
 - [x] invokestatic + recursion (shared step/depth budget)
 - [x] ldc/ldc_w (pooled int/float constants)
-- [ ] long/double/float values (category-2 two-slot model): consts, loads/stores,
+- [x] long/double/float values (category-2 two-slot model): consts, loads/stores, arithmetic, conversions, lcmp/fcmp/dcmp, l/f/d returns, ldc2_w; exec returns ?Value; invokestatic passes args by descriptor kind.
       arithmetic, conversions (i2l/l2i/i2f/f2i/...), lcmp/fcmp/dcmp, l/f/d returns,
       ldc2_w; exec returns ?Value; invokestatic passes args by descriptor kind.
 - [ ] more stack ops: pop2, dup_x1, dup_x2, dup2, dup2_x1, dup2_x2
