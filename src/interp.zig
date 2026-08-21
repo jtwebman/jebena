@@ -1,15 +1,21 @@
-//! A bytecode interpreter for the integer / control-flow subset (no heap, no
-//! method calls yet). Enough to execute pure-int javac methods (loops,
-//! arithmetic, branches). Dispatch uses Zig's labeled switch/continue — the
-//! computed-goto form chosen in docs/research/02-interpreter.md.
+//! A bytecode interpreter for the integer / control-flow subset, now with
+//! static method calls (invokestatic) and therefore recursion. Still no heap,
+//! objects, or category-2 (long/double) values. Dispatch uses Zig's labeled
+//! switch/continue (the computed-goto form from docs/research/02-interpreter.md).
 //!
-//! Bytecode is assumed structurally valid (see bytecode.validate). The loop is
-//! still defensive: stack/local bounds and type tags are checked, so malformed
-//! input yields an error rather than a crash.
+//! Bytecode is assumed structurally valid; the loop stays defensive (bounds,
+//! type tags, a shared instruction budget, and a call-depth limit), so bad
+//! input errors rather than crashes or hangs.
 
 const std = @import("std");
 const bc = @import("bytecode.zig");
 const Op = bc.Op;
+const class_file = @import("class_file.zig");
+const ClassFile = class_file.ClassFile;
+const constant_pool = @import("constant_pool.zig");
+const ConstantPool = constant_pool.ConstantPool;
+const attribute_decode = @import("attribute_decode.zig");
+const descriptor = @import("descriptor.zig");
 
 pub const Value = union(enum) {
     int: i32,
@@ -27,16 +33,26 @@ pub const RunError = error{
     UnsupportedOpcode,
     ArithmeticException,
     StepLimitExceeded,
+    CallDepthExceeded,
+    MethodNotFound,
+    LinkError,
     Truncated,
 } || bc.DecodeError || std.mem.Allocator.Error;
+
+/// Shared across a whole call tree: bounds total work and recursion depth.
+pub const Budget = struct {
+    steps: usize = 0,
+    max_steps: usize = 100_000_000,
+    depth: usize = 0,
+    max_depth: usize = 1024,
+};
 
 const Frame = struct {
     stack: []Value,
     locals: []Value,
     sp: usize = 0,
     pc: usize = 0,
-    steps: usize = 0,
-    budget: usize = std.math.maxInt(usize),
+    budget: *Budget,
 
     fn push(f: *Frame, v: Value) RunError!void {
         if (f.sp >= f.stack.len) return error.StackOverflow;
@@ -76,8 +92,8 @@ fn opAt(code: []const u8, pc: usize) RunError!Op {
 }
 
 fn step(f: *Frame, code: []const u8) RunError!Op {
-    f.steps += 1;
-    if (f.steps > f.budget) return error.StepLimitExceeded;
+    f.budget.steps += 1;
+    if (f.budget.steps > f.budget.max_steps) return error.StepLimitExceeded;
     return opAt(code, f.pc);
 }
 
@@ -93,6 +109,10 @@ fn s16(code: []const u8, off: usize) RunError!i32 {
     if (off + 2 > code.len) return error.Truncated;
     return std.mem.readInt(i16, code[off..][0..2], .big);
 }
+fn u16At(code: []const u8, off: usize) RunError!u16 {
+    if (off + 2 > code.len) return error.Truncated;
+    return std.mem.readInt(u16, code[off..][0..2], .big);
+}
 
 fn branch(pc: usize, offset: i32, code_len: usize) RunError!usize {
     const target = @as(i64, @intCast(pc)) + offset;
@@ -100,18 +120,59 @@ fn branch(pc: usize, offset: i32, code_len: usize) RunError!usize {
     return @intCast(target);
 }
 
-/// Run a static int-only method. `args` are placed in locals[0..]. Returns the
-/// ireturn value, or null for a void return.
-pub const default_budget: usize = 100_000_000;
+/// A loaded class: methods pre-resolved with their decoded Code, ready to run.
+pub const Class = struct {
+    gpa: std.mem.Allocator,
+    cp: ConstantPool,
+    methods: []Method,
 
-/// Convenience wrapper with a generous default instruction budget.
-pub fn runInt(a: std.mem.Allocator, code: []const u8, max_stack: u16, max_locals: u16, args: []const i32) RunError!?i32 {
-    return runIntBudgeted(a, code, max_stack, max_locals, args, default_budget);
-}
+    pub const Method = struct {
+        name: []const u8,
+        descriptor: []const u8,
+        code: ?attribute_decode.CodeAttr,
+    };
 
-/// Run a static int-only method with an explicit instruction budget (guarantees
-/// termination: exceeding it returns error.StepLimitExceeded).
-pub fn runIntBudgeted(a: std.mem.Allocator, code: []const u8, max_stack: u16, max_locals: u16, args: []const i32, budget: usize) RunError!?i32 {
+    /// Build from a parsed class file. `arena` holds the decoded Code; `gpa` is
+    /// used for per-call operand stacks at run time.
+    pub fn init(gpa: std.mem.Allocator, arena: std.mem.Allocator, cf: *const ClassFile) !Class {
+        const methods = try arena.alloc(Method, cf.methods.len);
+        for (cf.methods, 0..) |m, i| {
+            const name = try cf.constant_pool.utf8(m.name_index);
+            const desc = try cf.constant_pool.utf8(m.descriptor_index);
+            var code: ?attribute_decode.CodeAttr = null;
+            for (m.attributes) |ai| {
+                if (std.mem.eql(u8, try cf.constant_pool.utf8(ai.name_index), "Code")) {
+                    code = (try attribute_decode.decode(arena, cf.constant_pool, ai)).code;
+                }
+            }
+            methods[i] = .{ .name = name, .descriptor = desc, .code = code };
+        }
+        return .{ .gpa = gpa, .cp = cf.constant_pool, .methods = methods };
+    }
+
+    fn find(self: *const Class, name: []const u8, desc: []const u8) ?*const Method {
+        for (self.methods) |*m| {
+            if (std.mem.eql(u8, m.name, name) and std.mem.eql(u8, m.descriptor, desc)) return m;
+        }
+        return null;
+    }
+
+    /// Resolve and run a static int-returning method (all-int parameters).
+    pub fn callStaticInt(self: *const Class, name: []const u8, desc: []const u8, args: []const i32, budget: *Budget) RunError!?i32 {
+        const m = self.find(name, desc) orelse return error.MethodNotFound;
+        const c = m.code orelse return error.LinkError; // native/abstract not supported
+        return exec(self.gpa, self, budget, c.code, c.max_stack, c.max_locals, args);
+    }
+
+    /// Convenience entry point with a fresh budget.
+    pub fn callStatic(self: *const Class, name: []const u8, desc: []const u8, args: []const i32) RunError!?i32 {
+        var b = Budget{};
+        return self.callStaticInt(name, desc, args, &b);
+    }
+};
+
+/// The core loop. `class` is optional: without it, invokestatic is unsupported.
+fn exec(a: std.mem.Allocator, class: ?*const Class, budget: *Budget, code: []const u8, max_stack: u16, max_locals: u16, args: []const i32) RunError!?i32 {
     if (args.len > max_locals) return error.BadLocal;
     const stack = try a.alloc(Value, max_stack);
     defer a.free(stack);
@@ -235,10 +296,59 @@ pub fn runIntBudgeted(a: std.mem.Allocator, code: []const u8, max_stack: u16, ma
             f.pc = try branch(f.pc, try s16(code, f.pc + 1), code.len);
             continue :sw try step(&f, code);
         },
+        .invokestatic => {
+            const cls = class orelse return error.UnsupportedOpcode;
+            try invokeStatic(&f, cls, code);
+            f.pc += 3;
+            continue :sw try step(&f, code);
+        },
         .ireturn => return try f.popInt(),
         .@"return" => return null,
         else => return error.UnsupportedOpcode,
     }
+}
+
+fn invokeStatic(f: *Frame, cls: *const Class, code: []const u8) RunError!void {
+    const idx = try u16At(code, f.pc + 1);
+    const mref = cls.cp.get(idx) catch return error.LinkError;
+    const ref = switch (mref.*) {
+        .methodref => |r| r,
+        else => return error.LinkError,
+    };
+    const nat_c = cls.cp.get(ref.name_and_type_index) catch return error.LinkError;
+    const nat = switch (nat_c.*) {
+        .name_and_type => |x| x,
+        else => return error.LinkError,
+    };
+    const mname = cls.cp.utf8(nat.name_index) catch return error.LinkError;
+    const mdesc = cls.cp.utf8(nat.descriptor_index) catch return error.LinkError;
+    const nparams = descriptor.paramCount(mdesc) catch return error.LinkError;
+    if (nparams > 255) return error.LinkError;
+
+    var argbuf: [255]i32 = undefined;
+    var k: usize = nparams;
+    while (k > 0) {
+        k -= 1;
+        argbuf[k] = try f.popInt();
+    }
+
+    if (f.budget.depth >= f.budget.max_depth) return error.CallDepthExceeded;
+    f.budget.depth += 1;
+    defer f.budget.depth -= 1;
+    const ret = try cls.callStaticInt(mname, mdesc, argbuf[0..nparams], f.budget);
+    if (ret) |rv| try f.pushInt(rv);
+}
+
+pub const default_budget: usize = 100_000_000;
+
+/// Run a static int-only method with no class context (invokestatic unsupported).
+pub fn runInt(a: std.mem.Allocator, code: []const u8, max_stack: u16, max_locals: u16, args: []const i32) RunError!?i32 {
+    return runIntBudgeted(a, code, max_stack, max_locals, args, default_budget);
+}
+
+pub fn runIntBudgeted(a: std.mem.Allocator, code: []const u8, max_stack: u16, max_locals: u16, args: []const i32, max_steps: usize) RunError!?i32 {
+    var b = Budget{ .max_steps = max_steps };
+    return exec(a, null, &b, code, max_stack, max_locals, args);
 }
 
 fn intBinary(o: Op, x: i32, y: i32) RunError!i32 {
@@ -293,71 +403,101 @@ fn compareInt(o: Op, x: i32, y: i32) bool {
 const testing = std.testing;
 
 test "hand-assembled: (2 + 3) * 4 = 20" {
-    // iconst_2, iconst_3, iadd, iconst_4, imul, ireturn
     const code = [_]u8{ 0x05, 0x06, 0x60, 0x07, 0x68, 0xac };
-    const r = try runInt(testing.allocator, &code, 2, 0, &.{});
-    try testing.expectEqual(@as(?i32, 20), r);
+    try testing.expectEqual(@as(?i32, 20), try runInt(testing.allocator, &code, 2, 0, &.{}));
 }
 
 test "division by zero traps" {
-    // iconst_1, iconst_0, idiv, ireturn
     const code = [_]u8{ 0x04, 0x03, 0x6c, 0xac };
     try testing.expectError(error.ArithmeticException, runInt(testing.allocator, &code, 2, 0, &.{}));
 }
 
 test "stack underflow is caught, not a crash" {
-    const code = [_]u8{ 0x60, 0xac }; // iadd with empty stack
+    const code = [_]u8{ 0x60, 0xac };
     try testing.expectError(error.StackUnderflow, runInt(testing.allocator, &code, 2, 0, &.{}));
 }
 
-fn runMethod(name: []const u8, arg: i32) !?i32 {
-    const cf_mod = @import("class_file.zig");
-    const ad = @import("attribute_decode.zig");
+test "an infinite loop hits the step budget instead of hanging" {
+    const code = [_]u8{ 0xa7, 0x00, 0x00 };
+    try testing.expectError(error.StepLimitExceeded, runIntBudgeted(testing.allocator, &code, 0, 0, &.{}, 1000));
+}
+
+// --- run whole methods from a real class ---------------------------------
+
+fn runComputeMethod(name: []const u8, arg: i32) !?i32 {
     const bytes = @embedFile("testdata/Compute.class");
-    var cf = try cf_mod.ClassFile.parse(testing.allocator, bytes);
+    var cf = try ClassFile.parse(testing.allocator, bytes);
     defer cf.deinit();
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    for (cf.methods) |m| {
-        if (std.mem.eql(u8, try cf.constant_pool.utf8(m.name_index), name)) {
-            for (m.attributes) |ai| {
-                if (std.mem.eql(u8, try cf.constant_pool.utf8(ai.name_index), "Code")) {
-                    const c = (try ad.decode(arena.allocator(), cf.constant_pool, ai)).code;
-                    return try runInt(testing.allocator, c.code, c.max_stack, c.max_locals, &.{arg});
-                }
-            }
-        }
-    }
-    return error.MethodNotFound;
+    const cls = try Class.init(testing.allocator, arena.allocator(), &cf);
+    return cls.callStatic(name, "(I)I", &.{arg});
 }
 
-test "executes real javac bytecode: sumTo(10) == 55" {
-    try testing.expectEqual(@as(?i32, 55), try runMethod("sumTo", 10));
-}
-
-test "executes real javac bytecode: poly(3) == 28" {
-    // 3*3*3 - 2*3 + 7 = 27 - 6 + 7 = 28
-    try testing.expectEqual(@as(?i32, 28), try runMethod("poly", 3));
-}
-
-test "executes real javac bytecode: fact(5) == 120" {
-    try testing.expectEqual(@as(?i32, 120), try runMethod("fact", 5));
-}
-
-test "executes real javac bytecode: bits(5)" {
-    // ((5<<2)|1) ^ (5&3) = (20|1) ^ 1 = 21 ^ 1 = 20
-    try testing.expectEqual(@as(?i32, 20), try runMethod("bits", 5));
+test "executes real javac bytecode: sumTo/poly/fact/bits" {
+    try testing.expectEqual(@as(?i32, 55), try runComputeMethod("sumTo", 10));
+    try testing.expectEqual(@as(?i32, 28), try runComputeMethod("poly", 3));
+    try testing.expectEqual(@as(?i32, 120), try runComputeMethod("fact", 5));
+    try testing.expectEqual(@as(?i32, 20), try runComputeMethod("bits", 5));
 }
 
 test "sumTo matches the closed form for many inputs" {
     var n: i32 = 0;
     while (n <= 200) : (n += 1) {
-        const expected: i32 = @divTrunc(n * (n + 1), 2);
-        try testing.expectEqual(@as(?i32, expected), try runMethod("sumTo", n));
+        try testing.expectEqual(@as(?i32, @divTrunc(n * (n + 1), 2)), try runComputeMethod("sumTo", n));
     }
 }
 
-test "an infinite loop hits the step budget instead of hanging" {
-    const code = [_]u8{ 0xa7, 0x00, 0x00 }; // goto 0 (jumps to itself)
-    try testing.expectError(error.StepLimitExceeded, runIntBudgeted(testing.allocator, &code, 0, 0, &.{}, 1000));
+// --- recursion via invokestatic ------------------------------------------
+
+fn loadRecur(cf: *ClassFile, arena: *std.heap.ArenaAllocator) !Class {
+    return Class.init(testing.allocator, arena.allocator(), cf);
+}
+
+test "recursion: fib via invokestatic" {
+    const bytes = @embedFile("testdata/Recur.class");
+    var cf = try ClassFile.parse(testing.allocator, bytes);
+    defer cf.deinit();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const cls = try loadRecur(&cf, &arena);
+
+    const expected = [_]i32{ 0, 1, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144 };
+    for (expected, 0..) |want, n| {
+        try testing.expectEqual(@as(?i32, want), try cls.callStatic("fib", "(I)I", &.{@intCast(n)}));
+    }
+}
+
+test "recursion: gcd via invokestatic" {
+    const bytes = @embedFile("testdata/Recur.class");
+    var cf = try ClassFile.parse(testing.allocator, bytes);
+    defer cf.deinit();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const cls = try Class.init(testing.allocator, arena.allocator(), &cf);
+    try testing.expectEqual(@as(?i32, 12), try cls.callStatic("gcd", "(II)I", &.{ 48, 36 }));
+    try testing.expectEqual(@as(?i32, 7), try cls.callStatic("gcd", "(II)I", &.{ 14, 21 }));
+    try testing.expectEqual(@as(?i32, 1), try cls.callStatic("gcd", "(II)I", &.{ 17, 5 }));
+}
+
+test "non-recursive static call: addOne -> inc" {
+    const bytes = @embedFile("testdata/Recur.class");
+    var cf = try ClassFile.parse(testing.allocator, bytes);
+    defer cf.deinit();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const cls = try Class.init(testing.allocator, arena.allocator(), &cf);
+    try testing.expectEqual(@as(?i32, 42), try cls.callStatic("addOne", "(I)I", &.{41}));
+}
+
+test "runaway recursion hits the depth limit, not a native stack overflow" {
+    // Craft a class-free scenario is hard; use Recur.fib with a tiny depth cap.
+    const bytes = @embedFile("testdata/Recur.class");
+    var cf = try ClassFile.parse(testing.allocator, bytes);
+    defer cf.deinit();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const cls = try Class.init(testing.allocator, arena.allocator(), &cf);
+    var b = Budget{ .max_depth = 4 };
+    try testing.expectError(error.CallDepthExceeded, cls.callStaticInt("fib", "(I)I", &.{20}, &b));
 }

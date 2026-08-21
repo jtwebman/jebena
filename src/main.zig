@@ -7,6 +7,7 @@ const jebena = @import("jebena");
 
 const hello_class = @embedFile("testdata/Hello.class");
 const compute_class = @embedFile("testdata/Compute.class");
+const recur_class = @embedFile("testdata/Recur.class");
 
 pub fn main() !void {
     var gpa_state: std.heap.DebugAllocator(.{}) = .init;
@@ -22,24 +23,19 @@ pub fn main() !void {
 
     // 2. Execute real bytecode.
     const n: i32 = 100;
-    const r = try runStaticInt(gpa, compute_class, "sumTo", n);
+    const r = try runStaticInt(gpa, compute_class, "sumTo", "(I)I", n);
     std.debug.print("executed Compute.sumTo({d}) = {?d}\n", .{ n, r });
+
+    // 3. Execute recursive bytecode (invokestatic).
+    const fib = try runStaticInt(gpa, recur_class, "fib", "(I)I", 10);
+    std.debug.print("executed Recur.fib(10) = {?d}  (recursion via invokestatic)\n", .{fib});
 }
 
-fn runStaticInt(gpa: std.mem.Allocator, class_bytes: []const u8, method: []const u8, arg: i32) !?i32 {
+fn runStaticInt(gpa: std.mem.Allocator, class_bytes: []const u8, method: []const u8, desc: []const u8, arg: i32) !?i32 {
     var cf = try jebena.ClassFile.parse(gpa, class_bytes);
     defer cf.deinit();
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
-    for (cf.methods) |m| {
-        if (std.mem.eql(u8, try cf.constant_pool.utf8(m.name_index), method)) {
-            for (m.attributes) |ai| {
-                if (std.mem.eql(u8, try cf.constant_pool.utf8(ai.name_index), "Code")) {
-                    const c = (try jebena.attribute_decode.decode(arena.allocator(), cf.constant_pool, ai)).code;
-                    return jebena.interp.runInt(gpa, c.code, c.max_stack, c.max_locals, &.{arg});
-                }
-            }
-        }
-    }
-    return error.MethodNotFound;
+    const cls = try jebena.interp.Class.init(gpa, arena.allocator(), &cf);
+    return cls.callStatic(method, desc, &.{arg});
 }

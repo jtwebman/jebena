@@ -128,6 +128,20 @@ pub fn validateMethodDescriptor(s: []const u8) Error!void {
     if (p.i != s.len) return error.BadDescriptor;
 }
 
+/// Number of parameters in a method descriptor (no allocation).
+pub fn paramCount(s: []const u8) Error!usize {
+    var p = Cursor{ .s = s };
+    if (p.i >= s.len or s[p.i] != '(') return error.BadDescriptor;
+    p.i += 1;
+    var n: usize = 0;
+    while (p.i < s.len and s[p.i] != ')') {
+        _ = try parseField(&p);
+        n += 1;
+    }
+    if (p.i >= s.len or s[p.i] != ')') return error.BadDescriptor;
+    return n;
+}
+
 const testing = std.testing;
 
 test "base field types" {
@@ -217,4 +231,11 @@ fn descriptorValidatorsOk() Error!void {
     try validateFieldDescriptor("[Ljava/lang/String;");
     try validateMethodDescriptor("()V");
     try validateMethodDescriptor("(IDLjava/lang/Thread;)Ljava/lang/Object;");
+}
+
+test "paramCount" {
+    try testing.expectEqual(@as(usize, 0), try paramCount("()V"));
+    try testing.expectEqual(@as(usize, 3), try paramCount("(IDLjava/lang/Thread;)Ljava/lang/Object;"));
+    try testing.expectEqual(@as(usize, 1), try paramCount("([[I)V"));
+    try testing.expectError(error.BadDescriptor, paramCount("I)V"));
 }
