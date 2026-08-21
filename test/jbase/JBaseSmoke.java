@@ -178,6 +178,42 @@ public class JBaseSmoke {
         r += list.size();          // 19
         if (java.util.Objects.equals(list.get(1), Integer.valueOf(2))) r += 700;
         r += list.toString().length();
+
+        // java.util.HashMap: put/get many keys (resize), overwrite, remove, contains.
+        java.util.HashMap<Integer, Integer> m = new java.util.HashMap<>();
+        for (int i = 0; i < 50; i++) {
+            m.put(i, i * i);   // autobox key+value; grows past threshold
+        }
+        r += m.size();          // 50
+        int vsum = 0;
+        for (int i = 0; i < 50; i++) {
+            vsum += m.get(i);   // unbox
+        }
+        r += vsum % 100000;     // sum of squares 0..49
+        if (m.containsKey(25)) r += 300;
+        if (!m.containsKey(999)) r += 400;
+        r += m.put(10, -1);     // returns old 100
+        r += m.get(10);         // -1
+        r += m.remove(20);      // returns 400
+        r += m.size();          // 49
+        if (m.containsValue(9)) r += 55;   // 3*3
+
+        java.util.HashMap<String, Integer> sm = new java.util.HashMap<>();
+        sm.put("apple", 1);
+        sm.put("banana", 2);
+        sm.put("cherry", 3);
+        r += sm.get("banana");  // 2
+        if (sm.containsKey("apple")) r += 11;
+        r += sm.size();         // 3
+
+        // java.util.HashSet
+        java.util.HashSet<Integer> set = new java.util.HashSet<>();
+        for (int i = 0; i < 30; i++) {
+            set.add(i % 10);    // only 0..9 unique
+        }
+        r += set.size();        // 10
+        if (set.contains(5)) r += 22;
+        if (!set.contains(50)) r += 33;
         return r;
     }
 }
