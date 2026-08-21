@@ -2306,3 +2306,36 @@ test "instanceof / checkcast with interface-aware subtyping" {
     b = Budget{};
     try testing.expectEqual(Value{ .int = 0 }, (try runInLoader(&loader, &cast, "isAnimal", "()I", &.{}, &b)).?); // Square is not Animal
 }
+
+test "finally blocks (try-catch-finally, normal + exceptional + nested)" {
+    var aa = std.heap.ArenaAllocator.init(testing.allocator);
+    defer aa.deinit();
+    const a = aa.allocator();
+    const ga = testing.allocator;
+    const objS = try makeStub(ga, a, "java/lang/Object", null, null);
+    const thrS = try makeStub(ga, a, "java/lang/Throwable", "java/lang/Object", &objS);
+    const excS = try makeStub(ga, a, "java/lang/Exception", "java/lang/Throwable", &thrS);
+    const rteS = try makeStub(ga, a, "java/lang/RuntimeException", "java/lang/Exception", &excS);
+    var cfm = try ClassFile.parse(ga, @embedFile("testdata/MyErr.class"));
+    defer cfm.deinit();
+    var cff = try ClassFile.parse(ga, @embedFile("testdata/Fin.class"));
+    defer cff.deinit();
+    const myErr = try Class.init(ga, a, &cfm, &rteS);
+    const fin = try Class.init(ga, a, &cff, null);
+    var loader = Loader.init(ga);
+    defer loader.deinit();
+    for ([_]*const Class{ &objS, &thrS, &excS, &rteS, &myErr, &fin }) |c| try loader.register(c);
+
+    var b = Budget{};
+    // f(5): r=5,+100=105, finally +1 = 106
+    try testing.expectEqual(Value{ .int = 106 }, (try runInLoader(&loader, &fin, "f", "(I)I", &.{.{ .int = 5 }}, &b)).?);
+    // f(-3): r=-3, throw, catch r=1000, finally +1 = 1001
+    b = Budget{};
+    try testing.expectEqual(Value{ .int = 1001 }, (try runInLoader(&loader, &fin, "f", "(I)I", &.{.{ .int = -3 }}, &b)).?);
+    // nestedFinally(4): inner sets r=1, inner-finally +10 = 11 (no catch)
+    b = Budget{};
+    try testing.expectEqual(Value{ .int = 11 }, (try runInLoader(&loader, &fin, "nestedFinally", "(I)I", &.{.{ .int = 4 }}, &b)).?);
+    // nestedFinally(-1): throw, inner-finally +10 = 10, outer catch +100 = 110
+    b = Budget{};
+    try testing.expectEqual(Value{ .int = 110 }, (try runInLoader(&loader, &fin, "nestedFinally", "(I)I", &.{.{ .int = -1 }}, &b)).?);
+}
