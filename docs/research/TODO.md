@@ -17,7 +17,7 @@ Working list. Check off as done; commit each. Ordered roughly by dependency.
 - [x] object header + value model for references (heap + Object + reference values)
 - [ ] Phase-0 collector (semispace or mark-sweep) behind a GC interface
 - [x] new (self-class), newarray/anewarray/arraylength, array load/store (all types)
-- [x] getfield/putfield; [ ] getstatic/putstatic
+- [x] getfield/putfield, getstatic/putstatic, <clinit>
 - [x] invokevirtual/invokespecial (single class); [ ] invokeinterface + real hierarchy dispatch
 - [ ] string constants (ldc of String), <init> chains
 

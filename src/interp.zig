@@ -208,6 +208,7 @@ fn defaultValue(k: Kind) Value {
 pub const Heap = struct {
     gpa: std.mem.Allocator,
     objects: std.ArrayList(HeapObj) = .empty,
+    statics: []Value = &.{},
 
     pub fn deinit(self: *Heap) void {
         for (self.objects.items) |o| switch (o) {
@@ -215,6 +216,7 @@ pub const Heap = struct {
             .array => |x| self.gpa.free(x.data),
         };
         self.objects.deinit(self.gpa);
+        if (self.statics.len != 0) self.gpa.free(self.statics);
     }
     pub fn allocInstance(self: *Heap, class: *const Class) !u32 {
         const fields = try self.gpa.alloc(Value, class.instance_fields.len);
@@ -277,6 +279,7 @@ pub const Class = struct {
     name: []const u8,
     methods: []Method,
     instance_fields: []Field,
+    static_fields: []Field,
 
     pub const Field = struct { name: []const u8, kind: Kind };
     pub const Param = struct { kind: Kind, slot: u16 };
@@ -312,15 +315,22 @@ pub const Class = struct {
             if (!fld.access_flags.isStatic()) nfields += 1;
         }
         const instance_fields = try arena.alloc(Field, nfields);
+        const static_fields = try arena.alloc(Field, cf.fields.len - nfields);
         var fi: usize = 0;
+        var si: usize = 0;
         for (cf.fields) |fld| {
-            if (fld.access_flags.isStatic()) continue;
             const fdesc = try cf.constant_pool.utf8(fld.descriptor_index);
-            instance_fields[fi] = .{
+            const field = Field{
                 .name = try cf.constant_pool.utf8(fld.name_index),
                 .kind = kindOf(try descriptor.parseFieldDescriptor(fdesc)),
             };
-            fi += 1;
+            if (fld.access_flags.isStatic()) {
+                static_fields[si] = field;
+                si += 1;
+            } else {
+                instance_fields[fi] = field;
+                fi += 1;
+            }
         }
 
         const methods = try arena.alloc(Method, cf.methods.len);
@@ -352,7 +362,7 @@ pub const Class = struct {
                 .is_static = is_static,
             };
         }
-        return .{ .gpa = gpa, .cp = cf.constant_pool, .name = cls_name, .methods = methods, .instance_fields = instance_fields };
+        return .{ .gpa = gpa, .cp = cf.constant_pool, .name = cls_name, .methods = methods, .instance_fields = instance_fields, .static_fields = static_fields };
     }
 
     fn findField(self: *const Class, name: []const u8) ?usize {
@@ -360,6 +370,23 @@ pub const Class = struct {
             if (std.mem.eql(u8, fd.name, name)) return i;
         }
         return null;
+    }
+    fn findStatic(self: *const Class, name: []const u8) ?usize {
+        for (self.static_fields, 0..) |fd, i| {
+            if (std.mem.eql(u8, fd.name, name)) return i;
+        }
+        return null;
+    }
+
+    fn initStatics(self: *const Class, heap: *Heap, budget: *Budget) RunError!void {
+        heap.statics = try self.gpa.alloc(Value, self.static_fields.len);
+        for (heap.statics, self.static_fields) |*sv, sf| sv.* = defaultValue(sf.kind);
+        // Run the class initializer if present (sets non-constant statics).
+        if (self.find("<clinit>", "()V")) |ci| {
+            if (ci.code) |cc| {
+                _ = try exec(self.gpa, self, heap, budget, cc.code, cc.max_stack, cc.max_locals, &.{});
+            }
+        }
     }
 
     fn find(self: *const Class, name: []const u8, desc: []const u8) ?*const Method {
@@ -387,6 +414,7 @@ pub const Class = struct {
         const n = try layoutArgs(m, args, &slots);
         var heap = Heap{ .gpa = self.gpa };
         defer heap.deinit();
+        try self.initStatics(&heap, budget);
         return exec(self.gpa, self, &heap, budget, c.code, c.max_stack, c.max_locals, slots[0..n]);
     }
 
@@ -1232,6 +1260,25 @@ fn exec(alloc: std.mem.Allocator, class: ?*const Class, heap: ?*Heap, budget: *B
             f.pc += 3;
             continue :sw try step(&f, code);
         },
+        .getstatic => {
+            const cls = class orelse return error.UnsupportedOpcode;
+            const hp = f.heap orelse return error.UnsupportedOpcode;
+            const fname = try fieldName(cls, try u16At(code, f.pc + 1));
+            const si = cls.findStatic(fname) orelse return error.LinkError;
+            try f.pushKind(hp.statics[si]);
+            f.pc += 3;
+            continue :sw try step(&f, code);
+        },
+        .putstatic => {
+            const cls = class orelse return error.UnsupportedOpcode;
+            const hp = f.heap orelse return error.UnsupportedOpcode;
+            const fname = try fieldName(cls, try u16At(code, f.pc + 1));
+            const si = cls.findStatic(fname) orelse return error.LinkError;
+            const kind = cls.static_fields[si].kind;
+            hp.statics[si] = try f.popKind(kind);
+            f.pc += 3;
+            continue :sw try step(&f, code);
+        },
         .invokestatic => {
             const cls = class orelse return error.UnsupportedOpcode;
             try invokeStatic(&f, cls, code);
@@ -1591,4 +1638,21 @@ test "integration: bubble sort agrees with linear max, and sorts correctly" {
             try testing.expectEqual(Value{ .int = 1 }, (try cls.callStatic("isSorted", "(II)Z", &.{ seed, n })).?);
         }
     }
+}
+
+test "static fields: getstatic/putstatic and <clinit>" {
+    var cf: ClassFile = undefined;
+    var arena: std.heap.ArenaAllocator = undefined;
+    const cls = try loadClass("testdata/Stat.class", &cf, &arena);
+    defer cf.deinit();
+    defer arena.deinit();
+    // base initialized by <clinit> to 10
+    try testing.expectEqual(Value{ .int = 10 }, (try cls.callStatic("getBase", "()I", &.{})).?);
+    // counter defaults 0; addAndGet(7) -> 7
+    try testing.expectEqual(Value{ .int = 7 }, (try cls.callStatic("addAndGet", "(I)I", &.{7})).?);
+    // within one run, static state persists: 0 -> 5 -> 10
+    try testing.expectEqual(Value{ .int = 10 }, (try cls.callStatic("bumpTwice", "()I", &.{})).?);
+    // long static initialized by <clinit> to 1000; addTotal(234) -> 1234
+    var b = Budget{};
+    try testing.expectEqual(Value{ .long = 1234 }, (try cls.callStaticValues("addTotal", "(J)J", &.{.{ .long = 234 }}, &b)).?);
 }
