@@ -209,7 +209,8 @@ pub const LambdaObj = struct {
     captures: []Value,
 };
 pub const BuilderObj = struct { class: *const Class, buf: []i32, len: usize }; // mutable StringBuilder
-pub const HeapObj = union(enum) { instance: Instance, array: Array, string: StringObj, lambda: LambdaObj, builder: BuilderObj };
+pub const BoxedObj = struct { class: *const Class, value: Value }; // boxed primitive (Integer/Long/...)
+pub const HeapObj = union(enum) { instance: Instance, array: Array, string: StringObj, lambda: LambdaObj, builder: BuilderObj, boxed: BoxedObj };
 
 const stub_cp_entries = [_]constant_pool.Constant{.unusable};
 const stub_return_code = [_]u8{0xb1}; // just `return`
@@ -250,6 +251,7 @@ pub const Heap = struct {
             .string => |x| self.gpa.free(x.chars),
             .lambda => |x| self.gpa.free(x.captures),
             .builder => |x| self.gpa.free(x.buf),
+            .boxed => {},
         };
         self.objects.deinit(self.gpa);
         self.marked.deinit(self.gpa);
@@ -293,6 +295,9 @@ pub const Heap = struct {
         const buf = try self.gpa.alloc(i32, 16);
         return self.put(.{ .builder = .{ .class = class, .buf = buf, .len = 0 } });
     }
+    pub fn putBoxed(self: *Heap, class: *const Class, value: Value) !u32 {
+        return self.put(.{ .boxed = .{ .class = class, .value = value } });
+    }
     pub fn get(self: *Heap, id: u32) *HeapObj {
         return if (self.objects.items[id]) |*o| o else unreachable;
     }
@@ -318,6 +323,7 @@ fn markObject(heap: *Heap, id: u32) void {
         .string => {},
         .lambda => |x| for (x.captures) |v| markValue(heap, v),
         .builder => {},
+        .boxed => {},
     }
 }
 fn remapValuePtr(v: *Value, forwarding: []const u32) void {
@@ -344,6 +350,7 @@ fn remapObject(obj: *HeapObj, forwarding: []const u32) void {
         .string => {},
         .lambda => |*x| for (x.captures) |*v| remapValuePtr(v, forwarding),
         .builder => {},
+        .boxed => {},
     }
 }
 
@@ -381,6 +388,7 @@ fn collectMajor(f: *Frame) void {
                     .string => |x| heap.gpa.free(x.chars),
                     .lambda => |x| heap.gpa.free(x.captures),
                     .builder => |x| heap.gpa.free(x.buf),
+                    .boxed => {},
                 }
                 heap.objects.items[old] = null;
             }
@@ -428,6 +436,7 @@ fn markYoungObject(heap: *Heap, id: u32) void {
         .string => {},
         .lambda => |x| for (x.captures) |v| markYoungValue(heap, v),
         .builder => {},
+        .boxed => {},
     }
 }
 /// Fast, non-moving collection of the young generation. Roots into the young gen
@@ -455,6 +464,7 @@ fn collectMinor(f: *Frame) void {
                 .string => {},
                 .lambda => |x| for (x.captures) |v| markYoungValue(heap, v),
                 .builder => {},
+                .boxed => {},
             };
         }
     }
@@ -471,6 +481,7 @@ fn collectMinor(f: *Frame) void {
                         .string => |x| heap.gpa.free(x.chars),
                         .lambda => |x| heap.gpa.free(x.captures),
                         .builder => |x| heap.gpa.free(x.buf),
+                        .boxed => {},
                     }
                     heap.objects.items[id] = null;
                     heap.free_list.append(heap.gpa, id) catch {};
@@ -981,6 +992,7 @@ fn invokeInstance(f: *Frame, cls: *const Class, code: []const u8, is_special: bo
     const heap = f.heap orelse return error.UnsupportedOpcode;
     switch (heap.get(oid).*) {
         .lambda => |lam| return dispatchLambda(f, lam, slots, pl.params),
+        .boxed => return boxedMethod(f, oid, slots, pl.params, mname, mdesc),
         else => {},
     }
     slots[0] = .{ .reference = oid };
@@ -1661,6 +1673,161 @@ fn arraysIntrinsic(f: *Frame, name: []const u8, desc: []const u8) RunError!void 
     return error.UnsupportedOpcode;
 }
 
+fn boxWrapper(f: *Frame, name: []const u8, value: Value) RunError!void {
+    const heap = f.heap orelse return error.UnsupportedOpcode;
+    const cls = f.loader.find(name) orelse return error.LinkError;
+    try f.push(.{ .reference = try heap.putBoxed(cls, value) });
+}
+fn parseIntChars(chars: []const i32) ?i64 {
+    if (chars.len == 0) return null;
+    var i: usize = 0;
+    var neg = false;
+    if (chars[0] == '-') {
+        neg = true;
+        i = 1;
+    } else if (chars[0] == '+') {
+        i = 1;
+    }
+    if (i >= chars.len) return null;
+    var v: i64 = 0;
+    while (i < chars.len) : (i += 1) {
+        if (chars[i] < '0' or chars[i] > '9') return null;
+        v = v * 10 + (chars[i] - '0');
+    }
+    return if (neg) -v else v;
+}
+fn valueToInt(v: Value) i32 {
+    return switch (v) {
+        .int => |x| x,
+        .long => |x| @truncate(x),
+        .double => |x| f2i(x),
+        .float => |x| f2i(x),
+        else => 0,
+    };
+}
+fn valueToLong(v: Value) i64 {
+    return switch (v) {
+        .int => |x| x,
+        .long => |x| x,
+        .double => |x| f2l(x),
+        .float => |x| f2l(x),
+        else => 0,
+    };
+}
+fn valueToDouble(v: Value) f64 {
+    return switch (v) {
+        .int => |x| @floatFromInt(x),
+        .long => |x| @floatFromInt(x),
+        .double => |x| x,
+        .float => |x| x,
+        else => 0,
+    };
+}
+fn valueToFloat(v: Value) f32 {
+    return switch (v) {
+        .int => |x| @floatFromInt(x),
+        .long => |x| @floatFromInt(x),
+        .double => |x| @floatCast(x),
+        .float => |x| x,
+        else => 0,
+    };
+}
+fn valueEquals(a: Value, b: Value) bool {
+    return switch (a) {
+        .int => |x| switch (b) {
+            .int => |y| x == y,
+            else => false,
+        },
+        .long => |x| switch (b) {
+            .long => |y| x == y,
+            else => false,
+        },
+        .double => |x| switch (b) {
+            .double => |y| x == y,
+            else => false,
+        },
+        .float => |x| switch (b) {
+            .float => |y| x == y,
+            else => false,
+        },
+        else => false,
+    };
+}
+fn boxHash(bo: BoxedObj) i32 {
+    if (std.mem.eql(u8, bo.class.name, "java/lang/Boolean")) return if (bo.value.int != 0) 1231 else 1237;
+    if (std.mem.eql(u8, bo.class.name, "java/lang/Long")) {
+        const u: u64 = @bitCast(bo.value.long);
+        return @bitCast(@as(u32, @truncate(u ^ (u >> 32))));
+    }
+    if (std.mem.eql(u8, bo.class.name, "java/lang/Double")) {
+        const u: u64 = @bitCast(bo.value.double);
+        return @bitCast(@as(u32, @truncate(u ^ (u >> 32))));
+    }
+    return valueToInt(bo.value);
+}
+fn boxStatic(f: *Frame, owner: []const u8, name: []const u8, desc: []const u8) RunError!void {
+    if (std.mem.eql(u8, owner, "java/lang/Double")) {
+        if (eq2(name, desc, "valueOf", "(D)Ljava/lang/Double;")) return boxWrapper(f, owner, .{ .double = try f.popDouble() });
+    } else if (std.mem.eql(u8, owner, "java/lang/Float")) {
+        if (eq2(name, desc, "valueOf", "(F)Ljava/lang/Float;")) return boxWrapper(f, owner, .{ .float = try f.popFloat() });
+    } else if (std.mem.eql(u8, owner, "java/lang/Boolean")) {
+        if (eq2(name, desc, "valueOf", "(Z)Ljava/lang/Boolean;")) return boxWrapper(f, owner, .{ .int = try f.popInt() });
+    } else if (std.mem.eql(u8, owner, "java/lang/Character")) {
+        if (eq2(name, desc, "valueOf", "(C)Ljava/lang/Character;")) return boxWrapper(f, owner, .{ .int = try f.popInt() });
+    } else if (std.mem.eql(u8, owner, "java/lang/Short")) {
+        if (eq2(name, desc, "valueOf", "(S)Ljava/lang/Short;")) return boxWrapper(f, owner, .{ .int = try f.popInt() });
+    } else if (std.mem.eql(u8, owner, "java/lang/Byte")) {
+        if (eq2(name, desc, "valueOf", "(B)Ljava/lang/Byte;")) return boxWrapper(f, owner, .{ .int = try f.popInt() });
+    }
+    return error.UnsupportedOpcode;
+}
+fn boxedMethod(f: *Frame, oid: u32, sam_slots: []const Value, sam_params: []const Class.Param, mname: []const u8, mdesc: []const u8) RunError!void {
+    const heap = f.heap orelse return error.UnsupportedOpcode;
+    const bo = switch (heap.get(oid).*) {
+        .boxed => |b| b,
+        else => return error.LinkError,
+    };
+    const bv = bo.value;
+    if (eq2(mname, mdesc, "intValue", "()I")) return f.pushInt(valueToInt(bv));
+    if (eq2(mname, mdesc, "longValue", "()J")) return f.pushLong(valueToLong(bv));
+    if (eq2(mname, mdesc, "doubleValue", "()D")) return f.pushDouble(valueToDouble(bv));
+    if (eq2(mname, mdesc, "floatValue", "()F")) return f.pushFloat(valueToFloat(bv));
+    if (eq2(mname, mdesc, "shortValue", "()S")) return f.pushInt(@as(i16, @truncate(valueToInt(bv))));
+    if (eq2(mname, mdesc, "byteValue", "()B")) return f.pushInt(@as(i8, @truncate(valueToInt(bv))));
+    if (eq2(mname, mdesc, "booleanValue", "()Z")) return f.pushInt(bv.int);
+    if (eq2(mname, mdesc, "charValue", "()C")) return f.pushInt(bv.int);
+    if (eq2(mname, mdesc, "hashCode", "()I")) return f.pushInt(boxHash(bo));
+    if (eq2(mname, mdesc, "equals", "(Ljava/lang/Object;)Z")) {
+        const other = sam_slots[sam_params[0].slot];
+        var eq: i32 = 0;
+        switch (other) {
+            .reference => |r| if (r) |oidr| switch (heap.get(oidr).*) {
+                .boxed => |ob| if (std.mem.eql(u8, ob.class.name, bo.class.name) and valueEquals(ob.value, bv)) {
+                    eq = 1;
+                },
+                else => {},
+            },
+            else => {},
+        }
+        return f.pushInt(eq);
+    }
+    if (eq2(mname, mdesc, "toString", "()Ljava/lang/String;")) {
+        var tmp: std.ArrayList(i32) = .empty;
+        defer tmp.deinit(heap.gpa);
+        if (std.mem.eql(u8, bo.class.name, "java/lang/Boolean")) {
+            try appendAscii(&tmp, heap.gpa, if (bv.int != 0) "true" else "false");
+        } else if (std.mem.eql(u8, bo.class.name, "java/lang/Character")) {
+            try tmp.append(heap.gpa, bv.int);
+        } else if (std.mem.eql(u8, bo.class.name, "java/lang/Long")) {
+            try appendDecimalLong(&tmp, heap.gpa, bv.long);
+        } else {
+            try appendDecimalInt(&tmp, heap.gpa, valueToInt(bv));
+        }
+        return f.push(.{ .reference = try newString(f, tmp.items) });
+    }
+    return error.UnsupportedOpcode;
+}
+
 fn integerIntrinsic(f: *Frame, name: []const u8, desc: []const u8) RunError!void {
     if (eq2(name, desc, "bitCount", "(I)I")) return f.pushInt(@popCount(try f.popInt()));
     if (eq2(name, desc, "numberOfLeadingZeros", "(I)I")) return f.pushInt(@clz(@as(u32, @bitCast(try f.popInt()))));
@@ -1700,6 +1867,13 @@ fn integerIntrinsic(f: *Frame, name: []const u8, desc: []const u8) RunError!void
         const x = try f.popInt();
         return f.pushInt(if (x > 0) @as(i32, 1) else if (x < 0) @as(i32, -1) else 0);
     }
+    if (eq2(name, desc, "valueOf", "(I)Ljava/lang/Integer;")) return boxWrapper(f, "java/lang/Integer", .{ .int = try f.popInt() });
+    if (eq2(name, desc, "parseInt", "(Ljava/lang/String;)I")) {
+        const heap = f.heap orelse return error.UnsupportedOpcode;
+        const chars = try strChars(heap, (try f.popRef()) orelse return error.NullPointer);
+        const v = parseIntChars(chars) orelse return error.LinkError;
+        return f.pushInt(@truncate(v));
+    }
     return error.UnsupportedOpcode;
 }
 fn longIntrinsic(f: *Frame, name: []const u8, desc: []const u8) RunError!void {
@@ -1717,6 +1891,12 @@ fn longIntrinsic(f: *Frame, name: []const u8, desc: []const u8) RunError!void {
         const b = try f.popLong();
         const a = try f.popLong();
         return f.pushLong(@min(a, b));
+    }
+    if (eq2(name, desc, "valueOf", "(J)Ljava/lang/Long;")) return boxWrapper(f, "java/lang/Long", .{ .long = try f.popLong() });
+    if (eq2(name, desc, "parseLong", "(Ljava/lang/String;)J")) {
+        const heap = f.heap orelse return error.UnsupportedOpcode;
+        const chars = try strChars(heap, (try f.popRef()) orelse return error.NullPointer);
+        return f.pushLong(parseIntChars(chars) orelse return error.LinkError);
     }
     return error.UnsupportedOpcode;
 }
@@ -1781,6 +1961,10 @@ fn invokeStatic(f: *Frame, cls: *const Class, code: []const u8) RunError!void {
     if (std.mem.eql(u8, owner_name, "java/lang/Long")) return longIntrinsic(f, mname, mdesc);
     if (std.mem.eql(u8, owner_name, "java/util/Arrays")) return arraysIntrinsic(f, mname, mdesc);
     if (std.mem.eql(u8, owner_name, "java/util/Objects")) return objectsIntrinsic(f, mname, mdesc);
+    if (std.mem.eql(u8, owner_name, "java/lang/Double") or std.mem.eql(u8, owner_name, "java/lang/Float") or
+        std.mem.eql(u8, owner_name, "java/lang/Boolean") or std.mem.eql(u8, owner_name, "java/lang/Character") or
+        std.mem.eql(u8, owner_name, "java/lang/Short") or std.mem.eql(u8, owner_name, "java/lang/Byte"))
+        return boxStatic(f, owner_name, mname, mdesc);
     const tclass = try resolveClass(f, cls, try refClassName(cls, ref.class_index));
     const tr = tclass.resolve(mname, mdesc) orelse return error.MethodNotFound;
     const target = tr.method;
@@ -2651,6 +2835,7 @@ fn exec(alloc: std.mem.Allocator, class: ?*const Class, heap: ?*Heap, loader: *L
                 .string => |x| result = if (isInstanceOf(x.class, target)) 1 else 0,
                 .lambda => |x| result = if (std.mem.eql(u8, x.iface, target)) 1 else 0,
                 .builder => |x| result = if (isInstanceOf(x.class, target)) 1 else 0,
+                .boxed => |x| result = if (isInstanceOf(x.class, target)) 1 else 0,
                 .array => {}, // array instanceof: not modeled -> 0
             };
             try f.pushInt(result);
@@ -2667,6 +2852,7 @@ fn exec(alloc: std.mem.Allocator, class: ?*const Class, heap: ?*Heap, loader: *L
                 .string => |x| if (!isInstanceOf(x.class, target)) return error.LinkError,
                 .lambda => {},
                 .builder => {},
+                .boxed => {},
                 .array => {},
             };
             try f.push(.{ .reference = r });

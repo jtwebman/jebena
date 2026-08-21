@@ -8,7 +8,7 @@ highest-value item that is currently tractable. Every change must keep
 - [ ] StringBuilder / StringBuffer (append/toString/insert/length/charAt/reverse)
 - [x] this-capturing lambdas + instance-method references (obj::method, bound refs)
 - [ ] float/double -> String (Java shortest-round-trip; match Double.toString)
-- [ ] boxing: real-ish Integer/Long/Double/Boolean (valueOf/intValue/…) so generic
+- [x] boxing: Integer/Long/Double/Float/Boolean/Character/Short/Byte (valueOf/xxxValue/equals/hashCode/parse/toString); [ ] generic functional interfaces w/ box-unbox adaptation
       functional interfaces + autoboxing work
 - [ ] remaining opcodes / edge cases surfaced by differential fuzzing
 - [ ] more intrinsics: Character, more Math/Integer/Long/String, Objects, Arrays.*

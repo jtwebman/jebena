@@ -94,4 +94,14 @@ public class DiffMore {
     static int sbChain() { String s = new StringBuilder("abc").append(123).append("def").reverse().toString(); return s.length() * 1000 + s.charAt(0); }
     static int sbInit() { StringBuilder a = new StringBuilder("hello"); StringBuilder b = new StringBuilder(); b.append(a.toString()).append("!"); return b.length() * 100 + b.toString().charAt(5); }
     static int sbLong() { StringBuilder sb = new StringBuilder(); sb.append(9999999999L).append('|').append(-42); String s = sb.toString(); return s.length() * 100 + s.indexOf('|'); }
+
+    static int autobox() { Integer a = 5; int b = a; return b + a.intValue() + Integer.valueOf(100).intValue(); }
+    static int boxEq() { Integer a = 500; Integer b = 500; Integer c = 5; return (a.equals(b) ? 1 : 0) * 100 + (a.equals(c) ? 1 : 0) * 10 + a.hashCode() / 100; }
+    static int longBox() { Long x = 9999999999L; return (int) (x.longValue() % 100000) + x.intValue(); }
+    static int boolBox() { Boolean t = Boolean.valueOf(true); Boolean fl = false; return (t.booleanValue() ? 1 : 0) * 10 + (fl.booleanValue() ? 1 : 0); }
+    static int doubleBox() { Double d = 3.5; return (int) (d.doubleValue() * 10) + d.intValue() + Double.valueOf(2.5).intValue(); }
+    static int charBox() { Character c = 'A'; return c.charValue() + Character.valueOf('Z').charValue(); }
+    static int mixBox() { Integer i = 42; Long l = 1000L; Double d = 2.5; return i.intValue() + l.intValue() + d.intValue() + (i.equals(Integer.valueOf(42)) ? 1000 : 0); }
+    static int parseBox() { return Integer.parseInt("789") + Integer.parseInt("-42") + (int) Long.parseLong("50000"); }
+    static int boxHashSum() { int s = 0; for (int i = 0; i < 100; i++) { Integer x = i * 7; s += x.hashCode() % 13; } return s; }
 }
