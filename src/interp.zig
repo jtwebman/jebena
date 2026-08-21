@@ -2422,6 +2422,208 @@ fn pushDottedName(f: *Frame, internal: []const u8, simple: bool) RunError!void {
     for (internal[start..]) |c| tmp.append(heap.gpa, if (c == '/') '.' else c) catch return error.OutOfMemory;
     try f.push(.{ .reference = try makeString(f, tmp.items) });
 }
+const MemberRef = struct { class_idx: usize, member_idx: usize };
+fn isCtorOrClinit(name: []const u8) bool {
+    return std.mem.eql(u8, name, "<init>") or std.mem.eql(u8, name, "<clinit>");
+}
+fn stringFromBytes(f: *Frame, bytes: []const u8) RunError!u32 {
+    const heap = f.heap orelse return error.UnsupportedOpcode;
+    const chars = mutf8ToChars(heap.gpa, bytes) catch return error.OutOfMemory;
+    defer heap.gpa.free(chars);
+    return makeString(f, chars);
+}
+fn memberMirror(f: *Frame, member_class_name: []const u8, class_idx: usize, member_idx: usize) RunError!u32 {
+    const heap = f.heap orelse return error.UnsupportedOpcode;
+    const mc = f.loader.find(member_class_name) orelse return error.LinkError;
+    const id = try heap.allocInstance(mc);
+    const ci = mc.findField("vmClassIndex") orelse return error.LinkError;
+    const vi = mc.findField("vmIndex") orelse return error.LinkError;
+    switch (heap.get(id).*) {
+        .instance => |*inst| {
+            inst.fields[ci] = .{ .int = @intCast(class_idx) };
+            inst.fields[vi] = .{ .int = @intCast(member_idx) };
+        },
+        else => return error.LinkError,
+    }
+    return id;
+}
+fn memberIndices(f: *Frame, mirror_id: u32) RunError!MemberRef {
+    const heap = f.heap orelse return error.UnsupportedOpcode;
+    const inst = switch (heap.get(mirror_id).*) {
+        .instance => |x| x,
+        else => return error.LinkError,
+    };
+    const ci = inst.class.findField("vmClassIndex") orelse return error.LinkError;
+    const vi = inst.class.findField("vmIndex") orelse return error.LinkError;
+    return .{ .class_idx = @intCast(inst.fields[ci].int), .member_idx = @intCast(inst.fields[vi].int) };
+}
+fn returnDescChar(desc: []const u8) u8 {
+    const rp = std.mem.indexOfScalar(u8, desc, ')') orelse return 'V';
+    if (rp + 1 >= desc.len) return 'V';
+    return desc[rp + 1];
+}
+fn convertArgToValue(f: *Frame, argval: Value, kind: Kind) RunError!Value {
+    if (kind == .reference) return argval;
+    const heap = f.heap orelse return error.UnsupportedOpcode;
+    const wid = switch (argval) {
+        .reference => |r| r orelse return error.NullPointer,
+        else => return argval,
+    };
+    const inst = switch (heap.get(wid).*) {
+        .instance => |x| x,
+        else => return error.TypeMismatch,
+    };
+    const vi = inst.class.findField("value") orelse return error.TypeMismatch;
+    return inst.fields[vi];
+}
+fn boxValueForDesc(f: *Frame, rc: u8, value: Value) RunError!u32 {
+    const wname = switch (rc) {
+        'I' => "java/lang/Integer",
+        'J' => "java/lang/Long",
+        'D' => "java/lang/Double",
+        'F' => "java/lang/Float",
+        'Z' => "java/lang/Boolean",
+        'C' => "java/lang/Character",
+        'S' => "java/lang/Short",
+        'B' => "java/lang/Byte",
+        else => return error.UnsupportedOpcode,
+    };
+    const heap = f.heap orelse return error.UnsupportedOpcode;
+    const wc = f.loader.find(wname) orelse return error.LinkError;
+    const id = try heap.allocInstance(wc);
+    const vi = wc.findField("value") orelse return error.LinkError;
+    switch (heap.get(id).*) {
+        .instance => |*inst| inst.fields[vi] = value,
+        else => return error.LinkError,
+    }
+    return id;
+}
+fn reflectGetMembers(f: *Frame, class_mirror: u32, comptime kind: enum { methods, fields, ctors }) RunError!void {
+    const heap = f.heap orelse return error.UnsupportedOpcode;
+    const cls = try mirrorClass(f, class_mirror);
+    const class_idx = f.loader.indexOf(cls) orelse return error.LinkError;
+    const mirror_class = switch (kind) {
+        .methods => "java/lang/reflect/Method",
+        .fields => "java/lang/reflect/Field",
+        .ctors => "java/lang/reflect/Constructor",
+    };
+    // count + collect member indices first (no held array pointer across allocs)
+    var idxs: std.ArrayList(usize) = .empty;
+    defer idxs.deinit(heap.gpa);
+    switch (kind) {
+        .fields => for (cls.instance_fields, 0..) |_, i| idxs.append(heap.gpa, i) catch return error.OutOfMemory,
+        .methods => for (cls.methods, 0..) |m, i| {
+            if (!isCtorOrClinit(m.name)) idxs.append(heap.gpa, i) catch return error.OutOfMemory;
+        },
+        .ctors => for (cls.methods, 0..) |m, i| {
+            if (std.mem.eql(u8, m.name, "<init>")) idxs.append(heap.gpa, i) catch return error.OutOfMemory;
+        },
+    }
+    const mirrors = heap.gpa.alloc(u32, idxs.items.len) catch return error.OutOfMemory;
+    defer heap.gpa.free(mirrors);
+    for (idxs.items, 0..) |mi, i| mirrors[i] = try memberMirror(f, mirror_class, class_idx, mi);
+    const aid = try heap.allocArray(.reference, idxs.items.len);
+    const arr = try arrayOf(f, aid);
+    for (mirrors, 0..) |mid, i| arr.data[i] = .{ .reference = mid };
+    return f.push(.{ .reference = aid });
+}
+fn reflectInvoke(f: *Frame, method_mirror: u32, slots: []const Value) RunError!void {
+    const ref = try memberIndices(f, method_mirror);
+    const owner = f.loader.classes.items[ref.class_idx];
+    const method = &owner.methods[ref.member_idx];
+    const cc = method.code orelse return error.LinkError;
+    const islots = owner.gpa.alloc(Value, method.arg_slots) catch return error.OutOfMemory;
+    defer owner.gpa.free(islots);
+    for (islots) |*sv| sv.* = .{ .int = 0 };
+    if (!method.is_static) islots[0] = slots[1];
+    const args_arr: ?*Array = switch (slots[2]) {
+        .reference => |r| if (r) |aid| (arrayOf(f, aid) catch null) else null,
+        else => null,
+    };
+    for (method.params, 0..) |p, i| {
+        const argval: Value = if (args_arr) |aa| (if (i < aa.data.len) aa.data[i] else Value{ .int = 0 }) else Value{ .int = 0 };
+        islots[p.slot] = try convertArgToValue(f, argval, p.kind);
+        if (p.kind == .long or p.kind == .double) islots[p.slot + 1] = .top;
+    }
+    if (f.budget.depth >= f.budget.max_depth) return error.CallDepthExceeded;
+    f.budget.depth += 1;
+    defer f.budget.depth -= 1;
+    const ret = try exec(owner.gpa, owner, f.heap, f.loader, f.budget, cc.code, cc.max_stack, cc.max_locals, islots, cc.exception_table, f);
+    const rc = returnDescChar(method.descriptor);
+    if (rc == 'V') return f.push(.{ .reference = null });
+    if (rc == 'L' or rc == '[') return f.push(ret orelse Value{ .reference = null });
+    return f.push(.{ .reference = try boxValueForDesc(f, rc, ret orelse Value{ .int = 0 }) });
+}
+fn reflectFieldGet(f: *Frame, field_mirror: u32, slots: []const Value) RunError!void {
+    const heap = f.heap orelse return error.UnsupportedOpcode;
+    const ref = try memberIndices(f, field_mirror);
+    const dcls = f.loader.classes.items[ref.class_idx];
+    const fld = dcls.instance_fields[ref.member_idx];
+    const obj = switch (slots[1]) {
+        .reference => |r| r orelse return error.NullPointer,
+        else => return error.TypeMismatch,
+    };
+    const inst = switch (heap.get(obj).*) {
+        .instance => |x| x,
+        else => return error.LinkError,
+    };
+    const fi = inst.class.findField(fld.name) orelse return error.LinkError;
+    const v = inst.fields[fi];
+    if (fld.kind == .reference) return f.push(v);
+    const rc: u8 = switch (fld.kind) {
+        .int => 'I',
+        .long => 'J',
+        .double => 'D',
+        .float => 'F',
+        .reference => unreachable,
+    };
+    return f.push(.{ .reference = try boxValueForDesc(f, rc, v) });
+}
+fn reflectFieldSet(f: *Frame, field_mirror: u32, slots: []const Value) RunError!void {
+    const heap = f.heap orelse return error.UnsupportedOpcode;
+    const ref = try memberIndices(f, field_mirror);
+    const dcls = f.loader.classes.items[ref.class_idx];
+    const fld = dcls.instance_fields[ref.member_idx];
+    const obj = switch (slots[1]) {
+        .reference => |r| r orelse return error.NullPointer,
+        else => return error.TypeMismatch,
+    };
+    const converted = if (fld.kind == .reference) slots[2] else try convertArgToValue(f, slots[2], fld.kind);
+    switch (heap.get(obj).*) {
+        .instance => |*inst| {
+            const fi = inst.class.findField(fld.name) orelse return error.LinkError;
+            inst.fields[fi] = converted;
+        },
+        else => return error.LinkError,
+    }
+    writeBarrier(heap, obj, converted);
+}
+fn reflectNewInstance(f: *Frame, ctor_mirror: u32, slots: []const Value) RunError!void {
+    const heap = f.heap orelse return error.UnsupportedOpcode;
+    const ref = try memberIndices(f, ctor_mirror);
+    const owner = f.loader.classes.items[ref.class_idx];
+    const ctor = &owner.methods[ref.member_idx];
+    const cc = ctor.code orelse return error.LinkError;
+    const id = try heap.allocInstance(owner);
+    const islots = owner.gpa.alloc(Value, ctor.arg_slots) catch return error.OutOfMemory;
+    defer owner.gpa.free(islots);
+    for (islots) |*sv| sv.* = .{ .int = 0 };
+    islots[0] = .{ .reference = id };
+    const args_arr: ?*Array = switch (slots[1]) {
+        .reference => |r| if (r) |aid| (arrayOf(f, aid) catch null) else null,
+        else => null,
+    };
+    for (ctor.params, 0..) |p, i| {
+        const argval: Value = if (args_arr) |aa| (if (i < aa.data.len) aa.data[i] else Value{ .int = 0 }) else Value{ .int = 0 };
+        islots[p.slot] = try convertArgToValue(f, argval, p.kind);
+        if (p.kind == .long or p.kind == .double) islots[p.slot + 1] = .top;
+    }
+    if (f.budget.depth >= f.budget.max_depth) return error.CallDepthExceeded;
+    f.budget.depth += 1;
+    defer f.budget.depth -= 1;
+    _ = try exec(owner.gpa, owner, f.heap, f.loader, f.budget, cc.code, cc.max_stack, cc.max_locals, islots, cc.exception_table, f);
+    return f.push(.{ .reference = id });
+}
 fn nativeInvoke(f: *Frame, owner: *const Class, method: *const Class.Method, slots: []const Value) RunError!void {
     const on = owner.name;
     const mn = method.name;
@@ -2521,6 +2723,47 @@ fn nativeInvoke(f: *Frame, owner: *const Class, method: *const Class.Method, slo
         const rc = try mirrorClass(f, recv);
         if (eq2(mn, md, "getName", "()Ljava/lang/String;")) return pushDottedName(f, rc.name, false);
         if (eq2(mn, md, "getSimpleName", "()Ljava/lang/String;")) return pushDottedName(f, rc.name, true);
+        if (eq2(mn, md, "getDeclaredMethods", "()[Ljava/lang/reflect/Method;")) return reflectGetMembers(f, recv, .methods);
+        if (eq2(mn, md, "getDeclaredFields", "()[Ljava/lang/reflect/Field;")) return reflectGetMembers(f, recv, .fields);
+        if (eq2(mn, md, "getDeclaredConstructors", "()[Ljava/lang/reflect/Constructor;")) return reflectGetMembers(f, recv, .ctors);
+    }
+    if (std.mem.eql(u8, on, "java/lang/reflect/Method")) {
+        const self = switch (slots[0]) {
+            .reference => |r| r orelse return error.NullPointer,
+            else => return error.TypeMismatch,
+        };
+        if (eq2(mn, md, "getName", "()Ljava/lang/String;")) {
+            const ref = try memberIndices(f, self);
+            return f.push(.{ .reference = try stringFromBytes(f, f.loader.classes.items[ref.class_idx].methods[ref.member_idx].name) });
+        }
+        if (eq2(mn, md, "getParameterCount", "()I")) {
+            const ref = try memberIndices(f, self);
+            return f.pushInt(@intCast(f.loader.classes.items[ref.class_idx].methods[ref.member_idx].params.len));
+        }
+        if (eq2(mn, md, "invoke", "(Ljava/lang/Object;[Ljava/lang/Object;)Ljava/lang/Object;")) return reflectInvoke(f, self, slots);
+    }
+    if (std.mem.eql(u8, on, "java/lang/reflect/Field")) {
+        const self = switch (slots[0]) {
+            .reference => |r| r orelse return error.NullPointer,
+            else => return error.TypeMismatch,
+        };
+        if (eq2(mn, md, "getName", "()Ljava/lang/String;")) {
+            const ref = try memberIndices(f, self);
+            return f.push(.{ .reference = try stringFromBytes(f, f.loader.classes.items[ref.class_idx].instance_fields[ref.member_idx].name) });
+        }
+        if (eq2(mn, md, "get", "(Ljava/lang/Object;)Ljava/lang/Object;")) return reflectFieldGet(f, self, slots);
+        if (eq2(mn, md, "set", "(Ljava/lang/Object;Ljava/lang/Object;)V")) return reflectFieldSet(f, self, slots);
+    }
+    if (std.mem.eql(u8, on, "java/lang/reflect/Constructor")) {
+        const self = switch (slots[0]) {
+            .reference => |r| r orelse return error.NullPointer,
+            else => return error.TypeMismatch,
+        };
+        if (eq2(mn, md, "getParameterCount", "()I")) {
+            const ref = try memberIndices(f, self);
+            return f.pushInt(@intCast(f.loader.classes.items[ref.class_idx].methods[ref.member_idx].params.len));
+        }
+        if (eq2(mn, md, "newInstance", "([Ljava/lang/Object;)Ljava/lang/Object;")) return reflectNewInstance(f, self, slots);
     }
     if (std.mem.eql(u8, on, "java/lang/Double")) {
         const d = slots[method.params[0].slot];

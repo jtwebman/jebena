@@ -4,7 +4,7 @@ package jebena;
 // java.lang.Object, java.lang.Math, and the Throwable/Exception hierarchy
 // (real detailMessage field + super(message) constructor chain + getMessage).
 public class JBaseSmoke {
-    public static int demo() {
+    public static int demo() throws Exception {
         Object a = new Object();
         Object b = new Object();
         int r = 0;
@@ -400,6 +400,36 @@ public class JBaseSmoke {
             tssum += o;                  // 150
         }
         r += tssum;
+
+        // === Reflection: getClass -> methods/fields/ctors, invoke/get/set/newInstance ===
+        ReflectTarget rt0 = new ReflectTarget(5, "hi");
+        Class<?> rc = rt0.getClass();
+        java.lang.reflect.Method[] ms = rc.getDeclaredMethods();
+        r += ms.length;   // addTo, square, describe = 3
+        for (java.lang.reflect.Method mth : ms) {
+            if (mth.getName().equals("square")) {
+                r += (Integer) mth.invoke(null, new Object[] { 7 });   // static -> 49
+            }
+            if (mth.getName().equals("addTo")) {
+                r += (Integer) mth.invoke(rt0, new Object[] { 10 });   // 5+10 = 15
+            }
+        }
+        java.lang.reflect.Field[] fs = rc.getDeclaredFields();
+        r += fs.length;   // x, label = 2
+        for (java.lang.reflect.Field fld : fs) {
+            if (fld.getName().equals("x")) {
+                r += (Integer) fld.get(rt0);  // 5
+                fld.set(rt0, 99);
+            }
+        }
+        r += rt0.x;       // 99 (set worked)
+        for (java.lang.reflect.Constructor ctorM : rc.getDeclaredConstructors()) {
+            if (ctorM.getParameterCount() == 2) {
+                ReflectTarget made = (ReflectTarget) ctorM.newInstance(new Object[] { 42, "made" });
+                r += made.x;                   // 42
+                r += made.describe().length(); // "made:42" -> 7
+            }
+        }
 
         // === Parallel batch: ArrayDeque, LinkedHashMap, PriorityQueue, Random, function ===
         java.util.ArrayDeque<Integer> adq = new java.util.ArrayDeque<>();

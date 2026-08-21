@@ -14,6 +14,12 @@ public final class Class {
 
     public native String getSimpleName();
 
+    public native java.lang.reflect.Method[] getDeclaredMethods();
+
+    public native java.lang.reflect.Field[] getDeclaredFields();
+
+    public native java.lang.reflect.Constructor[] getDeclaredConstructors();
+
     public String toString() {
         return "class " + getName();
     }

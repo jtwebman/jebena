@@ -55,7 +55,7 @@ Steps (each a loop iteration or few):
 
 ## Phase 2 — reflection & dynamic
 - [ ] Class.forName, getName, getDeclaredMethods/Fields/Constructors
-- [ ] Method.invoke, Field get/set, Constructor.newInstance (reflective call into interp)
+- [x] reflection: java.lang.reflect.Method.invoke, Field.get/set, Constructor.newInstance + Class.getDeclared{Methods,Fields,Constructors} (mirrors backed by VM Class metadata, arg/return box-unbox). [ ] getMethod-by-signature, virtual dispatch, annotations
 - [ ] annotations: RuntimeVisibleAnnotations decode + getAnnotation
 - [ ] MethodHandles / dynamic proxies (Proxy.newProxyInstance)
 
