@@ -330,6 +330,8 @@ pub const Class = struct {
     gpa: std.mem.Allocator,
     cp: ConstantPool,
     name: []const u8,
+    super: ?*const Class,
+    super_name: ?[]const u8,
     methods: []Method,
     instance_fields: []Field,
     static_fields: []Field,
@@ -359,17 +361,20 @@ pub const Class = struct {
         };
     }
 
-    pub fn init(gpa: std.mem.Allocator, arena: std.mem.Allocator, cf: *const ClassFile) !Class {
+    pub fn init(gpa: std.mem.Allocator, arena: std.mem.Allocator, cf: *const ClassFile, super: ?*const Class) !Class {
         const cls_name = try cf.constant_pool.classNameOf(cf.this_class);
+        const super_name: ?[]const u8 = if (cf.super_class != 0) try cf.constant_pool.classNameOf(cf.super_class) else null;
 
         // Instance (non-static) fields, in declaration order.
         var nfields: usize = 0;
         for (cf.fields) |fld| {
             if (!fld.access_flags.isStatic()) nfields += 1;
         }
-        const instance_fields = try arena.alloc(Field, nfields);
+        const super_fields: []const Field = if (super) |sp| sp.instance_fields else &.{};
+        const instance_fields = try arena.alloc(Field, super_fields.len + nfields);
         const static_fields = try arena.alloc(Field, cf.fields.len - nfields);
-        var fi: usize = 0;
+        for (super_fields, 0..) |sf, i| instance_fields[i] = sf; // inherited fields first
+        var fi: usize = super_fields.len;
         var si: usize = 0;
         for (cf.fields) |fld| {
             const fdesc = try cf.constant_pool.utf8(fld.descriptor_index);
@@ -415,7 +420,7 @@ pub const Class = struct {
                 .is_static = is_static,
             };
         }
-        return .{ .gpa = gpa, .cp = cf.constant_pool, .name = cls_name, .methods = methods, .instance_fields = instance_fields, .static_fields = static_fields };
+        return .{ .gpa = gpa, .cp = cf.constant_pool, .name = cls_name, .super = super, .super_name = super_name, .methods = methods, .instance_fields = instance_fields, .static_fields = static_fields };
     }
 
     fn findField(self: *const Class, name: []const u8) ?usize {
@@ -435,6 +440,7 @@ pub const Class = struct {
         for (self.methods) |*m| {
             if (std.mem.eql(u8, m.name, name) and std.mem.eql(u8, m.descriptor, desc)) return m;
         }
+        if (self.super) |sp| return sp.find(name, desc);
         return null;
     }
 
@@ -1542,7 +1548,7 @@ test "infinite loop hits the step budget" {
 fn loadClass(comptime path: []const u8, cf: *ClassFile, arena: *std.heap.ArenaAllocator) !Class {
     cf.* = try ClassFile.parse(testing.allocator, @embedFile(path));
     arena.* = std.heap.ArenaAllocator.init(testing.allocator);
-    return Class.init(testing.allocator, arena.allocator(), cf);
+    return Class.init(testing.allocator, arena.allocator(), cf, null);
 }
 
 test "Compute: int methods still work" {
@@ -1777,8 +1783,8 @@ test "multi-class: A references B (static call, static field, new, instance meth
     defer cfb.deinit();
     var aa = std.heap.ArenaAllocator.init(testing.allocator);
     defer aa.deinit();
-    const clsA = try Class.init(testing.allocator, aa.allocator(), &cfa);
-    const clsB = try Class.init(testing.allocator, aa.allocator(), &cfb);
+    const clsA = try Class.init(testing.allocator, aa.allocator(), &cfa, null);
+    const clsB = try Class.init(testing.allocator, aa.allocator(), &cfb, null);
 
     var loader = Loader.init(testing.allocator);
     defer loader.deinit();
@@ -1794,4 +1800,30 @@ test "multi-class: A references B (static call, static field, new, instance meth
     // A.viaCounter(3,4): B.counter += 3 (=3), then += 4 (=7); returns 7  (cross-class static field)
     b = Budget{};
     try testing.expectEqual(Value{ .int = 7 }, (try runInLoader(&loader, &clsA, "viaCounter", "(II)I", &.{ .{ .int = 3 }, .{ .int = 4 } }, &b)).?);
+}
+
+test "inheritance: fields, super() ctor, override dispatch, super.method()" {
+    const ba = @embedFile("testdata/Animal.class");
+    const bd = @embedFile("testdata/Dog.class");
+    var cfa = try ClassFile.parse(testing.allocator, ba);
+    defer cfa.deinit();
+    var cfd = try ClassFile.parse(testing.allocator, bd);
+    defer cfd.deinit();
+    var aa = std.heap.ArenaAllocator.init(testing.allocator);
+    defer aa.deinit();
+    const animal = try Class.init(testing.allocator, aa.allocator(), &cfa, null);
+    const dog = try Class.init(testing.allocator, aa.allocator(), &cfd, &animal); // Dog extends Animal
+
+    var loader = Loader.init(testing.allocator);
+    defer loader.deinit();
+    try loader.register(&animal);
+    try loader.register(&dog);
+
+    // viaDog(): new Dog() -> super(4) sets legs=4, tail=1; describe() =
+    //   super.describe() [= legs()*10, legs() virtual -> Dog.legs()=4 -> 40] + tail(1) = 41
+    var b = Budget{};
+    try testing.expectEqual(Value{ .int = 41 }, (try runInLoader(&loader, &dog, "viaDog", "()I", &.{}, &b)).?);
+    // viaAnimalRef(): Animal a = new Dog(); a.describe() [virtual -> Dog.describe()=41] + a.legs() [virtual -> Dog.legs()=4] = 45
+    b = Budget{};
+    try testing.expectEqual(Value{ .int = 45 }, (try runInLoader(&loader, &dog, "viaAnimalRef", "()I", &.{}, &b)).?);
 }

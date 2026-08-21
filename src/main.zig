@@ -99,7 +99,7 @@ fn runStaticII(gpa: std.mem.Allocator, class_bytes: []const u8, method: []const 
     defer cf.deinit();
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
-    const cls = try jebena.interp.Class.init(gpa, arena.allocator(), &cf);
+    const cls = try jebena.interp.Class.init(gpa, arena.allocator(), &cf, null);
     const r = try cls.callStatic(method, "(II)I", &.{ a, b });
     return if (r) |v| v.int else null;
 }
@@ -109,7 +109,7 @@ fn runStaticInt(gpa: std.mem.Allocator, class_bytes: []const u8, method: []const
     defer cf.deinit();
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
-    const cls = try jebena.interp.Class.init(gpa, arena.allocator(), &cf);
+    const cls = try jebena.interp.Class.init(gpa, arena.allocator(), &cf, null);
     const r = try cls.callStatic(method, desc, &.{arg});
     return if (r) |v| v.int else null;
 }
