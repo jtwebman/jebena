@@ -11,6 +11,8 @@
 
 const std = @import("std");
 const ClassFile = @import("class_file.zig").ClassFile;
+const attribute_decode = @import("attribute_decode.zig");
+const cpmod = @import("constant_pool.zig");
 const testing = std.testing;
 
 const seed: []const u8 = @embedFile("testdata/Hello.class");
@@ -70,5 +72,31 @@ test "parser survives every single-byte value at every position" {
             buf[pos] = @intCast(v);
             tryParse(buf);
         }
+    }
+}
+
+test "attribute decoder survives arbitrary bytes for every attribute name" {
+    const names = [_][]const u8{
+        "ConstantValue",   "Code",          "Exceptions",       "SourceFile",
+        "LineNumberTable", "StackMapTable", "BootstrapMethods", "SomethingUnknown",
+    };
+    var entries: [names.len + 1]cpmod.Constant = undefined;
+    entries[0] = .unusable;
+    inline for (names, 0..) |nm, i| entries[i + 1] = .{ .utf8 = nm };
+    const cp = cpmod.ConstantPool{ .entries = &entries };
+
+    var prng = std.Random.DefaultPrng.init(0xA11CE_5EED);
+    const rand = prng.random();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    var i: usize = 0;
+    while (i < 8000) : (i += 1) {
+        const len = rand.intRangeAtMost(usize, 0, 80);
+        const buf = try arena.allocator().alloc(u8, len);
+        rand.bytes(buf);
+        const name_index: u16 = @intCast(rand.intRangeAtMost(usize, 1, names.len));
+        _ = attribute_decode.decode(arena.allocator(), cp, .{ .name_index = name_index, .info = buf }) catch {};
+        if (i % 256 == 0) _ = arena.reset(.retain_capacity);
     }
 }
