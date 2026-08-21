@@ -157,6 +157,27 @@ public class JBaseSmoke {
         if (ex.toString().equals("java.lang.RuntimeException: boom")) r += 17;
         NumberFormatException nfe = new NumberFormatException("bad");
         if (nfe.toString().equals("java.lang.NumberFormatException: bad")) r += 19;
+
+        // java.util.ArrayList: autobox into Object[], growth past capacity, iterate.
+        java.util.ArrayList<Integer> list = new java.util.ArrayList<>();
+        for (int i = 1; i <= 20; i++) {
+            list.add(i);          // autobox -> Integer.valueOf(i); grows past 10
+        }
+        r += list.size();          // 20
+        int sum = 0;
+        for (int x : list) {       // enhanced-for -> Iterator; auto-unbox
+            sum += x;
+        }
+        r += sum;                  // 210
+        r += list.get(5);          // 6
+        r += list.indexOf(15);     // 14
+        if (list.contains(10)) r += 500;
+        list.set(0, 100);
+        r += list.get(0);          // 100
+        r += list.remove(19);      // remove index 19 (value 20) -> 20
+        r += list.size();          // 19
+        if (java.util.Objects.equals(list.get(1), Integer.valueOf(2))) r += 700;
+        r += list.toString().length();
         return r;
     }
 }

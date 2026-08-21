@@ -235,6 +235,10 @@ public final class String {
         return new String(data);
     }
 
+    public static String valueOf(Object o) {
+        return (o == null) ? "null" : o.toString();
+    }
+
     // Numeric valueOf reuse the VM's decimal/shortest-float formatting.
     public static native String valueOf(int i);
 
