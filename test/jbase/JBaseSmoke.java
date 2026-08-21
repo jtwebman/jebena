@@ -400,6 +400,56 @@ public class JBaseSmoke {
             tssum += o;                  // 150
         }
         r += tssum;
+
+        // === Parallel batch: ArrayDeque, LinkedHashMap, PriorityQueue, Random, function ===
+        java.util.ArrayDeque<Integer> adq = new java.util.ArrayDeque<>();
+        adq.push(1);
+        adq.push(2);      // front: [2,1]
+        adq.offer(3);     // tail:  [2,1,3]
+        r += adq.pop();   // 2
+        r += adq.pollLast(); // 3
+        r += adq.size();  // 1
+
+        java.util.LinkedHashMap<String, Integer> lhm = new java.util.LinkedHashMap<>();
+        lhm.put("c", 3);
+        lhm.put("a", 1);
+        lhm.put("b", 2);
+        lhm.put("a", 10); // update, keeps position
+        StringBuilder lo = new StringBuilder();
+        for (String k : lhm.keySet()) {
+            lo.append(k);  // insertion order: "cab"
+        }
+        if (lo.toString().equals("cab")) r += 50;
+        r += lhm.get("a"); // 10
+
+        java.util.PriorityQueue<Integer> pq = new java.util.PriorityQueue<>();
+        pq.offer(5);
+        pq.offer(1);
+        pq.offer(3);
+        pq.offer(2);
+        pq.offer(4);
+        StringBuilder po = new StringBuilder();
+        while (!pq.isEmpty()) {
+            po.append(pq.poll());  // min-heap order: "12345"
+        }
+        if (po.toString().equals("12345")) r += 500;
+
+        // Random: exact LCG must match OpenJDK for a fixed seed.
+        java.util.Random rnd = new java.util.Random(42);
+        int rsum = 0;
+        for (int i = 0; i < 10; i++) {
+            rsum += rnd.nextInt(1000);
+        }
+        r += rsum;
+        r += (int) (new java.util.Random(12345).nextLong() % 100000);
+
+        // Functional interfaces as lambda targets.
+        java.util.function.Function<Integer, Integer> fn = x -> x * 2;
+        r += fn.apply(21);       // 42
+        java.util.function.Predicate<Integer> pr = x -> x > 5;
+        r += pr.test(10) ? 7 : 0;
+        java.util.function.Supplier<Integer> sup = () -> 99;
+        r += sup.get();          // 99
         return r;
     }
 }
