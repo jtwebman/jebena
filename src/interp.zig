@@ -835,6 +835,26 @@ fn fieldName(cls: *const Class, cp_index: u16) RunError![]const u8 {
     };
     return cls.cp.utf8(nat.name_index) catch error.LinkError;
 }
+fn fieldRefKind(cls: *const Class, cp_index: u16) RunError!Kind {
+    const c = cls.cp.get(cp_index) catch return error.LinkError;
+    const ref = switch (c.*) {
+        .fieldref => |r| r,
+        else => return error.LinkError,
+    };
+    const nat = switch ((cls.cp.get(ref.name_and_type_index) catch return error.LinkError).*) {
+        .name_and_type => |x| x,
+        else => return error.LinkError,
+    };
+    const desc = cls.cp.utf8(nat.descriptor_index) catch return error.LinkError;
+    if (desc.len == 0) return error.LinkError;
+    return switch (desc[0]) {
+        'J' => .long,
+        'D' => .double,
+        'F' => .float,
+        'L', '[' => .reference,
+        else => .int, // B C S Z I
+    };
+}
 
 fn doNew(f: *Frame, cls: *const Class, code: []const u8) RunError!void {
     maybeCollect(f);
@@ -849,20 +869,24 @@ fn doNew(f: *Frame, cls: *const Class, code: []const u8) RunError!void {
 
 fn doGetField(f: *Frame, cls: *const Class, code: []const u8) RunError!void {
     const heap = f.heap orelse return error.UnsupportedOpcode;
-    const fname = try fieldName(cls, try u16At(code, f.pc + 1));
+    const idx = try u16At(code, f.pc + 1);
+    const fname = try fieldName(cls, idx);
     const oid = (try f.popRef()) orelse return error.NullPointer;
     const inst = switch (heap.get(oid).*) {
         .instance => |*x| x,
         else => return error.LinkError,
     };
     const fi = inst.class.findField(fname) orelse return error.LinkError;
-    try f.push(inst.fields[fi]);
+    // pushKind re-expands a long/double field to its two operand-stack slots.
+    try f.pushKind(inst.fields[fi]);
 }
 
 fn doPutField(f: *Frame, cls: *const Class, code: []const u8) RunError!void {
     const heap = f.heap orelse return error.UnsupportedOpcode;
-    const fname = try fieldName(cls, try u16At(code, f.pc + 1));
-    const value = try f.pop();
+    const idx = try u16At(code, f.pc + 1);
+    const fname = try fieldName(cls, idx);
+    // long/double values occupy two operand-stack slots; pop by the field's kind.
+    const value = try f.popKind(try fieldRefKind(cls, idx));
     const oid = (try f.popRef()) orelse return error.NullPointer;
     const inst = switch (heap.get(oid).*) {
         .instance => |*x| x,
@@ -2320,6 +2344,24 @@ fn nativeInvoke(f: *Frame, owner: *const Class, method: *const Class.Method, slo
             };
             return f.pushInt(if (r) |id| @bitCast(id) else 0);
         }
+    }
+    if (std.mem.eql(u8, on, "java/lang/Double")) {
+        const d = slots[method.params[0].slot];
+        if (eq2(mn, md, "doubleToLongBits", "(D)J")) {
+            if (std.math.isNan(d.double)) return f.pushLong(@bitCast(@as(u64, 0x7ff8000000000000)));
+            return f.pushLong(@bitCast(d.double));
+        }
+        if (eq2(mn, md, "doubleToRawLongBits", "(D)J")) return f.pushLong(@bitCast(d.double));
+        if (eq2(mn, md, "longBitsToDouble", "(J)D")) return f.pushDouble(@bitCast(d.long));
+    }
+    if (std.mem.eql(u8, on, "java/lang/Float")) {
+        const x = slots[method.params[0].slot];
+        if (eq2(mn, md, "floatToIntBits", "(F)I")) {
+            if (std.math.isNan(x.float)) return f.pushInt(@bitCast(@as(u32, 0x7fc00000)));
+            return f.pushInt(@bitCast(x.float));
+        }
+        if (eq2(mn, md, "floatToRawIntBits", "(F)I")) return f.pushInt(@bitCast(x.float));
+        if (eq2(mn, md, "intBitsToFloat", "(I)F")) return f.pushFloat(@bitCast(x.int));
     }
     if (std.mem.eql(u8, on, "java/lang/String")) {
         if (eq2(mn, md, "valueOf", "(I)Ljava/lang/String;")) return floatStringInt(f, @as(i64, slots[method.params[0].slot].int));

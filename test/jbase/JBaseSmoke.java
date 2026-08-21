@@ -105,6 +105,43 @@ public class JBaseSmoke {
         r += Integer.valueOf(99).intValue();
         r += Integer.valueOf(5).compareTo(Integer.valueOf(9)); // -1
         r += Integer.toString(789).length();  // 3
+
+        // All boxed types: autobox/unbox, cache identity, equals/hashCode/toString.
+        Long la = 100L;
+        Long lb = 100L;   // cached
+        Long lc = 1000L;
+        Long ld = 1000L;  // not cached
+        if (la == lb) r += 10000000;
+        if (lc != ld) r += 20000000;
+        r += (int) (la.longValue() + Long.parseLong("23"));  // 123
+        r += Long.valueOf(7L).compareTo(Long.valueOf(3L));   // 1
+
+        Double da = 3.5;
+        Double db = 3.5;
+        if (da.equals(db)) r += 5000;
+        r += da.intValue();               // 3
+        r += (int) (da.doubleValue() * 2); // 7
+        r += Double.compare(1.0, 2.0);    // -1
+
+        Boolean ba = true;   // valueOf -> TRUE singleton
+        Boolean bb = true;
+        if (ba == bb) r += 40000000;      // cached singleton identity
+        if (ba.booleanValue()) r += 7;
+        r += Boolean.valueOf("TRUE").hashCode(); // 1231
+
+        Character ca = 'A';  // cached
+        Character cb = 'A';
+        if (ca == cb) r += 80000000;
+        r += ca.charValue();              // 65
+        r += Character.valueOf('z').compareTo(Character.valueOf('a')); // 25
+
+        Short sa = (short) 50;
+        r += sa.intValue();               // 50
+        Byte ya = (byte) 9;
+        r += ya.intValue();               // 9
+        Float fa = 2.5f;
+        r += (int) (fa.floatValue() * 4); // 10
+        if (fa.equals(Float.valueOf(2.5f))) r += 600;
         return r;
     }
 }

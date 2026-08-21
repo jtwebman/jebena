@@ -8,7 +8,7 @@ highest-value item that is currently tractable. Every change must keep
 - [ ] StringBuilder / StringBuffer (append/toString/insert/length/charAt/reverse)
 - [x] this-capturing lambdas + instance-method references (obj::method, bound refs)
 - [x] float/double -> String (IEEE shortest round-trip, matches SE19+/JDK21 Double.toString; oracle pinned to JDK21 since JDK17 FloatingDecimal is non-shortest)
-- [~] boxing MIGRATION to real classes: clean-room Number + Integer (value field, valueOf -128..127 cache via <clinit> static so autobox == matches java, intValue/longValue/.../equals/hashCode/compareTo/parseInt/toString) as real bytecode; NumberFormatException. Zig BoxedObj stays the stub path. Remaining: Long/Double/Float/Boolean/Character/Short/Byte real
+- [x] boxing MIGRATION complete: clean-room Number + Integer/Long/Double/Float/Boolean/Character/Short/Byte as real classes (value fields, valueOf caches for == identity, xxxValue/equals/hashCode/compareTo/toString/parse, Double/Float bit natives). Zig BoxedObj remains the stub path. FIXED long/double instance fields (2-slot pop/push)
       functional interfaces + autoboxing work
 - [ ] remaining opcodes / edge cases surfaced by differential fuzzing
 - [x] Character intrinsics (isDigit/isLetter/isWhitespace/case/digit/compare/getNumericValue) + String toUpperCase/toLowerCase/trim/strip/equalsIgnoreCase/indexOf(II)/lastIndexOf/repeat/toCharArray; [ ] more Math/Objects/Arrays
