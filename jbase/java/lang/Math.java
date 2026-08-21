@@ -43,4 +43,12 @@ public final class Math {
     public static int floorMod(int x, int y) {
         return x - floorDiv(x, y) * y;
     }
+
+    // VM-provided (native in the spec): floating-point math dispatched to Zig.
+    public static native double sqrt(double a);
+    public static native double cbrt(double a);
+    public static native double floor(double a);
+    public static native double ceil(double a);
+    public static native double abs(double a);
+    public static native double pow(double a, double b);
 }

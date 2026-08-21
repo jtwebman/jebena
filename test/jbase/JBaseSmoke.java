@@ -28,6 +28,12 @@ public class JBaseSmoke {
         } catch (Exception e) {                  // caught as supertype
             r += e.getMessage().length() * 10;   // "bad-arg" -> 7 -> 70
         }
-        return r; // expect 209
+        // Native double Math (declared native in jbase Math, run via the Zig registry).
+        r += (int) Math.sqrt(144.0);   // 12
+        r += (int) Math.floor(9.7);    // 9
+        r += (int) Math.ceil(9.2);     // 10
+        r += (int) Math.pow(2.0, 10.0); // 1024
+        r += (int) Math.abs(-3.5);     // 3
+        return r; // expect 1267
     }
 }

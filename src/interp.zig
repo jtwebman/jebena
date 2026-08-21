@@ -2240,6 +2240,16 @@ fn nativeInvoke(f: *Frame, owner: *const Class, method: *const Class.Method, slo
             return f.pushInt(if (r) |id| @bitCast(id) else 0);
         }
     }
+    if (std.mem.eql(u8, on, "java/lang/Math")) {
+        // Double math is native in the spec (StrictMath). Same computations as the
+        // Zig Math intrinsic, so results match the differential oracle.
+        if (eq2(mn, md, "sqrt", "(D)D")) return f.pushDouble(@sqrt(slots[method.params[0].slot].double));
+        if (eq2(mn, md, "floor", "(D)D")) return f.pushDouble(@floor(slots[method.params[0].slot].double));
+        if (eq2(mn, md, "ceil", "(D)D")) return f.pushDouble(@ceil(slots[method.params[0].slot].double));
+        if (eq2(mn, md, "abs", "(D)D")) return f.pushDouble(@abs(slots[method.params[0].slot].double));
+        if (eq2(mn, md, "cbrt", "(D)D")) return f.pushDouble(std.math.cbrt(slots[method.params[0].slot].double));
+        if (eq2(mn, md, "pow", "(DD)D")) return f.pushDouble(std.math.pow(f64, slots[method.params[0].slot].double, slots[method.params[1].slot].double));
+    }
     return error.UnsupportedOpcode;
 }
 fn invokeStatic(f: *Frame, cls: *const Class, code: []const u8) RunError!void {
