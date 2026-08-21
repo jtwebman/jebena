@@ -50,7 +50,7 @@ Steps (each a loop iteration or few):
       LinkedList, Arrays.asList, Optional (mostly pure Java once Object/arrays work)
 - [ ] real Number/Integer/Long/Double boxing classes
 - [ ] real java.lang.System (out as a working PrintStream to stderr), arraycopy (done)
-- [ ] real exceptions with messages + getMessage + stack traces
+- [x] clean-room Throwable/Exception/RuntimeException/IllegalArgumentException: real detailMessage field, super(message) constructor chain, getMessage/getLocalizedMessage, throw/catch subtype matching (jbase-smoke 209)
 - [ ] class init ordering, <clinit> dependency graph, real static init
 
 ## Phase 2 — reflection & dynamic
