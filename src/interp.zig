@@ -1656,3 +1656,29 @@ test "static fields: getstatic/putstatic and <clinit>" {
     var b = Budget{};
     try testing.expectEqual(Value{ .long = 1234 }, (try cls.callStaticValues("addTotal", "(J)J", &.{.{ .long = 234 }}, &b)).?);
 }
+
+test "object-capable interpreter survives arbitrary bytecode (heap + class context)" {
+    var cf: ClassFile = undefined;
+    var arena: std.heap.ArenaAllocator = undefined;
+    const cls = try loadClass("testdata/Point.class", &cf, &arena);
+    defer cf.deinit();
+    defer arena.deinit();
+
+    var prng = std.Random.DefaultPrng.init(0x0B7EC7_FEED);
+    const rand = prng.random();
+    var buf: [128]u8 = undefined;
+    var i: usize = 0;
+    while (i < 20000) : (i += 1) {
+        const len = rand.intRangeAtMost(usize, 0, buf.len);
+        rand.bytes(buf[0..len]);
+        const ms = rand.intRangeAtMost(u16, 0, 16);
+        const ml = rand.intRangeAtMost(u16, 0, 8);
+        var heap = Heap{ .gpa = testing.allocator };
+        defer heap.deinit();
+        var b = Budget{ .max_steps = 3000 };
+        // Random bytecode against a real class + heap. Any error is fine; a crash,
+        // leak, or out-of-bounds is not. References cannot be forged from ints, so
+        // heap access stays valid.
+        _ = exec(testing.allocator, &cls, &heap, &b, buf[0..len], ms, ml, &.{}) catch {};
+    }
+}
