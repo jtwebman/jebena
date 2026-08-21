@@ -675,6 +675,19 @@ pub const Class = struct {
         if (self.super) |sp| return sp.find(name, desc);
         return null;
     }
+    /// Like find, but also returns the class that declares the method (which owns
+    /// the code and its constant pool -- essential for inherited methods).
+    const Resolved = struct { method: *const Method, owner: *const Class };
+    fn resolve(self: *const Class, name: []const u8, desc: []const u8) ?Resolved {
+        var c: ?*const Class = self;
+        while (c) |cc| {
+            for (cc.methods) |*m| {
+                if (std.mem.eql(u8, m.name, name) and std.mem.eql(u8, m.descriptor, desc)) return .{ .method = m, .owner = cc };
+            }
+            c = cc.super;
+        }
+        return null;
+    }
 
     pub fn callStaticValues(self: *const Class, name: []const u8, desc: []const u8, args: []const Value, budget: *Budget) RunError!?Value {
         var loader = Loader.init(self.gpa);
@@ -840,13 +853,15 @@ fn invokeInstance(f: *Frame, cls: *const Class, code: []const u8, is_special: bo
         .instance => |x| x.class,
         else => return error.LinkError,
     };
-    const target = rclass.find(mname, mdesc) orelse return error.MethodNotFound;
+    const tr = rclass.resolve(mname, mdesc) orelse return error.MethodNotFound;
+    const target = tr.method;
+    const owner = tr.owner;
 
     if (f.budget.depth >= f.budget.max_depth) return error.CallDepthExceeded;
     f.budget.depth += 1;
     defer f.budget.depth -= 1;
     const cc = target.code orelse return error.LinkError;
-    const ret = try exec(rclass.gpa, rclass, f.heap, f.loader, f.budget, cc.code, cc.max_stack, cc.max_locals, slots[0..decl.arg_slots], cc.exception_table, f);
+    const ret = try exec(owner.gpa, owner, f.heap, f.loader, f.budget, cc.code, cc.max_stack, cc.max_locals, slots[0..decl.arg_slots], cc.exception_table, f);
     if (ret) |rv| try f.pushKind(rv);
 }
 
@@ -892,12 +907,13 @@ pub fn runInLoader(loader: *Loader, class: *const Class, name: []const u8, desc:
 /// Like runInLoader but with a caller-provided heap (to configure GC / inspect it).
 pub fn runInLoaderWithHeap(loader: *Loader, class: *const Class, name: []const u8, desc: []const u8, args: []const Value, budget: *Budget, heap: *Heap) RunError!?Value {
     for (loader.classes.items) |c| try loader.ensureInit(c, heap, budget);
-    const m = class.find(name, desc) orelse return error.MethodNotFound;
+    const rr = class.resolve(name, desc) orelse return error.MethodNotFound;
+    const m = rr.method;
     const c = m.code orelse return error.LinkError;
     var slots: [256]Value = undefined;
     if (m.arg_slots > slots.len) return error.LinkError;
     const n = try layoutArgs(m, args, &slots);
-    return exec(loader.gpa, class, heap, loader, budget, c.code, c.max_stack, c.max_locals, slots[0..n], c.exception_table, null);
+    return exec(loader.gpa, rr.owner, heap, loader, budget, c.code, c.max_stack, c.max_locals, slots[0..n], c.exception_table, null);
 }
 
 fn invokeStatic(f: *Frame, cls: *const Class, code: []const u8) RunError!void {
@@ -914,7 +930,9 @@ fn invokeStatic(f: *Frame, cls: *const Class, code: []const u8) RunError!void {
     const mname = cls.cp.utf8(nat.name_index) catch return error.LinkError;
     const mdesc = cls.cp.utf8(nat.descriptor_index) catch return error.LinkError;
     const tclass = try resolveClass(f, cls, try refClassName(cls, ref.class_index));
-    const target = tclass.find(mname, mdesc) orelse return error.MethodNotFound;
+    const tr = tclass.resolve(mname, mdesc) orelse return error.MethodNotFound;
+    const target = tr.method;
+    const owner = tr.owner;
 
     var slots: [256]Value = undefined;
     if (target.arg_slots > slots.len) return error.LinkError;
@@ -930,7 +948,7 @@ fn invokeStatic(f: *Frame, cls: *const Class, code: []const u8) RunError!void {
     f.budget.depth += 1;
     defer f.budget.depth -= 1;
     const c = target.code orelse return error.LinkError;
-    const ret = try exec(tclass.gpa, tclass, f.heap, f.loader, f.budget, c.code, c.max_stack, c.max_locals, slots[0..target.arg_slots], c.exception_table, f);
+    const ret = try exec(owner.gpa, owner, f.heap, f.loader, f.budget, c.code, c.max_stack, c.max_locals, slots[0..target.arg_slots], c.exception_table, f);
     if (ret) |rv| try f.pushKind(rv);
 }
 
@@ -2472,4 +2490,59 @@ test "generational GC: write barrier keeps old->young references alive" {
         try testing.expectEqual(Value{ .int = 1999000 }, r.?);
         try testing.expect(heap.liveCount() < 64);
     }
+}
+
+test "inherited-method constant pool: Rect inherits Shape.describe (regression)" {
+    // Rect does NOT override describe(); its code lives in Shape and its bytecode's
+    // constant-pool indices must resolve against Shape's pool, not Rect's. Caught by
+    // differential testing against real java.
+    const names = [_][]const u8{ "Vec", "Shape", "Rect", "Circle", "OopTest" };
+    const blobs = [_][]const u8{
+        @embedFile("testdata/Vec.class"),     @embedFile("testdata/Shape.class"),
+        @embedFile("testdata/Rect.class"),    @embedFile("testdata/Circle.class"),
+        @embedFile("testdata/OopTest.class"),
+    };
+    var aa = std.heap.ArenaAllocator.init(testing.allocator);
+    defer aa.deinit();
+    const a = aa.allocator();
+    var loader = Loader.init(testing.allocator);
+    defer loader.deinit();
+    const objS = try a.create(Class);
+    objS.* = try makeStub(testing.allocator, a, "java/lang/Object", null, null);
+    try loader.register(objS);
+
+    var cfs: [names.len]ClassFile = undefined;
+    var built: usize = 0;
+    // parse all
+    inline for (blobs, 0..) |blob, i| {
+        cfs[i] = try ClassFile.parse(testing.allocator, blob);
+    }
+    defer for (0..names.len) |i| cfs[i].deinit();
+    // build resolving supers (fixpoint)
+    var done = [_]bool{false} ** names.len;
+    while (built < names.len) {
+        var progressed = false;
+        inline for (0..names.len) |i| {
+            if (!done[i]) {
+                const sn: ?[]const u8 = if (cfs[i].super_class != 0) try cfs[i].constant_pool.classNameOf(cfs[i].super_class) else null;
+                const super = if (sn) |n| loader.find(n) else null;
+                if (sn == null or super != null) {
+                    const c = try a.create(Class);
+                    c.* = try Class.init(testing.allocator, a, &cfs[i], super);
+                    try loader.register(c);
+                    done[i] = true;
+                    built += 1;
+                    progressed = true;
+                }
+            }
+        }
+        if (!progressed) return error.Unresolved;
+    }
+
+    const oop = loader.find("OopTest").?;
+    var b = Budget{};
+    // poly(): Rect(3,4).describe()=24 + Circle(5).describe()=155 + Rect(2,2).describe()=8 = 187
+    try testing.expectEqual(Value{ .int = 187 }, (try runInLoader(&loader, oop, "poly", "()I", &.{}, &b)).?);
+    b = Budget{};
+    try testing.expectEqual(Value{ .int = 31 }, (try runInLoader(&loader, oop, "vecs", "()I", &.{}, &b)).?);
 }
