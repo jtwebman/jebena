@@ -237,6 +237,9 @@ pub const Heap = struct {
     /// (maintained by the write barrier). Parallel to `objects`.
     remembered: std.ArrayList(bool) = .empty,
     free_list: std.ArrayList(u32) = .empty,
+    /// String literal pool: interned literal content (2 bytes/char, LE) -> instance
+    /// id. Roots for GC (marked always; remapped by the compacting major collector).
+    interned: std.StringHashMapUnmanaged(u32) = .empty,
     allocs_since_gc: usize = 0,
     minor_count: usize = 0,
     /// Minor collection after this many allocations. Default is effectively off.
@@ -258,6 +261,9 @@ pub const Heap = struct {
         self.old.deinit(self.gpa);
         self.remembered.deinit(self.gpa);
         self.free_list.deinit(self.gpa);
+        var it = self.interned.keyIterator();
+        while (it.next()) |k| self.gpa.free(k.*);
+        self.interned.deinit(self.gpa);
     }
     fn put(self: *Heap, obj: HeapObj) !u32 {
         if (self.free_list.items.len > 0) {
@@ -371,6 +377,10 @@ fn collectMajor(f: *Frame) void {
     }
     for (f.loader.statics.items) |st| for (st) |v| markValue(heap, v);
     if (f.budget.pending) |eid| markObject(heap, eid);
+    {
+        var it = heap.interned.valueIterator();
+        while (it.next()) |vp| markObject(heap, vp.*);
+    }
 
     // 2. Assign new ids to live objects (compact order); free the dead.
     const forwarding = heap.gpa.alloc(u32, heap.objects.items.len) catch return;
@@ -401,6 +411,10 @@ fn collectMajor(f: *Frame) void {
     remapRoots(f, forwarding);
     for (heap.objects.items) |*maybe| if (maybe.*) |*obj| remapObject(obj, forwarding);
     if (f.budget.pending) |eid| f.budget.pending = forwarding[eid];
+    {
+        var it = heap.interned.valueIterator();
+        while (it.next()) |vp| vp.* = forwarding[vp.*];
+    }
 
     // 4. Move live objects (and their generation/remembered bits) to new slots.
     for (heap.objects.items, 0..) |maybe, oid| {
@@ -455,6 +469,10 @@ fn collectMinor(f: *Frame) void {
     }
     for (f.loader.statics.items) |st| for (st) |v| markYoungValue(heap, v);
     if (f.budget.pending) |eid| markYoungObject(heap, eid);
+    {
+        var it = heap.interned.valueIterator();
+        while (it.next()) |vp| markYoungObject(heap, vp.*);
+    }
     var id: u32 = 0;
     while (id < heap.objects.items.len) : (id += 1) {
         if (heap.remembered.items[id]) {
@@ -1513,10 +1531,33 @@ fn appendStringObj(out: *std.ArrayList(i32), heap: *Heap, id: u32) RunError!void
 fn createString(f: *Frame, mutf8_bytes: []const u8) RunError!void {
     const heap = f.heap orelse return error.UnsupportedOpcode;
     const str_class = f.loader.find("java/lang/String") orelse return error.LinkError;
-    _ = str_class;
     const chars = mutf8ToChars(heap.gpa, mutf8_bytes) catch return error.OutOfMemory;
     defer heap.gpa.free(chars);
-    try f.push(.{ .reference = try makeString(f, chars) });
+    if (str_class.is_stub) {
+        // Bootstrap stub path: no interning (keeps the differential suite identical).
+        try f.push(.{ .reference = try makeString(f, chars) });
+        return;
+    }
+    try f.push(.{ .reference = try internLiteral(f, chars) });
+}
+fn internLiteral(f: *Frame, chars: []const i32) RunError!u32 {
+    const heap = f.heap orelse return error.UnsupportedOpcode;
+    const key = heap.gpa.alloc(u8, chars.len * 2) catch return error.OutOfMemory;
+    for (chars, 0..) |c, i| {
+        const u: u16 = @truncate(@as(u32, @bitCast(c)));
+        key[i * 2] = @truncate(u);
+        key[i * 2 + 1] = @truncate(u >> 8);
+    }
+    if (heap.interned.get(key)) |id| {
+        heap.gpa.free(key);
+        return id;
+    }
+    const id = try makeString(f, chars);
+    heap.interned.put(heap.gpa, key, id) catch {
+        heap.gpa.free(key);
+        return id;
+    };
+    return id;
 }
 fn strChars(heap: *Heap, id: u32) RunError![]i32 {
     return switch (heap.get(id).*) {

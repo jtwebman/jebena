@@ -69,6 +69,13 @@ public class JBaseSmoke {
         r += "hello".indexOf('l');              // 2
         if ("hello".startsWith("he")) r += 300000;
         r += "abc".compareTo("abd");            // -1
+        // String literal interning: equal literals are ==, runtime concat is not.
+        if ("abc" == "abc") r += 700000;
+        String p1 = "wxyz";
+        String p2 = "wxyz";
+        if (p1 == p2) r += 800000;
+        String xv = "x";
+        if ((xv + "y") != "xy") r += 5; // runtime concat -> fresh, not interned
         return r;
     }
 }
