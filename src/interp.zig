@@ -203,6 +203,16 @@ fn exec(a: std.mem.Allocator, class: ?*const Class, budget: *Budget, code: []con
             f.pc += 3;
             continue :sw try step(&f, code);
         },
+        .ldc => {
+            try loadConstant(&f, class, @intCast(try u8At(code, f.pc + 1)));
+            f.pc += 2;
+            continue :sw try step(&f, code);
+        },
+        .ldc_w => {
+            try loadConstant(&f, class, try u16At(code, f.pc + 1));
+            f.pc += 3;
+            continue :sw try step(&f, code);
+        },
         .iload => {
             try f.pushInt(try f.localInt(try u8At(code, f.pc + 1)));
             f.pc += 2;
@@ -305,6 +315,16 @@ fn exec(a: std.mem.Allocator, class: ?*const Class, budget: *Budget, code: []con
         .ireturn => return try f.popInt(),
         .@"return" => return null,
         else => return error.UnsupportedOpcode,
+    }
+}
+
+fn loadConstant(f: *Frame, class: ?*const Class, index: u16) RunError!void {
+    const cls = class orelse return error.UnsupportedOpcode;
+    const c = cls.cp.get(index) catch return error.LinkError;
+    switch (c.*) {
+        .integer => |v| try f.pushInt(v),
+        .float => |v| try f.push(.{ .float = v }),
+        else => return error.UnsupportedOpcode, // String/Class/etc. need the heap
     }
 }
 
@@ -500,4 +520,14 @@ test "runaway recursion hits the depth limit, not a native stack overflow" {
     const cls = try Class.init(testing.allocator, arena.allocator(), &cf);
     var b = Budget{ .max_depth = 4 };
     try testing.expectError(error.CallDepthExceeded, cls.callStaticInt("fib", "(I)I", &.{20}, &b));
+}
+
+test "ldc: big(x) = 1000000 + x via a pooled constant" {
+    const bytes = @embedFile("testdata/Compute.class");
+    var cf = try ClassFile.parse(testing.allocator, bytes);
+    defer cf.deinit();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const cls = try Class.init(testing.allocator, arena.allocator(), &cf);
+    try testing.expectEqual(@as(?i32, 1000042), try cls.callStatic("big", "(I)I", &.{42}));
 }
