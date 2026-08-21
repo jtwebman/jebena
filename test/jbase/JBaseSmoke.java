@@ -53,6 +53,14 @@ public class JBaseSmoke {
         } catch (IndexOutOfBoundsException e) { // supertype catch of AIOOBE
             r += 4000;
         }
-        return r; // expect 10267
+
+        // Real clean-room java.lang.String: char[]-backed, methods as bytecode.
+        String str = "hello";
+        r += str.length();                              // 5
+        r += str.charAt(1);                             // 'e' = 101
+        if (str.equals("hello")) r += 10000;            // content equal
+        if (!str.equals("world")) r += 20000;           // not equal
+        if (str.hashCode() == "hello".hashCode()) r += 50000; // stable hash
+        return r; // expect 90373
     }
 }

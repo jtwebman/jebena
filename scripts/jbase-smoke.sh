@@ -14,6 +14,6 @@ bash "$ROOT/scripts/build-jbase.sh" >/dev/null
 JEBENA="$ROOT/zig-out/bin/jebena"
 JBASE_CLASSES=$(find "$ROOT/jbase/out" -name '*.class' | tr '\n' ' ')
 GOT=$("$JEBENA" run jebena/JBaseSmoke demo "$OUT/jebena/JBaseSmoke.class" $JBASE_CLASSES 2>&1 | sed -n 's/.*= \(-\?[0-9]*\).*/\1/p')
-echo "jbase-smoke: got '$GOT' (expected 10267)"
-[ "$GOT" = "10267" ] || { echo "JBASE SMOKE FAILED"; exit 1; }
-echo "jbase-smoke: OK — Jebena ran our own clean-room java.lang.{Object,Math,Throwable}"
+echo "jbase-smoke: got '$GOT' (expected 90373)"
+[ "$GOT" = "90373" ] || { echo "JBASE SMOKE FAILED"; exit 1; }
+echo "jbase-smoke: OK — Jebena ran our own clean-room java.lang.{Object,Math,Throwable,String}"

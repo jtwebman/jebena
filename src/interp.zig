@@ -1476,6 +1476,21 @@ fn createString(f: *Frame, mutf8_bytes: []const u8) RunError!void {
     const heap = f.heap orelse return error.UnsupportedOpcode;
     const str_class = f.loader.find("java/lang/String") orelse return error.LinkError;
     const chars = mutf8ToChars(heap.gpa, mutf8_bytes) catch return error.OutOfMemory;
+    if (!str_class.is_stub) {
+        // Real clean-room String: an instance backed by a char[] `value` field. No GC
+        // runs inside these heap allocs (GC is opcode-level), so the ids stay valid.
+        defer heap.gpa.free(chars);
+        const aid = try heap.allocArray(.int, chars.len);
+        const arr = try arrayOf(f, aid);
+        for (chars, 0..) |c, i| arr.data[i] = .{ .int = c };
+        const sid = try heap.allocInstance(str_class);
+        const vi = str_class.findField("value") orelse return error.LinkError;
+        switch (heap.get(sid).*) {
+            .instance => |*inst| inst.fields[vi] = .{ .reference = aid },
+            else => return error.LinkError,
+        }
+        return f.push(.{ .reference = sid });
+    }
     try f.push(.{ .reference = try heap.putString(str_class, chars) });
 }
 fn strChars(heap: *Heap, id: u32) RunError![]i32 {
