@@ -15,6 +15,7 @@ const attribute_decode = @import("attribute_decode.zig");
 const cpmod = @import("constant_pool.zig");
 const verify = @import("verify.zig").verify;
 const bytecode = @import("bytecode.zig");
+const interp = @import("interp.zig");
 const testing = std.testing;
 
 const seed: []const u8 = @embedFile("testdata/Hello.class");
@@ -113,5 +114,20 @@ test "bytecode validator survives arbitrary bytes" {
         const len = rand.intRangeAtMost(usize, 0, buf.len);
         rand.bytes(buf[0..len]);
         _ = bytecode.validate(buf[0..len]) catch {};
+    }
+}
+
+test "interpreter survives arbitrary bytecode within a step budget" {
+    var prng = std.Random.DefaultPrng.init(0x1057_C0DE);
+    const rand = prng.random();
+    var buf: [128]u8 = undefined;
+    var i: usize = 0;
+    while (i < 20000) : (i += 1) {
+        const len = rand.intRangeAtMost(usize, 0, buf.len);
+        rand.bytes(buf[0..len]);
+        const max_stack = rand.intRangeAtMost(u16, 0, 16);
+        const max_locals = rand.intRangeAtMost(u16, 0, 8);
+        // Small budget guarantees termination; any error is fine, a crash is not.
+        _ = interp.runIntBudgeted(testing.allocator, buf[0..len], max_stack, max_locals, &.{ 1, 2 }, 2000) catch {};
     }
 }
