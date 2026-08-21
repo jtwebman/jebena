@@ -2121,7 +2121,7 @@ test "interfaces: invokeinterface dispatches on the concrete class" {
     try testing.expectEqual(Value{ .int = 25 }, (try runInLoader(&loader, &uses, "sumAreas", "(II)I", &.{ .{ .int = 3 }, .{ .int = 4 } }, &b)).?);
 }
 
-fn makeStub(gpa: std.mem.Allocator, arena: std.mem.Allocator, name: []const u8, super_name: ?[]const u8, super: ?*const Class) !Class {
+pub fn makeStub(gpa: std.mem.Allocator, arena: std.mem.Allocator, name: []const u8, super_name: ?[]const u8, super: ?*const Class) !Class {
     const methods = try arena.alloc(Class.Method, 1);
     methods[0] = .{
         .name = "<init>",

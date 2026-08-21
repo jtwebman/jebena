@@ -28,13 +28,131 @@ pub fn main(init: std.process.Init) !void {
         const bytes = try readFile(io, gpa, path);
         defer gpa.free(bytes);
         try disasm(gpa, bytes);
+    } else if (std.mem.eql(u8, cmd, "run")) {
+        try cmdRun(gpa, io, &args);
     } else {
         return usage();
     }
 }
 
 fn usage() void {
-    std.debug.print("usage: jebena [parse|disasm] <file.class>   (no args: self-demo)\n", .{});
+    std.debug.print(
+        \\usage:
+        \\  jebena parse  <file.class>
+        \\  jebena disasm <file.class>
+        \\  jebena run    <MainClass> <method> <file.class>...
+        \\  jebena                 (no args: self-demo)
+        \\
+    , .{});
+}
+
+const IC = jebena.interp;
+
+/// Load a compiled multi-class program from disk and run a static no-arg method.
+/// Provides a minimal java.lang stub chain so user classes can extend
+/// Object/Throwable/Exception/RuntimeException.
+fn cmdRun(gpa: std.mem.Allocator, io: std.Io, it: *std.process.Args.Iterator) !void {
+    const main_class = it.next() orelse return usage();
+    const method = it.next() orelse return usage();
+
+    var files: std.ArrayList([]const u8) = .empty;
+    defer files.deinit(gpa);
+    while (it.next()) |pth| try files.append(gpa, pth);
+    if (files.items.len == 0) return usage();
+
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var loader = IC.Loader.init(gpa);
+    defer loader.deinit();
+
+    // Core java.lang stub hierarchy.
+    inline for (.{
+        .{ "java/lang/Object", @as(?[]const u8, null) },
+        .{ "java/lang/Throwable", @as(?[]const u8, "java/lang/Object") },
+        .{ "java/lang/Exception", @as(?[]const u8, "java/lang/Throwable") },
+        .{ "java/lang/RuntimeException", @as(?[]const u8, "java/lang/Exception") },
+    }) |pair| {
+        const super = if (pair[1]) |sn| loader.find(sn) else null;
+        const c = try a.create(IC.Class);
+        c.* = try IC.makeStub(gpa, a, pair[0], pair[1], super);
+        try loader.register(c);
+    }
+
+    // Parse the user class files.
+    var cfs: std.ArrayList(*jebena.ClassFile) = .empty;
+    defer {
+        for (cfs.items) |cf| cf.deinit();
+        cfs.deinit(gpa);
+    }
+    for (files.items) |path| {
+        const bytes = try readFile(io, gpa, path);
+        defer gpa.free(bytes);
+        const cf = try a.create(jebena.ClassFile);
+        cf.* = jebena.ClassFile.parse(gpa, bytes) catch |e| {
+            std.debug.print("{s}: parse error: {s}\n", .{ path, @errorName(e) });
+            return e;
+        };
+        try cfs.append(gpa, cf);
+    }
+
+    // Build Class metadata, resolving supers before subclasses (iterate to a fixpoint).
+    var pending: std.ArrayList(*jebena.ClassFile) = .empty;
+    defer pending.deinit(gpa);
+    try pending.appendSlice(gpa, cfs.items);
+    while (pending.items.len > 0) {
+        var progress = false;
+        var i: usize = 0;
+        while (i < pending.items.len) {
+            const cf = pending.items[i];
+            const super_name: ?[]const u8 = if (cf.super_class != 0) try cf.constant_pool.classNameOf(cf.super_class) else null;
+            const super: ?*const IC.Class = if (super_name) |sn| loader.find(sn) else null;
+            if (super_name != null and super == null) {
+                i += 1; // super not built yet; try next round
+                continue;
+            }
+            const c = try a.create(IC.Class);
+            c.* = try IC.Class.init(gpa, a, cf, super);
+            try loader.register(c);
+            _ = pending.orderedRemove(i);
+            progress = true;
+        }
+        if (!progress) {
+            std.debug.print("error: unresolved class hierarchy (missing superclass or cycle)\n", .{});
+            return error.UnresolvedHierarchy;
+        }
+    }
+
+    // Resolve and run the entry method.
+    const cls = loader.find(main_class) orelse {
+        std.debug.print("class not found: {s}\n", .{main_class});
+        return error.ClassNotFound;
+    };
+    var desc: ?[]const u8 = null;
+    for (cls.methods) |m| {
+        if (std.mem.eql(u8, m.name, method) and m.params.len == 0 and m.is_static) {
+            desc = m.descriptor;
+            break;
+        }
+    }
+    const d = desc orelse {
+        std.debug.print("no static no-arg method '{s}' in {s}\n", .{ method, main_class });
+        return error.MethodNotFound;
+    };
+
+    var b = IC.Budget{};
+    const r = IC.runInLoader(&loader, cls, method, d, &.{}, &b) catch |e| {
+        std.debug.print("execution error: {s}\n", .{@errorName(e)});
+        return e;
+    };
+    if (r) |v| switch (v) {
+        .int => |x| std.debug.print("{s}.{s}() = {d}\n", .{ main_class, method, x }),
+        .long => |x| std.debug.print("{s}.{s}() = {d}L\n", .{ main_class, method, x }),
+        .float => |x| std.debug.print("{s}.{s}() = {d}f\n", .{ main_class, method, x }),
+        .double => |x| std.debug.print("{s}.{s}() = {d}d\n", .{ main_class, method, x }),
+        else => std.debug.print("{s}.{s}() returned a reference\n", .{ main_class, method }),
+    } else std.debug.print("{s}.{s}() returned void\n", .{ main_class, method });
 }
 
 fn readFile(io: std.Io, gpa: std.mem.Allocator, path: []const u8) ![]u8 {
