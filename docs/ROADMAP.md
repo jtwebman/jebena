@@ -12,7 +12,7 @@ highest-value item that is currently tractable. Every change must keep
       functional interfaces + autoboxing work
 - [ ] remaining opcodes / edge cases surfaced by differential fuzzing
 - [ ] more intrinsics: Character, more Math/Integer/Long/String, Objects, Arrays.*
-- [ ] Comparator + Arrays.sort(T[], Comparator) / Collections.sort (needs lambdas+boxing)
+- [x] Comparator + Arrays.sort(T[], Comparator): lambda/method-ref comparators, stable, re-enters interpreter per compare; [ ] Collections.sort (needs List)
 - [ ] keep GROWING scripts/differential.sh every iteration (it finds real bugs)
 
 ## Phase 1 — the real java.base (the "hard 20%", most of a real JVM)

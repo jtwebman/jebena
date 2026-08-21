@@ -84,6 +84,7 @@ fn cmdRun(gpa: std.mem.Allocator, io: std.Io, it: *std.process.Args.Iterator) !v
         .{ "java/lang/StringBuilder", @as(?[]const u8, "java/lang/Object") },
         .{ "java/lang/StringBuffer", @as(?[]const u8, "java/lang/Object") },
         .{ "java/lang/CharSequence", @as(?[]const u8, "java/lang/Object") },
+        .{ "java/util/Comparator", @as(?[]const u8, "java/lang/Object") },
         .{ "java/lang/Number", @as(?[]const u8, "java/lang/Object") },
         .{ "java/lang/Integer", @as(?[]const u8, "java/lang/Number") },
         .{ "java/lang/Long", @as(?[]const u8, "java/lang/Number") },

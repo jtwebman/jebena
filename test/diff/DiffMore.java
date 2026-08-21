@@ -115,4 +115,12 @@ public class DiffMore {
     static int fmtLoop() { int h = 0; for (int i = 1; i <= 50; i++) { double d = (double) i / 7.0; h = h * 31 + ck("" + d); } return h; }
     static int fmtToStr() { return ck(Double.toString(3.5) + "|" + Float.toString(0.1f) + "|" + String.valueOf(1e-4) + "|" + Double.valueOf(42.5).toString()); }
     static int fmtPowLoop() { int h = 0; double d = 1.0; for (int i = 0; i < 40; i++) { h = h * 31 + ck("" + d); d = d * 3.7; } return h; }
+
+    static int cmpDesc(Integer x, Integer y) { return y - x; }
+    static int sortCmp() { Integer[] a = { 5, 2, 8, 1, 9, 3 }; java.util.Arrays.sort(a, (x, y) -> x - y); int r = 0; for (Integer v : a) r = r * 10 + v; return r; }
+    static int sortRev() { Integer[] a = { 5, 2, 8, 1, 9, 3 }; java.util.Arrays.sort(a, (x, y) -> y - x); int r = 0; for (Integer v : a) r = r * 10 + v; return r; }
+    static int sortRef() { Integer[] a = { 5, 2, 8, 1, 9, 3 }; java.util.Arrays.sort(a, DiffMore::cmpDesc); int r = 0; for (Integer v : a) r = r * 10 + v; return r; }
+    static int sortStr() { String[] a = { "banana", "apple", "cherry", "date" }; java.util.Arrays.sort(a, (x, y) -> x.compareTo(y)); int r = 0; for (String t : a) r = r * 31 + t.charAt(0); return r; }
+    static int sortByLen() { String[] a = { "ccc", "a", "bb", "dd", "e", "fff" }; java.util.Arrays.sort(a, (x, y) -> x.length() - y.length()); StringBuilder sb = new StringBuilder(); for (String t : a) sb.append(t); return ck(sb.toString()); }
+    static int sortBigC() { Integer[] a = new Integer[50]; for (int i = 0; i < 50; i++) a[i] = (i * 37 + 11) % 100; java.util.Arrays.sort(a, (x, y) -> x - y); int h = 0; for (Integer v : a) h = h * 31 + v; return h; }
 }

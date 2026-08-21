@@ -1676,6 +1676,38 @@ fn arrayOf(f: *Frame, id: u32) RunError!*Array {
         else => error.LinkError,
     };
 }
+fn callComparator(f: *Frame, cmp_ref: u32, a: Value, b: Value) RunError!i32 {
+    const heap = f.heap orelse return error.UnsupportedOpcode;
+    const lam = switch (heap.get(cmp_ref).*) {
+        .lambda => |l| l,
+        else => return error.TypeMismatch, // only lambda/method-ref comparators for now
+    };
+    const slots = [_]Value{ a, b };
+    const params = [_]Class.Param{
+        .{ .kind = .reference, .slot = 0 },
+        .{ .kind = .reference, .slot = 1 },
+    };
+    try dispatchLambda(f, lam, &slots, &params);
+    return f.popInt();
+}
+fn sortWithComparator(f: *Frame, arr: []Value, cmp_ref: u32) RunError!void {
+    // Stable binary-free insertion sort; re-enters the interpreter for each compare.
+    // Java's Arrays.sort(Object[],Comparator) is stable, so keeping equal elements in
+    // input order (compare > 0 only) reproduces its observable output.
+    var i: usize = 1;
+    while (i < arr.len) : (i += 1) {
+        const key = arr[i];
+        var j: usize = i;
+        while (j > 0) {
+            const c = try callComparator(f, cmp_ref, arr[j - 1], key);
+            if (c > 0) {
+                arr[j] = arr[j - 1];
+                j -= 1;
+            } else break;
+        }
+        arr[j] = key;
+    }
+}
 fn arraysIntrinsic(f: *Frame, name: []const u8, desc: []const u8) RunError!void {
     if (eq2(name, desc, "sort", "([I)V")) {
         const arr = try arrayOf(f, (try f.popRef()) orelse return error.NullPointer);
@@ -1686,6 +1718,11 @@ fn arraysIntrinsic(f: *Frame, name: []const u8, desc: []const u8) RunError!void 
         const arr = try arrayOf(f, (try f.popRef()) orelse return error.NullPointer);
         std.sort.pdq(Value, arr.data, {}, lessThanLong);
         return;
+    }
+    if (eq2(name, desc, "sort", "([Ljava/lang/Object;Ljava/util/Comparator;)V")) {
+        const cmp_ref = (try f.popRef()) orelse return error.NullPointer;
+        const arr = try arrayOf(f, (try f.popRef()) orelse return error.NullPointer);
+        return sortWithComparator(f, arr.data, cmp_ref);
     }
     if (eq2(name, desc, "fill", "([II)V")) {
         const val = try f.popInt();
