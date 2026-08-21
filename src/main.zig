@@ -48,6 +48,15 @@ fn usage() void {
 
 const IC = jebena.interp;
 
+const RunResult = struct { value: ?IC.Value = null, err: ?anyerror = null };
+fn runEntry(loader: *IC.Loader, cls: *const IC.Class, method: []const u8, desc: []const u8, out: *RunResult) void {
+    var b = IC.Budget{};
+    out.value = IC.runInLoader(loader, cls, method, desc, &.{}, &b) catch |e| {
+        out.err = e;
+        return;
+    };
+}
+
 /// Load a compiled multi-class program from disk and run a static no-arg method.
 /// Provides a minimal java.lang stub chain so user classes can extend
 /// Object/Throwable/Exception/RuntimeException.
@@ -141,11 +150,16 @@ fn cmdRun(gpa: std.mem.Allocator, io: std.Io, it: *std.process.Args.Iterator) !v
         return error.MethodNotFound;
     };
 
-    var b = IC.Budget{};
-    const r = IC.runInLoader(&loader, cls, method, d, &.{}, &b) catch |e| {
+    // Run on a thread with a large stack: the interpreter uses native recursion,
+    // so deep Java recursion needs a big native stack (like a real JVM's -Xss).
+    var result = RunResult{};
+    const t = try std.Thread.spawn(.{ .stack_size = 512 * 1024 * 1024 }, runEntry, .{ &loader, cls, method, d, &result });
+    t.join();
+    if (result.err) |e| {
         std.debug.print("execution error: {s}\n", .{@errorName(e)});
         return e;
-    };
+    }
+    const r = result.value;
     if (r) |v| switch (v) {
         .int => |x| std.debug.print("{s}.{s}() = {d}\n", .{ main_class, method, x }),
         .long => |x| std.debug.print("{s}.{s}() = {d}L\n", .{ main_class, method, x }),

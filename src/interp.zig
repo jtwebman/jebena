@@ -53,7 +53,7 @@ pub const Budget = struct {
     steps: usize = 0,
     max_steps: usize = 100_000_000,
     depth: usize = 0,
-    max_depth: usize = 1024,
+    max_depth: usize = 2500,
     /// Exception object id currently propagating up the native call stack.
     pending: ?u32 = null,
 };
@@ -786,6 +786,42 @@ fn doANewArray(f: *Frame, code: []const u8) RunError!void {
     if (len < 0) return error.NegativeArraySize;
     try f.push(.{ .reference = try heap.allocArray(.reference, @intCast(len)) });
 }
+fn buildMulti(heap: *Heap, counts: []const i32, level: usize, inner_kind: Kind) RunError!u32 {
+    const len = counts[level];
+    if (len < 0) return error.NegativeArraySize;
+    const ulen: usize = @intCast(len);
+    if (level == counts.len - 1) return heap.allocArray(inner_kind, ulen);
+    const id = try heap.allocArray(.reference, ulen);
+    var i: usize = 0;
+    while (i < ulen) : (i += 1) {
+        const child = try buildMulti(heap, counts, level + 1, inner_kind);
+        heap.get(id).array.data[i] = .{ .reference = child };
+    }
+    return id;
+}
+fn doMultiANewArray(f: *Frame, cls: *const Class, code: []const u8) RunError!void {
+    maybeCollect(f);
+    const heap = f.heap orelse return error.UnsupportedOpcode;
+    const cname = try refClassName(cls, try u16At(code, f.pc + 1)); // e.g. "[[I"
+    const dims: usize = try u8At(code, f.pc + 3);
+    if (dims == 0 or dims > 255 or dims > cname.len) return error.LinkError;
+    var counts: [255]i32 = undefined;
+    var k: usize = dims;
+    while (k > 0) {
+        k -= 1;
+        counts[k] = try f.popInt(); // stack top is the innermost dimension count
+    }
+    const rem = cname[dims..];
+    const inner_kind: Kind = if (rem.len == 0) .reference else switch (rem[0]) {
+        '[', 'L' => .reference,
+        'B', 'C', 'S', 'Z', 'I' => .int,
+        'J' => .long,
+        'F' => .float,
+        'D' => .double,
+        else => .reference,
+    };
+    try f.push(.{ .reference = try buildMulti(heap, counts[0..dims], 0, inner_kind) });
+}
 fn doArrayLength(f: *Frame) RunError!void {
     const heap = f.heap orelse return error.UnsupportedOpcode;
     const oid = (try f.popRef()) orelse return error.NullPointer;
@@ -834,8 +870,8 @@ fn invokeInstance(f: *Frame, cls: *const Class, code: []const u8, is_special: bo
     // Declared class (from the ref) gives the param layout. Pop args + this.
     const dclass = try resolveClass(f, cls, cname);
     const decl = dclass.find(mname, mdesc) orelse return error.MethodNotFound;
-    var slots: [256]Value = undefined;
-    if (decl.arg_slots > slots.len) return error.LinkError;
+    const slots = try dclass.gpa.alloc(Value, decl.arg_slots);
+    defer dclass.gpa.free(slots);
     var i: usize = decl.params.len;
     while (i > 0) {
         i -= 1;
@@ -861,7 +897,7 @@ fn invokeInstance(f: *Frame, cls: *const Class, code: []const u8, is_special: bo
     f.budget.depth += 1;
     defer f.budget.depth -= 1;
     const cc = target.code orelse return error.LinkError;
-    const ret = try exec(owner.gpa, owner, f.heap, f.loader, f.budget, cc.code, cc.max_stack, cc.max_locals, slots[0..decl.arg_slots], cc.exception_table, f);
+    const ret = try exec(owner.gpa, owner, f.heap, f.loader, f.budget, cc.code, cc.max_stack, cc.max_locals, slots, cc.exception_table, f);
     if (ret) |rv| try f.pushKind(rv);
 }
 
@@ -910,9 +946,9 @@ pub fn runInLoaderWithHeap(loader: *Loader, class: *const Class, name: []const u
     const rr = class.resolve(name, desc) orelse return error.MethodNotFound;
     const m = rr.method;
     const c = m.code orelse return error.LinkError;
-    var slots: [256]Value = undefined;
-    if (m.arg_slots > slots.len) return error.LinkError;
-    const n = try layoutArgs(m, args, &slots);
+    const slots = try loader.gpa.alloc(Value, m.arg_slots);
+    defer loader.gpa.free(slots);
+    const n = try layoutArgs(m, args, slots);
     return exec(loader.gpa, rr.owner, heap, loader, budget, c.code, c.max_stack, c.max_locals, slots[0..n], c.exception_table, null);
 }
 
@@ -934,8 +970,8 @@ fn invokeStatic(f: *Frame, cls: *const Class, code: []const u8) RunError!void {
     const target = tr.method;
     const owner = tr.owner;
 
-    var slots: [256]Value = undefined;
-    if (target.arg_slots > slots.len) return error.LinkError;
+    const slots = try owner.gpa.alloc(Value, target.arg_slots);
+    defer owner.gpa.free(slots);
     var i: usize = target.params.len;
     while (i > 0) {
         i -= 1;
@@ -948,7 +984,7 @@ fn invokeStatic(f: *Frame, cls: *const Class, code: []const u8) RunError!void {
     f.budget.depth += 1;
     defer f.budget.depth -= 1;
     const c = target.code orelse return error.LinkError;
-    const ret = try exec(owner.gpa, owner, f.heap, f.loader, f.budget, c.code, c.max_stack, c.max_locals, slots[0..target.arg_slots], c.exception_table, f);
+    const ret = try exec(owner.gpa, owner, f.heap, f.loader, f.budget, c.code, c.max_stack, c.max_locals, slots, c.exception_table, f);
     if (ret) |rv| try f.pushKind(rv);
 }
 
@@ -1537,6 +1573,12 @@ fn exec(alloc: std.mem.Allocator, class: ?*const Class, heap: ?*Heap, loader: *L
         .anewarray => {
             try doANewArray(&f, code);
             f.pc += 3;
+            continue :sw try step(&f, code);
+        },
+        .multianewarray => {
+            const cls = class orelse return error.UnsupportedOpcode;
+            try doMultiANewArray(&f, cls, code);
+            f.pc += 4;
             continue :sw try step(&f, code);
         },
         .arraylength => {

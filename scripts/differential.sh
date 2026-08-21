@@ -13,7 +13,7 @@ CLASSES=$(ls "$OUT"/*.class | grep -v '/Driver.class' | tr '\n' ' ')
 
 CASES="DiffTest:arith DiffTest:loops DiffTest:rec DiffTest:longMath DiffTest:doubleMath \
 DiffTest:floatMath DiffTest:bits DiffTest:arrays DiffTest:sw DiffTest:gcd DiffTest:conv \
-DiffTest:shifts DiffTest:exc DiffTest:idivEdge DiffTest:overflow \
+DiffTest:shifts DiffTest:exc DiffTest:idivEdge DiffTest:overflow DiffTest:negMod DiffTest:longEdge DiffTest:shiftBig DiffTest:dSpecial DiffTest:fSpecial DiffTest:deepRec DiffTest:charMath DiffTest:ternary DiffTest:d2lConv DiffTest:mixArith DiffTest:cmpChain DiffTest:lcmpTest DiffTest:multiArr \
 OopTest:poly OopTest:vecs OopTest:allocStress OopTest:listBuild"
 
 pass=0; fail=0

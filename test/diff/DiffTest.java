@@ -17,4 +17,19 @@ public class DiffTest {
     static int exc() { int r = 0; try { for (int i = 0; i < 10; i++) { if (i == 7) throw new RuntimeException(); r += i; } } catch (RuntimeException e) { r += 1000; } finally { r += 1; } return r; }
     static int idivEdge() { int a = Integer.MIN_VALUE; int b = -1; return a / b + a % b; }
     static int overflow() { int x = 2000000000; return x + x + x; }
+
+    static int negMod() { return (-17 % 5) * 100 + (17 % -5) + (-17 % -5); }
+    static int longEdge() { return (int) (Long.MAX_VALUE + 1) + (int) (Long.MIN_VALUE - 1); }
+    static int shiftBig() { return (1 << 35) + (int) (1L << 67) + (-8 >>> 1); }
+    static int dSpecial() { double inf = 1.0 / 0.0, nan = 0.0 / 0.0; return (int) inf + (int) nan + (int) (-1.0 / 0.0); }
+    static int fSpecial() { float inf = 1.0f / 0.0f; return (int) inf + (int) (0.0f / 0.0f) + (int) (-inf); }
+    static int deepRec() { return sumTo(1000); }
+    static int sumTo(int n) { return n == 0 ? 0 : n + sumTo(n - 1); }
+    static int charMath() { char c = 'A'; c += 5; return c + (int) 'Z' + (c > 'B' ? 7 : 0); }
+    static int ternary() { int x = 5; return x > 3 ? (x > 4 ? 100 : 200) : 300; }
+    static int d2lConv() { double d = 1.23456789e15; long l = (long) d; return (int) (l % 1000000); }
+    static int mixArith() { long a = 5; int b = 3; double c = 2.5; return (int) (a * b + (long) (c * 4)) + (int) (a / b); }
+    static int cmpChain() { int a = 3, b = 5, c = 3; int r = 0; if (a < b) r += 1; if (a <= c) r += 2; if (b > c) r += 4; if (a == c) r += 8; if (b != c) r += 16; return r; }
+    static int lcmpTest() { long a = 100000000000L, b = 99999999999L; return (a > b ? 1 : 0) + (a < b ? 10 : 0) + (a == b ? 100 : 0); }
+    static int multiArr() { int[][] m = new int[4][5]; for (int i = 0; i < 4; i++) for (int j = 0; j < 5; j++) m[i][j] = i * 5 + j; int s = 0; for (int i = 0; i < 4; i++) for (int j = 0; j < 5; j++) s += m[i][j] * (i + 1); return s; }
 }
