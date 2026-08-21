@@ -1572,3 +1572,23 @@ test "arrays: index out of bounds and negative size are trapped" {
     // len(-1): negative array size
     try testing.expectError(error.NegativeArraySize, cls.callStatic("len", "(I)I", &.{-1}));
 }
+
+test "integration: bubble sort agrees with linear max, and sorts correctly" {
+    var cf: ClassFile = undefined;
+    var arena: std.heap.ArenaAllocator = undefined;
+    const cls = try loadClass("testdata/Algo.class", &cf, &arena);
+    defer cf.deinit();
+    defer arena.deinit();
+    // For many seeds/sizes, the sorted last element equals the independent max,
+    // and the array is verified sorted. A broad workout of arrays+loops+calls.
+    const seeds = [_]i32{ 1, 7, 42, 12345, 999, -3, 2147483, 88 };
+    const sizes = [_]i32{ 1, 2, 5, 16, 40 };
+    for (seeds) |seed| {
+        for (sizes) |n| {
+            const bmax = (try cls.callStatic("bubbleMax", "(II)I", &.{ seed, n })).?.int;
+            const lmax = (try cls.callStatic("linearMax", "(II)I", &.{ seed, n })).?.int;
+            try testing.expectEqual(lmax, bmax);
+            try testing.expectEqual(Value{ .int = 1 }, (try cls.callStatic("isSorted", "(II)Z", &.{ seed, n })).?);
+        }
+    }
+}
