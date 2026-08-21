@@ -13,6 +13,7 @@ const std = @import("std");
 const ClassFile = @import("class_file.zig").ClassFile;
 const attribute_decode = @import("attribute_decode.zig");
 const cpmod = @import("constant_pool.zig");
+const verify = @import("verify.zig").verify;
 const testing = std.testing;
 
 const seed: []const u8 = @embedFile("testdata/Hello.class");
@@ -20,7 +21,8 @@ const seed: []const u8 = @embedFile("testdata/Hello.class");
 /// Parse and, if it succeeded, tear down. The point is that this never crashes.
 fn tryParse(bytes: []const u8) void {
     var cf = ClassFile.parse(testing.allocator, bytes) catch return;
-    cf.deinit();
+    defer cf.deinit();
+    verify(&cf) catch {};
 }
 
 test "parser survives arbitrary random bytes" {

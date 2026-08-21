@@ -105,6 +105,29 @@ pub fn parseMethodDescriptor(a: Allocator, s: []const u8) Error!MethodType {
     return .{ .params = params, .ret = ret };
 }
 
+/// Validate a field descriptor without allocating.
+pub fn validateFieldDescriptor(s: []const u8) Error!void {
+    _ = try parseFieldDescriptor(s);
+}
+
+/// Validate a method descriptor without allocating (unlike parseMethodDescriptor).
+pub fn validateMethodDescriptor(s: []const u8) Error!void {
+    var p = Cursor{ .s = s };
+    if (p.i >= s.len or s[p.i] != '(') return error.BadDescriptor;
+    p.i += 1;
+    while (p.i < s.len and s[p.i] != ')') {
+        _ = try parseField(&p);
+    }
+    if (p.i >= s.len or s[p.i] != ')') return error.BadDescriptor;
+    p.i += 1;
+    if (p.i < s.len and s[p.i] == 'V') {
+        p.i += 1;
+    } else {
+        _ = try parseField(&p);
+    }
+    if (p.i != s.len) return error.BadDescriptor;
+}
+
 const testing = std.testing;
 
 test "base field types" {
@@ -180,4 +203,18 @@ test "bad method descriptors" {
     try testing.expectError(error.BadDescriptor, parseMethodDescriptor(testing.allocator, "(I")); // unclosed
     try testing.expectError(error.BadDescriptor, parseMethodDescriptor(testing.allocator, "()Ijunk")); // trailing
     try testing.expectError(error.BadDescriptor, parseMethodDescriptor(testing.allocator, "(")); // just '('
+}
+
+test "descriptor validators (non-allocating)" {
+    try descriptorValidatorsOk();
+    try testing.expectError(error.BadDescriptor, validateFieldDescriptor("Q"));
+    try testing.expectError(error.BadDescriptor, validateMethodDescriptor("()Q"));
+    try testing.expectError(error.BadDescriptor, validateMethodDescriptor("I)V"));
+}
+
+fn descriptorValidatorsOk() Error!void {
+    try validateFieldDescriptor("I");
+    try validateFieldDescriptor("[Ljava/lang/String;");
+    try validateMethodDescriptor("()V");
+    try validateMethodDescriptor("(IDLjava/lang/Thread;)Ljava/lang/Object;");
 }
