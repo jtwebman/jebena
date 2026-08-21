@@ -18,7 +18,7 @@ Working list. Check off as done; commit each. Ordered roughly by dependency.
 - [ ] Phase-0 collector (semispace or mark-sweep) behind a GC interface
 - [x] new (self-class), newarray/anewarray/arraylength, array load/store (all types)
 - [x] getfield/putfield, getstatic/putstatic, <clinit>
-- [x] invokevirtual/invokespecial (single class); [ ] invokeinterface + real hierarchy dispatch
+- [x] invokevirtual/invokespecial/invokeinterface with hierarchy + interface dispatch
 - [ ] string constants (ldc of String), <init> chains
 
 ## Subsystem 01 — verification

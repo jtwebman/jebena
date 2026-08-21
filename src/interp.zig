@@ -565,6 +565,7 @@ fn invokeInstance(f: *Frame, cls: *const Class, code: []const u8, is_special: bo
     const c = cls.cp.get(idx) catch return error.LinkError;
     const ref = switch (c.*) {
         .methodref => |r| r,
+        .interface_methodref => |r| r,
         else => return error.LinkError,
     };
     const cname = try refClassName(cls, ref.class_index);
@@ -1346,6 +1347,12 @@ fn exec(alloc: std.mem.Allocator, class: ?*const Class, heap: ?*Heap, loader: *L
             f.pc += 3;
             continue :sw try step(&f, code);
         },
+        .invokeinterface => {
+            const cls = class orelse return error.UnsupportedOpcode;
+            try invokeInstance(&f, cls, code, false); // dispatch on the receiver's class
+            f.pc += 5; // opcode + index(2) + count(1) + zero(1)
+            continue :sw try step(&f, code);
+        },
         .getstatic => {
             const cls = class orelse return error.UnsupportedOpcode;
             const fr = try fieldRef(cls, try u16At(code, f.pc + 1));
@@ -1826,4 +1833,31 @@ test "inheritance: fields, super() ctor, override dispatch, super.method()" {
     // viaAnimalRef(): Animal a = new Dog(); a.describe() [virtual -> Dog.describe()=41] + a.legs() [virtual -> Dog.legs()=4] = 45
     b = Budget{};
     try testing.expectEqual(Value{ .int = 45 }, (try runInLoader(&loader, &dog, "viaAnimalRef", "()I", &.{}, &b)).?);
+}
+
+test "interfaces: invokeinterface dispatches on the concrete class" {
+    const bs = @embedFile("testdata/Shape.class");
+    const bq = @embedFile("testdata/Square.class");
+    const bu = @embedFile("testdata/Uses.class");
+    var cfs = try ClassFile.parse(testing.allocator, bs);
+    defer cfs.deinit();
+    var cfq = try ClassFile.parse(testing.allocator, bq);
+    defer cfq.deinit();
+    var cfu = try ClassFile.parse(testing.allocator, bu);
+    defer cfu.deinit();
+    var aa = std.heap.ArenaAllocator.init(testing.allocator);
+    defer aa.deinit();
+    const shape = try Class.init(testing.allocator, aa.allocator(), &cfs, null);
+    const square = try Class.init(testing.allocator, aa.allocator(), &cfq, null);
+    const uses = try Class.init(testing.allocator, aa.allocator(), &cfu, null);
+
+    var loader = Loader.init(testing.allocator);
+    defer loader.deinit();
+    try loader.register(&shape);
+    try loader.register(&square);
+    try loader.register(&uses);
+
+    var b = Budget{};
+    // sumAreas(3,4) = 3*3 + 4*4 = 25, both via invokeinterface Shape.area()
+    try testing.expectEqual(Value{ .int = 25 }, (try runInLoader(&loader, &uses, "sumAreas", "(II)I", &.{ .{ .int = 3 }, .{ .int = 4 } }, &b)).?);
 }
