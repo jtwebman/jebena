@@ -75,4 +75,11 @@ public class DiffMore {
     static int sig(int x) { return x > 0 ? 1 : (x < 0 ? -1 : 0); }
     static int strLoop() { String[] words = { "the", "quick", "brown", "fox" }; int total = 0; for (String w : words) { total += w.length() * 100 + w.charAt(0); } return total; }
     static int strUnicode() { String s = "\u00e9\u4e2d\u6587"; return s.length() * 100000 + s.charAt(0) + s.charAt(1) + s.charAt(2); }
+
+    static int strSub() { String s = "Hello, World!"; String a = s.substring(7); String b = s.substring(0, 5); return a.length() * 1000 + b.length() * 10 + a.charAt(0) % 100; }
+    static int strIndex() { String s = "the quick brown fox"; return s.indexOf('q') * 100 + s.indexOf("brown") + s.indexOf('z'); }
+    static int strPrefix() { String s = "http://example.com"; return (s.startsWith("http") ? 1 : 0) * 1000 + (s.endsWith(".com") ? 1 : 0) * 100 + (s.contains("example") ? 1 : 0) * 10 + (s.startsWith("ftp") ? 1 : 0); }
+    static int strConcat() { String a = "foo"; String b = "bar"; String c = a.concat(b).concat("baz"); return c.length() * 100 + c.charAt(6); }
+    static int strReplace() { String s = "a.b.c.d"; String r = s.replace('.', '/'); int acc = 0; for (int i = 0; i < r.length(); i++) acc += r.charAt(i); return acc; }
+    static int strManip() { String s = "programming"; int score = 0; for (int i = 0; i < s.length() - 2; i++) { if (s.substring(i, i + 3).equals("gra")) score += 100; if (s.indexOf('r') == i) score += 10; } return score + s.substring(3, 7).length(); }
 }

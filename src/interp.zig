@@ -1131,7 +1131,82 @@ fn stringIntrinsic(f: *Frame, name: []const u8, desc: []const u8) RunError!void 
         }
         return f.pushInt(@as(i32, @intCast(self_chars.len)) - @as(i32, @intCast(other.len)));
     }
+    if (eq2(name, desc, "substring", "(II)Ljava/lang/String;")) {
+        const end = try f.popInt();
+        const begin = try f.popInt();
+        const s = try strChars(heap, (try f.popRef()) orelse return error.NullPointer);
+        if (begin < 0 or end > s.len or begin > end) return error.ArrayIndexOutOfBounds;
+        return f.push(.{ .reference = try newString(f, s[@intCast(begin)..@intCast(end)]) });
+    }
+    if (eq2(name, desc, "substring", "(I)Ljava/lang/String;")) {
+        const begin = try f.popInt();
+        const s = try strChars(heap, (try f.popRef()) orelse return error.NullPointer);
+        if (begin < 0 or begin > s.len) return error.ArrayIndexOutOfBounds;
+        return f.push(.{ .reference = try newString(f, s[@intCast(begin)..]) });
+    }
+    if (eq2(name, desc, "indexOf", "(I)I")) {
+        const ch = try f.popInt();
+        const s = try strChars(heap, (try f.popRef()) orelse return error.NullPointer);
+        for (s, 0..) |c, i| if (c == ch) return f.pushInt(@intCast(i));
+        return f.pushInt(-1);
+    }
+    if (eq2(name, desc, "indexOf", "(Ljava/lang/String;)I")) {
+        const needle = try strChars(heap, (try f.popRef()) orelse return error.NullPointer);
+        const s = try strChars(heap, (try f.popRef()) orelse return error.NullPointer);
+        return f.pushInt(indexOfSub(s, needle));
+    }
+    if (eq2(name, desc, "startsWith", "(Ljava/lang/String;)Z")) {
+        const pre = try strChars(heap, (try f.popRef()) orelse return error.NullPointer);
+        const s = try strChars(heap, (try f.popRef()) orelse return error.NullPointer);
+        return f.pushInt(if (pre.len <= s.len and std.mem.eql(i32, s[0..pre.len], pre)) 1 else 0);
+    }
+    if (eq2(name, desc, "endsWith", "(Ljava/lang/String;)Z")) {
+        const suf = try strChars(heap, (try f.popRef()) orelse return error.NullPointer);
+        const s = try strChars(heap, (try f.popRef()) orelse return error.NullPointer);
+        return f.pushInt(if (suf.len <= s.len and std.mem.eql(i32, s[s.len - suf.len ..], suf)) 1 else 0);
+    }
+    if (eq2(name, desc, "contains", "(Ljava/lang/CharSequence;)Z")) {
+        const needle = try strChars(heap, (try f.popRef()) orelse return error.NullPointer);
+        const s = try strChars(heap, (try f.popRef()) orelse return error.NullPointer);
+        return f.pushInt(if (indexOfSub(s, needle) >= 0) 1 else 0);
+    }
+    if (eq2(name, desc, "concat", "(Ljava/lang/String;)Ljava/lang/String;")) {
+        const other = try strChars(heap, (try f.popRef()) orelse return error.NullPointer);
+        const s = try strChars(heap, (try f.popRef()) orelse return error.NullPointer);
+        const buf = heap.gpa.alloc(i32, s.len + other.len) catch return error.OutOfMemory;
+        @memcpy(buf[0..s.len], s);
+        @memcpy(buf[s.len..], other);
+        const str_class = f.loader.find("java/lang/String") orelse return error.LinkError;
+        return f.push(.{ .reference = try heap.putString(str_class, buf) });
+    }
+    if (eq2(name, desc, "replace", "(CC)Ljava/lang/String;")) {
+        const newc = try f.popInt();
+        const oldc = try f.popInt();
+        const s = try strChars(heap, (try f.popRef()) orelse return error.NullPointer);
+        const buf = heap.gpa.dupe(i32, s) catch return error.OutOfMemory;
+        for (buf) |*c| {
+            if (c.* == oldc) c.* = newc;
+        }
+        const str_class = f.loader.find("java/lang/String") orelse return error.LinkError;
+        return f.push(.{ .reference = try heap.putString(str_class, buf) });
+    }
     return error.UnsupportedOpcode;
+}
+
+fn indexOfSub(s: []const i32, needle: []const i32) i32 {
+    if (needle.len == 0) return 0;
+    if (needle.len > s.len) return -1;
+    var i: usize = 0;
+    while (i + needle.len <= s.len) : (i += 1) {
+        if (std.mem.eql(i32, s[i .. i + needle.len], needle)) return @intCast(i);
+    }
+    return -1;
+}
+fn newString(f: *Frame, chars: []const i32) RunError!u32 {
+    const heap = f.heap orelse return error.UnsupportedOpcode;
+    const str_class = f.loader.find("java/lang/String") orelse return error.LinkError;
+    const dup = heap.gpa.dupe(i32, chars) catch return error.OutOfMemory;
+    return heap.putString(str_class, dup);
 }
 
 fn lessThanInt(_: void, a: Value, b: Value) bool {
