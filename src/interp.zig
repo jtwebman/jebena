@@ -205,6 +205,7 @@ pub const LambdaObj = struct {
     impl_class: []const u8,
     impl_name: []const u8,
     impl_desc: []const u8,
+    impl_kind: u8,
     captures: []Value,
 };
 pub const BuilderObj = struct { class: *const Class, buf: []i32, len: usize }; // mutable StringBuilder
@@ -1058,6 +1059,23 @@ fn eq2(a: []const u8, b: []const u8, x: []const u8, y: []const u8) bool {
     return std.mem.eql(u8, a, x) and std.mem.eql(u8, b, y);
 }
 
+fn objectsIntrinsic(f: *Frame, name: []const u8, desc: []const u8) RunError!void {
+    if (eq2(name, desc, "requireNonNull", "(Ljava/lang/Object;)Ljava/lang/Object;")) {
+        const r = try f.popRef();
+        if (r == null) return error.NullPointer;
+        return f.push(.{ .reference = r });
+    }
+    if (eq2(name, desc, "requireNonNull", "(Ljava/lang/Object;Ljava/lang/String;)Ljava/lang/Object;")) {
+        _ = try f.popRef();
+        const r = try f.popRef();
+        if (r == null) return error.NullPointer;
+        return f.push(.{ .reference = r });
+    }
+    if (eq2(name, desc, "isNull", "(Ljava/lang/Object;)Z")) return f.pushInt(if ((try f.popRef()) == null) 1 else 0);
+    if (eq2(name, desc, "nonNull", "(Ljava/lang/Object;)Z")) return f.pushInt(if ((try f.popRef()) != null) 1 else 0);
+    return error.UnsupportedOpcode;
+}
+
 /// java.lang.Math intrinsics (the class is not loaded; we compute directly).
 fn mathIntrinsic(f: *Frame, name: []const u8, desc: []const u8) RunError!void {
     // int
@@ -1274,15 +1292,42 @@ fn doLambda(f: *Frame, cls: *const Class, desc: []const u8, bm: attribute_decode
         .impl_class = impl_class,
         .impl_name = impl_name,
         .impl_desc = impl_desc,
+        .impl_kind = mh.reference_kind,
         .captures = captures,
     }) });
 }
-fn dispatchLambda(f: *Frame, lam: LambdaObj, sam_slots: []const Value, sam_params: []const Class.Param) RunError!void {
-    const impl_cls = f.loader.find(lam.impl_class) orelse return error.LinkError;
-    const ir = impl_cls.resolve(lam.impl_name, lam.impl_desc) orelse return error.MethodNotFound;
-    const impl = ir.method;
-    const owner = ir.owner;
+fn runImplStatic(f: *Frame, owner: *const Class, impl: *const Class.Method, args: []const Value) RunError!void {
+    if (args.len != impl.params.len) return error.LinkError;
     const cc = impl.code orelse return error.LinkError;
+    const islots = try owner.gpa.alloc(Value, impl.arg_slots);
+    defer owner.gpa.free(islots);
+    for (impl.params, 0..) |p, k| {
+        islots[p.slot] = args[k];
+        if (p.kind == .long or p.kind == .double) islots[p.slot + 1] = .top;
+    }
+    if (f.budget.depth >= f.budget.max_depth) return error.CallDepthExceeded;
+    f.budget.depth += 1;
+    defer f.budget.depth -= 1;
+    const ret = try exec(owner.gpa, owner, f.heap, f.loader, f.budget, cc.code, cc.max_stack, cc.max_locals, islots, cc.exception_table, f);
+    if (ret) |rv| try f.pushKind(rv);
+}
+fn runImplInstance(f: *Frame, owner: *const Class, impl: *const Class.Method, recv_id: u32, args: []const Value) RunError!void {
+    if (args.len != impl.params.len) return error.LinkError;
+    const cc = impl.code orelse return error.LinkError;
+    const islots = try owner.gpa.alloc(Value, impl.arg_slots);
+    defer owner.gpa.free(islots);
+    islots[0] = .{ .reference = recv_id };
+    for (impl.params, 0..) |p, k| {
+        islots[p.slot] = args[k];
+        if (p.kind == .long or p.kind == .double) islots[p.slot + 1] = .top;
+    }
+    if (f.budget.depth >= f.budget.max_depth) return error.CallDepthExceeded;
+    f.budget.depth += 1;
+    defer f.budget.depth -= 1;
+    const ret = try exec(owner.gpa, owner, f.heap, f.loader, f.budget, cc.code, cc.max_stack, cc.max_locals, islots, cc.exception_table, f);
+    if (ret) |rv| try f.pushKind(rv);
+}
+fn dispatchLambda(f: *Frame, lam: LambdaObj, sam_slots: []const Value, sam_params: []const Class.Param) RunError!void {
     var logical: [128]Value = undefined;
     var n: usize = 0;
     for (lam.captures) |c| {
@@ -1293,18 +1338,27 @@ fn dispatchLambda(f: *Frame, lam: LambdaObj, sam_slots: []const Value, sam_param
         logical[n] = sam_slots[p.slot];
         n += 1;
     }
-    if (n != impl.params.len) return error.LinkError;
-    const islots = try owner.gpa.alloc(Value, impl.arg_slots);
-    defer owner.gpa.free(islots);
-    for (impl.params, 0..) |p, k| {
-        islots[p.slot] = logical[k];
-        if (p.kind == .long or p.kind == .double) islots[p.slot + 1] = .top;
+    if (lam.impl_kind == 6) {
+        const impl_cls = f.loader.find(lam.impl_class) orelse return error.LinkError;
+        const ir = impl_cls.resolve(lam.impl_name, lam.impl_desc) orelse return error.MethodNotFound;
+        return runImplStatic(f, ir.owner, ir.method, logical[0..n]);
     }
-    if (f.budget.depth >= f.budget.max_depth) return error.CallDepthExceeded;
-    f.budget.depth += 1;
-    defer f.budget.depth -= 1;
-    const ret = try exec(owner.gpa, owner, f.heap, f.loader, f.budget, cc.code, cc.max_stack, cc.max_locals, islots, cc.exception_table, f);
-    if (ret) |rv| try f.pushKind(rv);
+    if (n == 0) return error.LinkError;
+    const heap = f.heap orelse return error.UnsupportedOpcode;
+    const recv_id = switch (logical[0]) {
+        .reference => |r| r orelse return error.NullPointer,
+        else => return error.TypeMismatch,
+    };
+    const recv_class = if (lam.impl_kind == 7)
+        (f.loader.find(lam.impl_class) orelse return error.LinkError)
+    else switch (heap.get(recv_id).*) {
+        .instance => |x| x.class,
+        .string => |x| x.class,
+        .builder => |x| x.class,
+        else => return error.LinkError,
+    };
+    const ir = recv_class.resolve(lam.impl_name, lam.impl_desc) orelse return error.MethodNotFound;
+    return runImplInstance(f, ir.owner, ir.method, recv_id, logical[1..n]);
 }
 fn doStringConcat(f: *Frame, cls: *const Class, desc: []const u8, bm: attribute_decode.BootstrapMethod, with_constants: bool) RunError!void {
     const heap = f.heap orelse return error.UnsupportedOpcode;
@@ -1726,6 +1780,7 @@ fn invokeStatic(f: *Frame, cls: *const Class, code: []const u8) RunError!void {
     if (std.mem.eql(u8, owner_name, "java/lang/Integer")) return integerIntrinsic(f, mname, mdesc);
     if (std.mem.eql(u8, owner_name, "java/lang/Long")) return longIntrinsic(f, mname, mdesc);
     if (std.mem.eql(u8, owner_name, "java/util/Arrays")) return arraysIntrinsic(f, mname, mdesc);
+    if (std.mem.eql(u8, owner_name, "java/util/Objects")) return objectsIntrinsic(f, mname, mdesc);
     const tclass = try resolveClass(f, cls, try refClassName(cls, ref.class_index));
     const tr = tclass.resolve(mname, mdesc) orelse return error.MethodNotFound;
     const target = tr.method;

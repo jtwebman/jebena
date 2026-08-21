@@ -6,7 +6,7 @@ highest-value item that is currently tractable. Every change must keep
 
 ## Phase 0 — language & intrinsic completeness (tractable, keep momentum)
 - [ ] StringBuilder / StringBuffer (append/toString/insert/length/charAt/reverse)
-- [ ] this-capturing lambdas + instance-method references (obj::method)
+- [x] this-capturing lambdas + instance-method references (obj::method, bound refs)
 - [ ] float/double -> String (Java shortest-round-trip; match Double.toString)
 - [ ] boxing: real-ish Integer/Long/Double/Boolean (valueOf/intValue/…) so generic
       functional interfaces + autoboxing work
