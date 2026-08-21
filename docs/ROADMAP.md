@@ -15,6 +15,33 @@ highest-value item that is currently tractable. Every change must keep
 - [x] Comparator + Arrays.sort(T[], Comparator): lambda/method-ref comparators, stable, re-enters interpreter per compare; [ ] Collections.sort (needs List)
 - [ ] keep GROWING scripts/differential.sh every iteration (it finds real bugs)
 
+## Phase 1 — real java.base (COMMITTED DIRECTION, 2026-08-21)
+
+Decision: bytecode-primary + intrinsic-accelerated (the HotSpot model). Jebena loads
+the REAL java.base class files and executes their bytecode; hand-written Zig stays as
+(a) genuine native methods and (b) speed intrinsics for hot, well-specified leaf
+methods (Math, arraycopy, String hash/compare, parse/format). This is what every fast
+production JVM does. Rationale: compatibility, reflection, and user-subclassing of
+library types all require real classes; reimplementing all of java.base in Zig cannot
+run real-world jars (Spring, JDBC).
+
+Bootstrap policy (clean-room + licensing): DO NOT redistribute OpenJDK class files.
+Jebena loads java.base from an installed JDK's module image at runtime (bring-your-own
+-JDK). Our VM stays clean-room; the class library is the platform's. Revisit writing
+our own java.base later if the thesis requires a fully from-scratch stack.
+
+Concrete steps (each a loop iteration or few):
+- [ ] classfile source: read .class bytes from a JDK module image (jimage/`lib/modules`)
+      or an extracted dir; Loader falls back to it when a class isn't on the app path.
+- [ ] native-method registry: ACC_NATIVE methods dispatch to Zig; repurpose existing
+      intrinsics as the native impls (Object/System/Unsafe/Class primitives).
+- [ ] bring up real java/lang/Object, then leaf classes with light <clinit>.
+- [ ] real java/lang/String (byte[] value + coder, StringLatin1/StringUTF16 natives).
+- [ ] System.initPhase1 / <clinit> dependency ordering for the core set.
+- [ ] real boxing (Integer/Long/Double...), Number, Math (keep Zig intrinsics on top).
+- [ ] real java.util core: AbstractCollection/List, ArrayList, HashMap, Arrays, Objects.
+- [ ] keep every prior differential test green throughout (regression guard).
+
 ## Phase 1 — the real java.base (the "hard 20%", most of a real JVM)
 - [ ] extract java.base .class files from the installed JDK (jmods/modules)
 - [ ] load real java/lang/Object (identity hashCode, getClass, equals/hashCode)
