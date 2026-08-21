@@ -1266,10 +1266,7 @@ fn appendArg(out: *std.ArrayList(i32), heap: *Heap, v: Value, ft: descriptor.Fie
             .double => try appendJavaFloat(out, gpa, f64, v.double),
         },
         .object => switch (v) {
-            .reference => |r| if (r) |id| switch (heap.get(id).*) {
-                .string => |st| out.appendSlice(gpa, st.chars) catch return error.OutOfMemory,
-                else => return error.UnsupportedOpcode, // non-String object toString not supported
-            } else try appendAscii(out, gpa, "null"),
+            .reference => |r| if (r) |id| try appendStringObj(out, heap, id) else try appendAscii(out, gpa, "null"),
             else => return error.TypeMismatch,
         },
     }
@@ -1472,14 +1469,13 @@ fn doStringConcat(f: *Frame, cls: *const Class, desc: []const u8, bm: attribute_
     try f.push(.{ .reference = try newString(f, out.items) });
 }
 
-fn createString(f: *Frame, mutf8_bytes: []const u8) RunError!void {
+fn makeString(f: *Frame, chars: []const i32) RunError!u32 {
+    // Representation-aware String builder: a real char[]-backed instance when
+    // java.lang.String is the real loaded class, else a StringObj for the Zig
+    // intrinsic (bootstrap stub). GC is opcode-level, so ids stay valid here.
     const heap = f.heap orelse return error.UnsupportedOpcode;
     const str_class = f.loader.find("java/lang/String") orelse return error.LinkError;
-    const chars = mutf8ToChars(heap.gpa, mutf8_bytes) catch return error.OutOfMemory;
     if (!str_class.is_stub) {
-        // Real clean-room String: an instance backed by a char[] `value` field. No GC
-        // runs inside these heap allocs (GC is opcode-level), so the ids stay valid.
-        defer heap.gpa.free(chars);
         const aid = try heap.allocArray(.int, chars.len);
         const arr = try arrayOf(f, aid);
         for (chars, 0..) |c, i| arr.data[i] = .{ .int = c };
@@ -1489,9 +1485,38 @@ fn createString(f: *Frame, mutf8_bytes: []const u8) RunError!void {
             .instance => |*inst| inst.fields[vi] = .{ .reference = aid },
             else => return error.LinkError,
         }
-        return f.push(.{ .reference = sid });
+        return sid;
     }
-    try f.push(.{ .reference = try heap.putString(str_class, chars) });
+    const dup = heap.gpa.dupe(i32, chars) catch return error.OutOfMemory;
+    return heap.putString(str_class, dup);
+}
+fn appendStringObj(out: *std.ArrayList(i32), heap: *Heap, id: u32) RunError!void {
+    // Append the chars of a string-like heap object (StringObj or a real
+    // char[]-backed java.lang.String instance).
+    switch (heap.get(id).*) {
+        .string => |st| out.appendSlice(heap.gpa, st.chars) catch return error.OutOfMemory,
+        .instance => |inst| {
+            if (!std.mem.eql(u8, inst.class.name, "java/lang/String")) return error.UnsupportedOpcode;
+            const vi = inst.class.findField("value") orelse return error.LinkError;
+            const aid = switch (inst.fields[vi]) {
+                .reference => |r| r orelse return error.NullPointer,
+                else => return error.TypeMismatch,
+            };
+            switch (heap.get(aid).*) {
+                .array => |arr| for (arr.data) |cv| out.append(heap.gpa, cv.int) catch return error.OutOfMemory,
+                else => return error.LinkError,
+            }
+        },
+        else => return error.UnsupportedOpcode,
+    }
+}
+fn createString(f: *Frame, mutf8_bytes: []const u8) RunError!void {
+    const heap = f.heap orelse return error.UnsupportedOpcode;
+    const str_class = f.loader.find("java/lang/String") orelse return error.LinkError;
+    _ = str_class;
+    const chars = mutf8ToChars(heap.gpa, mutf8_bytes) catch return error.OutOfMemory;
+    defer heap.gpa.free(chars);
+    try f.push(.{ .reference = try makeString(f, chars) });
 }
 fn strChars(heap: *Heap, id: u32) RunError![]i32 {
     return switch (heap.get(id).*) {

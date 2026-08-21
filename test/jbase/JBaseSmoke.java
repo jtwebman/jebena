@@ -61,6 +61,14 @@ public class JBaseSmoke {
         if (str.equals("hello")) r += 10000;            // content equal
         if (!str.equals("world")) r += 20000;           // not equal
         if (str.hashCode() == "hello".hashCode()) r += 50000; // stable hash
-        return r; // expect 90373
+        // Producers: real String from concat/substring/indexOf and invokedynamic +.
+        r += str.concat("!").length();          // "hello!" -> 6
+        r += (("foo" + "bar")).length();        // invokedynamic concat -> "foobar" -> 6
+        r += ("x" + 5 + "y").length();          // mixed concat -> "x5y" -> 3
+        r += "hello".substring(1, 3).length();  // "el" -> 2
+        r += "hello".indexOf('l');              // 2
+        if ("hello".startsWith("he")) r += 300000;
+        r += "abc".compareTo("abd");            // -1
+        return r;
     }
 }
