@@ -37,4 +37,14 @@ public class DiffMore {
     static int finallyOnExc() { int r = 0; try { r = 1 / 0; } catch (ArithmeticException e) { r = 3; } finally { r += 10; } return r; }
     static int multiCatch() { int r = 0; try { int[] a = new int[2]; a[9] = 1; } catch (ArithmeticException | ArrayIndexOutOfBoundsException e) { r = 4; } return r; }
     static int gcArith() { int s = 0; for (int i = 0; i < 300; i++) { int[] junk = new int[8]; try { s += junk.length / (i % 7); } catch (ArithmeticException e) { s += 100; } } return s; }
+
+    static int mAbs() { return Math.abs(-42) + (int) Math.abs(-7L) + (int) Math.abs(-3.5) * 10; }
+    static int mMaxMin() { return Math.max(3, 8) * 100 + Math.min(3, 8) * 10 + (int) Math.max(1.5, 2.5); }
+    static int mSqrt() { return (int) Math.sqrt(144.0) + (int) (Math.sqrt(2.0) * 1000); }
+    static int mPow() { return (int) Math.pow(2, 10) + (int) Math.pow(3, 3); }
+    static int mRound() { return (int) Math.round(3.5) + (int) Math.round(2.4) + (int) Math.round(-2.5) + Math.round(1.6f); }
+    static int mFloorCeil() { return (int) Math.floor(3.7) + (int) Math.ceil(3.2) + (int) Math.floor(-1.5) + (int) Math.ceil(-1.5); }
+    static int mHypot() { return (int) Math.hypot(3.0, 4.0) + (int) (Math.hypot(5.0, 12.0)); }
+    static int mExp() { return (int) (Math.exp(1.0) * 1000) + (int) (Math.sin(0.0) * 1000) + (int) (Math.cos(0.0) * 1000); }
+    static int mMixed() { double d = 0; for (int i = 1; i <= 20; i++) d += Math.sqrt(i) * Math.abs(i - 10); return (int) d; }
 }

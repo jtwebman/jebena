@@ -978,6 +978,76 @@ pub fn runInLoaderWithHeap(loader: *Loader, class: *const Class, name: []const u
     return exec(loader.gpa, rr.owner, heap, loader, budget, c.code, c.max_stack, c.max_locals, slots[0..n], c.exception_table, null);
 }
 
+fn eq2(a: []const u8, b: []const u8, x: []const u8, y: []const u8) bool {
+    return std.mem.eql(u8, a, x) and std.mem.eql(u8, b, y);
+}
+
+/// java.lang.Math intrinsics (the class is not loaded; we compute directly).
+fn mathIntrinsic(f: *Frame, name: []const u8, desc: []const u8) RunError!void {
+    // int
+    if (eq2(name, desc, "abs", "(I)I")) return f.pushInt(@intCast(@abs(try f.popInt())));
+    if (eq2(name, desc, "max", "(II)I")) {
+        const b = try f.popInt();
+        const a = try f.popInt();
+        return f.pushInt(@max(a, b));
+    }
+    if (eq2(name, desc, "min", "(II)I")) {
+        const b = try f.popInt();
+        const a = try f.popInt();
+        return f.pushInt(@min(a, b));
+    }
+    // long
+    if (eq2(name, desc, "abs", "(J)J")) return f.pushLong(@intCast(@abs(try f.popLong())));
+    if (eq2(name, desc, "max", "(JJ)J")) {
+        const b = try f.popLong();
+        const a = try f.popLong();
+        return f.pushLong(@max(a, b));
+    }
+    if (eq2(name, desc, "min", "(JJ)J")) {
+        const b = try f.popLong();
+        const a = try f.popLong();
+        return f.pushLong(@min(a, b));
+    }
+    // double
+    if (eq2(name, desc, "abs", "(D)D")) return f.pushDouble(@abs(try f.popDouble()));
+    if (eq2(name, desc, "max", "(DD)D")) {
+        const b = try f.popDouble();
+        const a = try f.popDouble();
+        return f.pushDouble(@max(a, b));
+    }
+    if (eq2(name, desc, "min", "(DD)D")) {
+        const b = try f.popDouble();
+        const a = try f.popDouble();
+        return f.pushDouble(@min(a, b));
+    }
+    if (eq2(name, desc, "sqrt", "(D)D")) return f.pushDouble(@sqrt(try f.popDouble()));
+    if (eq2(name, desc, "cbrt", "(D)D")) return f.pushDouble(std.math.cbrt(try f.popDouble()));
+    if (eq2(name, desc, "floor", "(D)D")) return f.pushDouble(@floor(try f.popDouble()));
+    if (eq2(name, desc, "ceil", "(D)D")) return f.pushDouble(@ceil(try f.popDouble()));
+    if (eq2(name, desc, "exp", "(D)D")) return f.pushDouble(@exp(try f.popDouble()));
+    if (eq2(name, desc, "log", "(D)D")) return f.pushDouble(@log(try f.popDouble()));
+    if (eq2(name, desc, "sin", "(D)D")) return f.pushDouble(@sin(try f.popDouble()));
+    if (eq2(name, desc, "cos", "(D)D")) return f.pushDouble(@cos(try f.popDouble()));
+    if (eq2(name, desc, "tan", "(D)D")) return f.pushDouble(@tan(try f.popDouble()));
+    if (eq2(name, desc, "pow", "(DD)D")) {
+        const b = try f.popDouble();
+        const a = try f.popDouble();
+        return f.pushDouble(std.math.pow(f64, a, b));
+    }
+    if (eq2(name, desc, "hypot", "(DD)D")) {
+        const b = try f.popDouble();
+        const a = try f.popDouble();
+        return f.pushDouble(@sqrt(a * a + b * b));
+    }
+    if (eq2(name, desc, "round", "(D)J")) return f.pushLong(@intFromFloat(@floor((try f.popDouble()) + 0.5)));
+    if (eq2(name, desc, "round", "(F)I")) return f.pushInt(@intFromFloat(@floor((try f.popFloat()) + 0.5))); // matches Java for finite values
+    if (eq2(name, desc, "signum", "(D)D")) {
+        const x = try f.popDouble();
+        return f.pushDouble(if (std.math.isNan(x)) x else if (x > 0) @as(f64, 1) else if (x < 0) @as(f64, -1) else x);
+    }
+    return error.UnsupportedOpcode;
+}
+
 fn invokeStatic(f: *Frame, cls: *const Class, code: []const u8) RunError!void {
     const idx = try u16At(code, f.pc + 1);
     const mref = cls.cp.get(idx) catch return error.LinkError;
@@ -991,6 +1061,9 @@ fn invokeStatic(f: *Frame, cls: *const Class, code: []const u8) RunError!void {
     };
     const mname = cls.cp.utf8(nat.name_index) catch return error.LinkError;
     const mdesc = cls.cp.utf8(nat.descriptor_index) catch return error.LinkError;
+    if (std.mem.eql(u8, try refClassName(cls, ref.class_index), "java/lang/Math")) {
+        return mathIntrinsic(f, mname, mdesc);
+    }
     const tclass = try resolveClass(f, cls, try refClassName(cls, ref.class_index));
     const tr = tclass.resolve(mname, mdesc) orelse return error.MethodNotFound;
     const target = tr.method;
