@@ -7,7 +7,7 @@ highest-value item that is currently tractable. Every change must keep
 ## Phase 0 — language & intrinsic completeness (tractable, keep momentum)
 - [ ] StringBuilder / StringBuffer (append/toString/insert/length/charAt/reverse)
 - [x] this-capturing lambdas + instance-method references (obj::method, bound refs)
-- [ ] float/double -> String (Java shortest-round-trip; match Double.toString)
+- [x] float/double -> String (IEEE shortest round-trip, matches SE19+/JDK21 Double.toString; oracle pinned to JDK21 since JDK17 FloatingDecimal is non-shortest)
 - [x] boxing: Integer/Long/Double/Float/Boolean/Character/Short/Byte (valueOf/xxxValue/equals/hashCode/parse/toString); [ ] generic functional interfaces w/ box-unbox adaptation
       functional interfaces + autoboxing work
 - [ ] remaining opcodes / edge cases surfaced by differential fuzzing

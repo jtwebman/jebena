@@ -104,4 +104,15 @@ public class DiffMore {
     static int mixBox() { Integer i = 42; Long l = 1000L; Double d = 2.5; return i.intValue() + l.intValue() + d.intValue() + (i.equals(Integer.valueOf(42)) ? 1000 : 0); }
     static int parseBox() { return Integer.parseInt("789") + Integer.parseInt("-42") + (int) Long.parseLong("50000"); }
     static int boxHashSum() { int s = 0; for (int i = 0; i < 100; i++) { Integer x = i * 7; s += x.hashCode() % 13; } return s; }
+
+    static int ck(String s) { int h = s.length(); for (int i = 0; i < s.length(); i++) h = h * 31 + s.charAt(i); return h; }
+    static int fmtD1() { return ck("" + 3.5 + "|" + 0.1 + "|" + 100.0 + "|" + 0.001 + "|" + 123456.7); }
+    static int fmtD2() { return ck("" + 1e7 + "|" + 1e-4 + "|" + 12345678.0 + "|" + 3.141592653589793 + "|" + 0.0 + "|" + (-0.0)); }
+    static int fmtD3() { return ck("" + 2.0 + "|" + 0.5 + "|" + 9.999999e22 + "|" + 1.0e-3 + "|" + 1000000.0 + "|" + 10000000.0); }
+    static int fmtF1() { return ck("" + 3.14f + "|" + 0.1f + "|" + 1e7f + "|" + 1e-4f + "|" + 100.0f); }
+    static int fmtNeg() { return ck("" + (-3.5) + "|" + (-0.001) + "|" + (-1e10) + "|" + (-123.456)); }
+    static int fmtSpecial() { return ck("" + (1.0 / 0.0) + "|" + (-1.0 / 0.0) + "|" + (0.0 / 0.0)); }
+    static int fmtLoop() { int h = 0; for (int i = 1; i <= 50; i++) { double d = (double) i / 7.0; h = h * 31 + ck("" + d); } return h; }
+    static int fmtToStr() { return ck(Double.toString(3.5) + "|" + Float.toString(0.1f) + "|" + String.valueOf(1e-4) + "|" + Double.valueOf(42.5).toString()); }
+    static int fmtPowLoop() { int h = 0; double d = 1.0; for (int i = 0; i < 40; i++) { h = h * 31 + ck("" + d); d = d * 3.7; } return h; }
 }

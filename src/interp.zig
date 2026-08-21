@@ -1197,6 +1197,53 @@ fn appendDecimalLong(out: *std.ArrayList(i32), gpa: std.mem.Allocator, x: i64) R
     const str = std.fmt.bufPrint(&buf, "{d}", .{x}) catch return error.OutOfMemory;
     try appendAscii(out, gpa, str);
 }
+fn appendJavaFloat(out: *std.ArrayList(i32), gpa: std.mem.Allocator, comptime T: type, value: T) RunError!void {
+    if (std.math.isNan(value)) return appendAscii(out, gpa, "NaN");
+    if (std.math.isInf(value)) return appendAscii(out, gpa, if (value < 0) "-Infinity" else "Infinity");
+    var buf: [64]u8 = undefined;
+    const sci = std.fmt.float.render(&buf, value, .{ .mode = .scientific }) catch return error.OutOfMemory;
+    // Parse "<d>[.<frac>]e<exp>" (Zig scientific = shortest round-trip) into digits D and decExp.
+    var i: usize = 0;
+    const neg = sci[0] == '-';
+    if (neg) i = 1;
+    const epos = std.mem.indexOfScalarPos(u8, sci, i, 'e') orelse return error.OutOfMemory;
+    var digits: [32]u8 = undefined;
+    var n: usize = 0;
+    for (sci[i..epos]) |c| {
+        if (c == '.') continue;
+        digits[n] = c;
+        n += 1;
+    }
+    const dec_exp = std.fmt.parseInt(i32, sci[epos + 1 ..], 10) catch return error.OutOfMemory;
+    if (neg) try out.append(gpa, '-');
+    const D = digits[0..n];
+    if (dec_exp < -3 or dec_exp >= 7) {
+        // scientific: D[0] "." (D[1..] or "0") "E" dec_exp
+        try out.append(gpa, D[0]);
+        try out.append(gpa, '.');
+        if (n > 1) try appendAscii(out, gpa, D[1..]) else try out.append(gpa, '0');
+        try out.append(gpa, 'E');
+        try appendDecimalInt(out, gpa, dec_exp);
+    } else if (dec_exp >= 0) {
+        const int_digits: usize = @intCast(dec_exp + 1);
+        if (n <= int_digits) {
+            try appendAscii(out, gpa, D);
+            var z: usize = int_digits - n;
+            while (z > 0) : (z -= 1) try out.append(gpa, '0');
+            try appendAscii(out, gpa, ".0");
+        } else {
+            try appendAscii(out, gpa, D[0..int_digits]);
+            try out.append(gpa, '.');
+            try appendAscii(out, gpa, D[int_digits..]);
+        }
+    } else {
+        // dec_exp in -3..-1: "0." zeros(-dec_exp-1) D
+        try appendAscii(out, gpa, "0.");
+        var z: i32 = -dec_exp - 1;
+        while (z > 0) : (z -= 1) try out.append(gpa, '0');
+        try appendAscii(out, gpa, D);
+    }
+}
 fn appendArg(out: *std.ArrayList(i32), heap: *Heap, v: Value, ft: descriptor.FieldType) RunError!void {
     const gpa = heap.gpa;
     if (ft.dims > 0) return error.UnsupportedOpcode;
@@ -1206,7 +1253,8 @@ fn appendArg(out: *std.ArrayList(i32), heap: *Heap, v: Value, ft: descriptor.Fie
             .boolean => try appendAscii(out, gpa, if (v.int != 0) "true" else "false"),
             .byte, .short, .int => try appendDecimalInt(out, gpa, v.int),
             .long => try appendDecimalLong(out, gpa, v.long),
-            .float, .double => return error.UnsupportedOpcode, // float/double toString not supported yet
+            .float => try appendJavaFloat(out, gpa, f32, v.float),
+            .double => try appendJavaFloat(out, gpa, f64, v.double),
         },
         .object => switch (v) {
             .reference => |r| if (r) |id| switch (heap.get(id).*) {
@@ -1765,11 +1813,27 @@ fn boxHash(bo: BoxedObj) i32 {
     }
     return valueToInt(bo.value);
 }
+fn floatString(f: *Frame, comptime T: type, value: T) RunError!void {
+    const heap = f.heap orelse return error.UnsupportedOpcode;
+    var tmp: std.ArrayList(i32) = .empty;
+    defer tmp.deinit(heap.gpa);
+    try appendJavaFloat(&tmp, heap.gpa, T, value);
+    try f.push(.{ .reference = try newString(f, tmp.items) });
+}
+fn floatStringInt(f: *Frame, value: i64) RunError!void {
+    const heap = f.heap orelse return error.UnsupportedOpcode;
+    var tmp: std.ArrayList(i32) = .empty;
+    defer tmp.deinit(heap.gpa);
+    try appendDecimalLong(&tmp, heap.gpa, value);
+    try f.push(.{ .reference = try newString(f, tmp.items) });
+}
 fn boxStatic(f: *Frame, owner: []const u8, name: []const u8, desc: []const u8) RunError!void {
     if (std.mem.eql(u8, owner, "java/lang/Double")) {
         if (eq2(name, desc, "valueOf", "(D)Ljava/lang/Double;")) return boxWrapper(f, owner, .{ .double = try f.popDouble() });
+        if (eq2(name, desc, "toString", "(D)Ljava/lang/String;")) return floatString(f, f64, try f.popDouble());
     } else if (std.mem.eql(u8, owner, "java/lang/Float")) {
         if (eq2(name, desc, "valueOf", "(F)Ljava/lang/Float;")) return boxWrapper(f, owner, .{ .float = try f.popFloat() });
+        if (eq2(name, desc, "toString", "(F)Ljava/lang/String;")) return floatString(f, f32, try f.popFloat());
     } else if (std.mem.eql(u8, owner, "java/lang/Boolean")) {
         if (eq2(name, desc, "valueOf", "(Z)Ljava/lang/Boolean;")) return boxWrapper(f, owner, .{ .int = try f.popInt() });
     } else if (std.mem.eql(u8, owner, "java/lang/Character")) {
@@ -1820,6 +1884,10 @@ fn boxedMethod(f: *Frame, oid: u32, sam_slots: []const Value, sam_params: []cons
             try tmp.append(heap.gpa, bv.int);
         } else if (std.mem.eql(u8, bo.class.name, "java/lang/Long")) {
             try appendDecimalLong(&tmp, heap.gpa, bv.long);
+        } else if (std.mem.eql(u8, bo.class.name, "java/lang/Double")) {
+            try appendJavaFloat(&tmp, heap.gpa, f64, bv.double);
+        } else if (std.mem.eql(u8, bo.class.name, "java/lang/Float")) {
+            try appendJavaFloat(&tmp, heap.gpa, f32, bv.float);
         } else {
             try appendDecimalInt(&tmp, heap.gpa, valueToInt(bv));
         }
@@ -1961,6 +2029,20 @@ fn invokeStatic(f: *Frame, cls: *const Class, code: []const u8) RunError!void {
     if (std.mem.eql(u8, owner_name, "java/lang/Long")) return longIntrinsic(f, mname, mdesc);
     if (std.mem.eql(u8, owner_name, "java/util/Arrays")) return arraysIntrinsic(f, mname, mdesc);
     if (std.mem.eql(u8, owner_name, "java/util/Objects")) return objectsIntrinsic(f, mname, mdesc);
+    if (std.mem.eql(u8, owner_name, "java/lang/String")) {
+        if (eq2(mname, mdesc, "valueOf", "(D)Ljava/lang/String;")) return floatString(f, f64, try f.popDouble());
+        if (eq2(mname, mdesc, "valueOf", "(F)Ljava/lang/String;")) return floatString(f, f32, try f.popFloat());
+        if (eq2(mname, mdesc, "valueOf", "(I)Ljava/lang/String;")) return floatStringInt(f, @as(i64, try f.popInt()));
+        if (eq2(mname, mdesc, "valueOf", "(J)Ljava/lang/String;")) return floatStringInt(f, try f.popLong());
+        if (eq2(mname, mdesc, "valueOf", "(Z)Ljava/lang/String;")) {
+            const b = try f.popInt();
+            const heap = f.heap orelse return error.UnsupportedOpcode;
+            var tmp: std.ArrayList(i32) = .empty;
+            defer tmp.deinit(heap.gpa);
+            try appendAscii(&tmp, heap.gpa, if (b != 0) "true" else "false");
+            return f.push(.{ .reference = try newString(f, tmp.items) });
+        }
+    }
     if (std.mem.eql(u8, owner_name, "java/lang/Double") or std.mem.eql(u8, owner_name, "java/lang/Float") or
         std.mem.eql(u8, owner_name, "java/lang/Boolean") or std.mem.eql(u8, owner_name, "java/lang/Character") or
         std.mem.eql(u8, owner_name, "java/lang/Short") or std.mem.eql(u8, owner_name, "java/lang/Byte"))
