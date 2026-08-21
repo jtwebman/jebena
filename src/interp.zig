@@ -73,6 +73,7 @@ const Frame = struct {
     budget: *Budget,
     heap: ?*Heap = null,
     loader: *Loader = undefined,
+    parent: ?*Frame = null,
 
     fn push(f: *Frame, v: Value) RunError!void {
         if (f.sp >= f.stack.len) return error.StackOverflow;
@@ -214,31 +215,107 @@ fn defaultValue(k: Kind) Value {
 
 pub const Heap = struct {
     gpa: std.mem.Allocator,
-    objects: std.ArrayList(HeapObj) = .empty,
+    /// Object table; a null slot is free (reused via free_list). Object ids are
+    /// stable across collection (non-moving GC).
+    objects: std.ArrayList(?HeapObj) = .empty,
+    marked: std.ArrayList(bool) = .empty,
+    free_list: std.ArrayList(u32) = .empty,
+    allocs_since_gc: usize = 0,
+    /// Collect after this many allocations. Default is effectively off.
+    gc_interval: usize = 1 << 20,
 
     pub fn deinit(self: *Heap) void {
-        for (self.objects.items) |o| switch (o) {
+        for (self.objects.items) |maybe| if (maybe) |o| switch (o) {
             .instance => |x| self.gpa.free(x.fields),
             .array => |x| self.gpa.free(x.data),
         };
         self.objects.deinit(self.gpa);
+        self.marked.deinit(self.gpa);
+        self.free_list.deinit(self.gpa);
+    }
+    fn put(self: *Heap, obj: HeapObj) !u32 {
+        if (self.free_list.items.len > 0) {
+            const id = self.free_list.items[self.free_list.items.len - 1];
+            self.free_list.items.len -= 1;
+            self.objects.items[id] = obj;
+            self.marked.items[id] = false;
+            return id;
+        }
+        try self.objects.append(self.gpa, obj);
+        try self.marked.append(self.gpa, false);
+        return @intCast(self.objects.items.len - 1);
     }
     pub fn allocInstance(self: *Heap, class: *const Class) !u32 {
         const fields = try self.gpa.alloc(Value, class.instance_fields.len);
         for (fields, class.instance_fields) |*fv, fd| fv.* = defaultValue(fd.kind);
-        try self.objects.append(self.gpa, .{ .instance = .{ .class = class, .fields = fields } });
-        return @intCast(self.objects.items.len - 1);
+        return self.put(.{ .instance = .{ .class = class, .fields = fields } });
     }
     pub fn allocArray(self: *Heap, elem: Kind, len: usize) !u32 {
         const data = try self.gpa.alloc(Value, len);
         for (data) |*d| d.* = defaultValue(elem);
-        try self.objects.append(self.gpa, .{ .array = .{ .elem = elem, .data = data } });
-        return @intCast(self.objects.items.len - 1);
+        return self.put(.{ .array = .{ .elem = elem, .data = data } });
     }
     pub fn get(self: *Heap, id: u32) *HeapObj {
-        return &self.objects.items[id];
+        return if (self.objects.items[id]) |*o| o else unreachable;
+    }
+    pub fn liveCount(self: *Heap) usize {
+        return self.objects.items.len - self.free_list.items.len;
     }
 };
+
+// --- Garbage collector: non-moving mark-sweep -----------------------------
+
+fn markValue(heap: *Heap, v: Value) void {
+    switch (v) {
+        .reference => |r| if (r) |id| markObject(heap, id),
+        else => {},
+    }
+}
+fn markObject(heap: *Heap, id: u32) void {
+    if (heap.marked.items[id]) return;
+    heap.marked.items[id] = true;
+    switch (heap.get(id).*) {
+        .instance => |x| for (x.fields) |v| markValue(heap, v),
+        .array => |x| if (x.elem == .reference) for (x.data) |v| markValue(heap, v),
+    }
+}
+/// Stop-the-world mark-sweep. Roots: every active frame's operand stack and
+/// locals (walked via the parent chain), all static fields, and any pending
+/// exception. Runs at a `new` safepoint, so all frames are live on the stack.
+fn collect(f: *Frame) void {
+    const heap = f.heap orelse return;
+    for (heap.marked.items) |*m| m.* = false;
+    var fr: ?*Frame = f;
+    while (fr) |ff| {
+        for (ff.stack[0..ff.sp]) |v| markValue(heap, v);
+        for (ff.locals) |v| markValue(heap, v);
+        fr = ff.parent;
+    }
+    for (f.loader.statics.items) |st| for (st) |v| markValue(heap, v);
+    if (f.budget.pending) |eid| markObject(heap, eid);
+
+    var id: u32 = 0;
+    while (id < heap.objects.items.len) : (id += 1) {
+        if (heap.objects.items[id]) |obj| {
+            if (!heap.marked.items[id]) {
+                switch (obj) {
+                    .instance => |x| heap.gpa.free(x.fields),
+                    .array => |x| heap.gpa.free(x.data),
+                }
+                heap.objects.items[id] = null;
+                heap.free_list.append(heap.gpa, id) catch {};
+            }
+        }
+    }
+}
+fn maybeCollect(f: *Frame) void {
+    const heap = f.heap orelse return;
+    heap.allocs_since_gc += 1;
+    if (heap.allocs_since_gc >= heap.gc_interval) {
+        collect(f);
+        heap.allocs_since_gc = 0;
+    }
+}
 
 fn opAt(code: []const u8, pc: usize) RunError!Op {
     if (pc >= code.len) return error.Truncated;
@@ -326,7 +403,7 @@ pub const Loader = struct {
         self.initialized.items[i] = true;
         if (class.find("<clinit>", "()V")) |ci| {
             if (ci.code) |cc| {
-                _ = try exec(self.gpa, class, heap, self, budget, cc.code, cc.max_stack, cc.max_locals, &.{}, cc.exception_table);
+                _ = try exec(self.gpa, class, heap, self, budget, cc.code, cc.max_stack, cc.max_locals, &.{}, cc.exception_table, null);
             }
         }
     }
@@ -490,6 +567,7 @@ fn fieldName(cls: *const Class, cp_index: u16) RunError![]const u8 {
 }
 
 fn doNew(f: *Frame, cls: *const Class, code: []const u8) RunError!void {
+    maybeCollect(f);
     const heap = f.heap orelse return error.UnsupportedOpcode;
     const tclass = try resolveClass(f, cls, try refClassName(cls, try u16At(code, f.pc + 1)));
     try f.push(.{ .reference = try heap.allocInstance(tclass) });
@@ -530,6 +608,7 @@ fn atypeKind(atype: usize) RunError!Kind {
     };
 }
 fn doNewArray(f: *Frame, code: []const u8) RunError!void {
+    maybeCollect(f);
     const heap = f.heap orelse return error.UnsupportedOpcode;
     const kind = try atypeKind(try u8At(code, f.pc + 1));
     const len = try f.popInt();
@@ -537,6 +616,7 @@ fn doNewArray(f: *Frame, code: []const u8) RunError!void {
     try f.push(.{ .reference = try heap.allocArray(kind, @intCast(len)) });
 }
 fn doANewArray(f: *Frame, code: []const u8) RunError!void {
+    maybeCollect(f);
     const heap = f.heap orelse return error.UnsupportedOpcode;
     _ = try u16At(code, f.pc + 1); // element class ignored; references are uniform here
     const len = try f.popInt();
@@ -616,7 +696,7 @@ fn invokeInstance(f: *Frame, cls: *const Class, code: []const u8, is_special: bo
     f.budget.depth += 1;
     defer f.budget.depth -= 1;
     const cc = target.code orelse return error.LinkError;
-    const ret = try exec(rclass.gpa, rclass, f.heap, f.loader, f.budget, cc.code, cc.max_stack, cc.max_locals, slots[0..decl.arg_slots], cc.exception_table);
+    const ret = try exec(rclass.gpa, rclass, f.heap, f.loader, f.budget, cc.code, cc.max_stack, cc.max_locals, slots[0..decl.arg_slots], cc.exception_table, f);
     if (ret) |rv| try f.pushKind(rv);
 }
 
@@ -656,13 +736,18 @@ fn layoutArgs(m: *const Class.Method, args: []const Value, out: []Value) RunErro
 pub fn runInLoader(loader: *Loader, class: *const Class, name: []const u8, desc: []const u8, args: []const Value, budget: *Budget) RunError!?Value {
     var heap = Heap{ .gpa = loader.gpa };
     defer heap.deinit();
-    for (loader.classes.items) |c| try loader.ensureInit(c, &heap, budget);
+    return runInLoaderWithHeap(loader, class, name, desc, args, budget, &heap);
+}
+
+/// Like runInLoader but with a caller-provided heap (to configure GC / inspect it).
+pub fn runInLoaderWithHeap(loader: *Loader, class: *const Class, name: []const u8, desc: []const u8, args: []const Value, budget: *Budget, heap: *Heap) RunError!?Value {
+    for (loader.classes.items) |c| try loader.ensureInit(c, heap, budget);
     const m = class.find(name, desc) orelse return error.MethodNotFound;
     const c = m.code orelse return error.LinkError;
     var slots: [256]Value = undefined;
     if (m.arg_slots > slots.len) return error.LinkError;
     const n = try layoutArgs(m, args, &slots);
-    return exec(loader.gpa, class, &heap, loader, budget, c.code, c.max_stack, c.max_locals, slots[0..n], c.exception_table);
+    return exec(loader.gpa, class, heap, loader, budget, c.code, c.max_stack, c.max_locals, slots[0..n], c.exception_table, null);
 }
 
 fn invokeStatic(f: *Frame, cls: *const Class, code: []const u8) RunError!void {
@@ -695,7 +780,7 @@ fn invokeStatic(f: *Frame, cls: *const Class, code: []const u8) RunError!void {
     f.budget.depth += 1;
     defer f.budget.depth -= 1;
     const c = target.code orelse return error.LinkError;
-    const ret = try exec(tclass.gpa, tclass, f.heap, f.loader, f.budget, c.code, c.max_stack, c.max_locals, slots[0..target.arg_slots], c.exception_table);
+    const ret = try exec(tclass.gpa, tclass, f.heap, f.loader, f.budget, c.code, c.max_stack, c.max_locals, slots[0..target.arg_slots], c.exception_table, f);
     if (ret) |rv| try f.pushKind(rv);
 }
 
@@ -751,7 +836,7 @@ fn handleException(f: *Frame, class: ?*const Class, exceptions: []const attribut
     return false;
 }
 
-fn exec(alloc: std.mem.Allocator, class: ?*const Class, heap: ?*Heap, loader: *Loader, budget: *Budget, code: []const u8, max_stack: u16, max_locals: u16, arg_slots: []const Value, exceptions: []const attribute_decode.ExceptionTableEntry) RunError!?Value {
+fn exec(alloc: std.mem.Allocator, class: ?*const Class, heap: ?*Heap, loader: *Loader, budget: *Budget, code: []const u8, max_stack: u16, max_locals: u16, arg_slots: []const Value, exceptions: []const attribute_decode.ExceptionTableEntry, parent: ?*Frame) RunError!?Value {
     if (arg_slots.len > max_locals) return error.BadLocal;
     const stack = try alloc.alloc(Value, max_stack);
     defer alloc.free(stack);
@@ -760,7 +845,7 @@ fn exec(alloc: std.mem.Allocator, class: ?*const Class, heap: ?*Heap, loader: *L
     for (locals) |*l| l.* = .{ .int = 0 };
     for (arg_slots, 0..) |v, i| locals[i] = v;
 
-    var f = Frame{ .stack = stack, .locals = locals, .budget = budget, .heap = heap, .loader = loader };
+    var f = Frame{ .stack = stack, .locals = locals, .budget = budget, .heap = heap, .loader = loader, .parent = parent };
 
     sw: switch (try opAt(code, f.pc)) {
         .nop => {
@@ -1472,7 +1557,7 @@ pub fn runIntBudgeted(a: std.mem.Allocator, code: []const u8, max_stack: u16, ma
     var buf: [64]Value = undefined;
     if (args.len > buf.len) return error.BadLocal;
     for (args, 0..) |x, i| buf[i] = .{ .int = x };
-    const r = try exec(a, null, null, &loader, &b, code, max_stack, max_locals, buf[0..args.len], &.{});
+    const r = try exec(a, null, null, &loader, &b, code, max_stack, max_locals, buf[0..args.len], &.{}, null);
     return if (r) |v| switch (v) {
         .int => |x| x,
         else => error.TypeMismatch,
@@ -1848,7 +1933,7 @@ test "object-capable interpreter survives arbitrary bytecode (heap + class conte
         // Random bytecode against a real class + heap. Any error is fine; a crash,
         // leak, or out-of-bounds is not. References cannot be forged from ints, so
         // heap access stays valid.
-        _ = exec(testing.allocator, &cls, &heap, &loader, &b, buf[0..len], ms, ml, &.{}, &.{}) catch {};
+        _ = exec(testing.allocator, &cls, &heap, &loader, &b, buf[0..len], ms, ml, &.{}, &.{}, null) catch {};
     }
 }
 
@@ -2021,4 +2106,45 @@ test "exceptions: cross-frame propagation and uncaught escape" {
     // uncaught(-1): propagates out with no handler -> error.JavaException at the boundary
     b = Budget{};
     try testing.expectError(error.JavaException, runInLoader(&loader, &exc2, "uncaught", "(I)I", &.{.{ .int = -1 }}, &b));
+}
+
+test "GC: garbage is reclaimed, reachable objects survive" {
+    const bp = @embedFile("testdata/Point.class");
+    const bg = @embedFile("testdata/GcTest.class");
+    var cfp = try ClassFile.parse(testing.allocator, bp);
+    defer cfp.deinit();
+    var cfg = try ClassFile.parse(testing.allocator, bg);
+    defer cfg.deinit();
+    var aa = std.heap.ArenaAllocator.init(testing.allocator);
+    defer aa.deinit();
+    const point = try Class.init(testing.allocator, aa.allocator(), &cfp, null);
+    const gct = try Class.init(testing.allocator, aa.allocator(), &cfg, null);
+    var loader = Loader.init(testing.allocator);
+    defer loader.deinit();
+    try loader.register(&point);
+    try loader.register(&gct);
+
+    // allocLoop(1000): result n*n; the 1000 Points are garbage, so with frequent
+    // GC the object table stays tiny (slots reused from the free list).
+    {
+        var heap = Heap{ .gpa = testing.allocator, .gc_interval = 16 };
+        defer heap.deinit();
+        var b = Budget{};
+        const r = try runInLoaderWithHeap(&loader, &gct, "allocLoop", "(I)I", &.{.{ .int = 1000 }}, &b, &heap);
+        try testing.expectEqual(Value{ .int = 1000000 }, r.?);
+        // 1000 objects allocated, but GC kept the table small.
+        try testing.expect(heap.objects.items.len < 64);
+    }
+
+    // arraySum(500): all 500 Points are reachable via the array; GC must keep
+    // them all, and the result must be correct.
+    {
+        var heap = Heap{ .gpa = testing.allocator, .gc_interval = 16 };
+        defer heap.deinit();
+        var b = Budget{};
+        const r = try runInLoaderWithHeap(&loader, &gct, "arraySum", "(I)I", &.{.{ .int = 500 }}, &b, &heap);
+        try testing.expectEqual(Value{ .int = 250000 }, r.?);
+        // The array + its 500 live elements survived: live count is ~501.
+        try testing.expect(heap.liveCount() >= 500);
+    }
 }
