@@ -30,6 +30,6 @@ Working list. Check off as done; commit each. Ordered roughly by dependency.
 - [ ] lazy resolution + quickening (per 02 design)
 
 ## Infra
-- [ ] wire std.Io file API so `jebena parse <file>` works
+- [x] wire std.Io file API so `jebena parse`/`disasm <file>` work
 - [ ] kcov coverage in CI (currently coverage is by construction)
 - [ ] a run harness that finds and runs a real `public static void main`
