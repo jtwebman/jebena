@@ -28,7 +28,7 @@ Steps (each a loop iteration or few):
 - [x] jbase/ source tree + scripts/build-jbase.sh (javac --patch-module java.base -> jbase/out)
       compilation of our own java/lang (may need --patch-module / -Xbootclasspath).
 - [x] cmdRun: a provided real .class (e.g. jbase Object) overrides the Zig stub of the same name
-- [~] native-method registry seed: Object.identityHashCode dispatches to Zig (generalize ACC_NATIVE lookup next)
+- [x] native-method registry: ACC_NATIVE methods resolve then dispatch to Zig by (owner,name,desc); seeded with Object.identityHashCode
       native impls (Object identity-hashCode/getClass, System.arraycopy, float<->bits).
 - [x] clean-room java/lang/Object (equals/hashCode/native identityHashCode) loaded + executed as real bytecode (scripts/jbase-smoke.sh: 111)
       execute a method from OUR compiled bytecode end-to-end (prove the pipeline).

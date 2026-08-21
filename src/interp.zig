@@ -656,6 +656,7 @@ pub const Class = struct {
         arg_slots: u16,
         ret: ?Kind,
         is_static: bool,
+        is_native: bool,
     };
 
     fn kindOf(ft: descriptor.FieldType) Kind {
@@ -708,6 +709,7 @@ pub const Class = struct {
             const name = try cf.constant_pool.utf8(m.name_index);
             const desc = try cf.constant_pool.utf8(m.descriptor_index);
             const is_static = m.access_flags.isStatic();
+            const is_native = m.access_flags.isNative();
             const mt = try descriptor.parseMethodDescriptor(arena, desc);
             const params = try arena.alloc(Param, mt.params.len);
             var slot: u16 = if (is_static) 0 else 1; // slot 0 is `this` for instance methods
@@ -730,6 +732,7 @@ pub const Class = struct {
                 .arg_slots = slot,
                 .ret = if (mt.ret) |r| kindOf(r) else null,
                 .is_static = is_static,
+                .is_native = is_native,
             };
         }
         var bootstrap: []const attribute_decode.BootstrapMethod = &.{};
@@ -1007,6 +1010,8 @@ fn invokeInstance(f: *Frame, cls: *const Class, code: []const u8, is_special: bo
     const tr = rclass.resolve(mname, mdesc) orelse return error.MethodNotFound;
     const target = tr.method;
     const owner = tr.owner;
+
+    if (target.is_native) return nativeInvoke(f, owner, target, slots);
 
     if (f.budget.depth >= f.budget.max_depth) return error.CallDepthExceeded;
     f.budget.depth += 1;
@@ -2212,6 +2217,27 @@ fn systemIntrinsic(f: *Frame, name: []const u8, desc: []const u8) RunError!void 
     return error.UnsupportedOpcode;
 }
 
+/// Native-method registry: implementations for ACC_NATIVE methods in loaded
+/// classes (our clean-room java.base). Dispatched by (owner, name, descriptor)
+/// after normal method resolution. `slots` holds the arguments (slot 0 is the
+/// receiver for instance methods). Returns error.UnsupportedOpcode for an
+/// unregistered native (a genuine "not implemented", surfaced loudly).
+fn nativeInvoke(f: *Frame, owner: *const Class, method: *const Class.Method, slots: []const Value) RunError!void {
+    const on = owner.name;
+    const mn = method.name;
+    const md = method.descriptor;
+    if (std.mem.eql(u8, on, "java/lang/Object")) {
+        if (eq2(mn, md, "identityHashCode", "(Ljava/lang/Object;)I")) {
+            const arg = slots[method.params[0].slot];
+            const r = switch (arg) {
+                .reference => |x| x,
+                else => null,
+            };
+            return f.pushInt(if (r) |id| @bitCast(id) else 0);
+        }
+    }
+    return error.UnsupportedOpcode;
+}
 fn invokeStatic(f: *Frame, cls: *const Class, code: []const u8) RunError!void {
     const idx = try u16At(code, f.pc + 1);
     const mref = cls.cp.get(idx) catch return error.LinkError;
@@ -2246,14 +2272,6 @@ fn invokeStatic(f: *Frame, cls: *const Class, code: []const u8) RunError!void {
             return f.push(.{ .reference = try newString(f, tmp.items) });
         }
     }
-    if (std.mem.eql(u8, owner_name, "java/lang/Object")) {
-        // Native-method registry seed: identity hash is VM-provided. Non-null -> the
-        // heap id (a stable per-object value); null -> 0, matching System.identityHashCode.
-        if (eq2(mname, mdesc, "identityHashCode", "(Ljava/lang/Object;)I")) {
-            const r = try f.popRef();
-            return f.pushInt(if (r) |id| @bitCast(id) else 0);
-        }
-    }
     if (std.mem.eql(u8, owner_name, "java/lang/Character")) return characterIntrinsic(f, mname, mdesc);
     if (std.mem.eql(u8, owner_name, "java/lang/Double") or std.mem.eql(u8, owner_name, "java/lang/Float") or
         std.mem.eql(u8, owner_name, "java/lang/Boolean") or
@@ -2273,6 +2291,8 @@ fn invokeStatic(f: *Frame, cls: *const Class, code: []const u8) RunError!void {
         slots[p.slot] = try f.popKind(p.kind);
         if (p.kind == .long or p.kind == .double) slots[p.slot + 1] = .top;
     }
+
+    if (target.is_native) return nativeInvoke(f, owner, target, slots);
 
     if (f.budget.depth >= f.budget.max_depth) return error.CallDepthExceeded;
     f.budget.depth += 1;
@@ -3689,6 +3709,7 @@ pub fn makeStub(gpa: std.mem.Allocator, arena: std.mem.Allocator, name: []const 
         .name = "<init>",
         .descriptor = "()V",
         .code = .{ .max_stack = 0, .max_locals = 1, .code = &stub_return_code, .exception_table = &.{}, .attributes = &.{} },
+        .is_native = false,
         .params = &.{},
         .arg_slots = 1,
         .ret = null,
