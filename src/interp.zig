@@ -603,6 +603,7 @@ pub const Class = struct {
     methods: []Method,
     instance_fields: []Field,
     static_fields: []Field,
+    bootstrap_methods: []const attribute_decode.BootstrapMethod,
 
     pub const Field = struct { name: []const u8, kind: Kind };
     pub const Param = struct { kind: Kind, slot: u16 };
@@ -690,7 +691,13 @@ pub const Class = struct {
                 .is_static = is_static,
             };
         }
-        return .{ .gpa = gpa, .cp = cf.constant_pool, .name = cls_name, .super = super, .super_name = super_name, .interfaces = interfaces, .methods = methods, .instance_fields = instance_fields, .static_fields = static_fields };
+        var bootstrap: []const attribute_decode.BootstrapMethod = &.{};
+        for (cf.attributes) |ai| {
+            if (std.mem.eql(u8, try cf.constant_pool.utf8(ai.name_index), "BootstrapMethods")) {
+                bootstrap = (try attribute_decode.decode(arena, cf.constant_pool, ai)).bootstrap_methods;
+            }
+        }
+        return .{ .gpa = gpa, .cp = cf.constant_pool, .name = cls_name, .super = super, .super_name = super_name, .interfaces = interfaces, .methods = methods, .instance_fields = instance_fields, .static_fields = static_fields, .bootstrap_methods = bootstrap };
     }
 
     fn findField(self: *const Class, name: []const u8) ?usize {
@@ -1081,6 +1088,139 @@ fn mutf8ToChars(gpa: std.mem.Allocator, m: []const u8) ![]i32 {
     }
     return out.toOwnedSlice(gpa);
 }
+fn fieldKind(ft: descriptor.FieldType) Kind {
+    if (ft.dims > 0) return .reference;
+    return switch (ft.kind) {
+        .object => .reference,
+        .base => |b| switch (b) {
+            .long => .long,
+            .float => .float,
+            .double => .double,
+            else => .int,
+        },
+    };
+}
+fn appendAscii(out: *std.ArrayList(i32), gpa: std.mem.Allocator, str: []const u8) RunError!void {
+    for (str) |c| out.append(gpa, c) catch return error.OutOfMemory;
+}
+fn appendDecimalInt(out: *std.ArrayList(i32), gpa: std.mem.Allocator, x: i32) RunError!void {
+    var buf: [16]u8 = undefined;
+    const str = std.fmt.bufPrint(&buf, "{d}", .{x}) catch return error.OutOfMemory;
+    try appendAscii(out, gpa, str);
+}
+fn appendDecimalLong(out: *std.ArrayList(i32), gpa: std.mem.Allocator, x: i64) RunError!void {
+    var buf: [24]u8 = undefined;
+    const str = std.fmt.bufPrint(&buf, "{d}", .{x}) catch return error.OutOfMemory;
+    try appendAscii(out, gpa, str);
+}
+fn appendArg(out: *std.ArrayList(i32), heap: *Heap, v: Value, ft: descriptor.FieldType) RunError!void {
+    const gpa = heap.gpa;
+    if (ft.dims > 0) return error.UnsupportedOpcode;
+    switch (ft.kind) {
+        .base => |b| switch (b) {
+            .char => out.append(gpa, v.int) catch return error.OutOfMemory,
+            .boolean => try appendAscii(out, gpa, if (v.int != 0) "true" else "false"),
+            .byte, .short, .int => try appendDecimalInt(out, gpa, v.int),
+            .long => try appendDecimalLong(out, gpa, v.long),
+            .float, .double => return error.UnsupportedOpcode, // float/double toString not supported yet
+        },
+        .object => switch (v) {
+            .reference => |r| if (r) |id| switch (heap.get(id).*) {
+                .string => |st| out.appendSlice(gpa, st.chars) catch return error.OutOfMemory,
+                else => return error.UnsupportedOpcode, // non-String object toString not supported
+            } else try appendAscii(out, gpa, "null"),
+            else => return error.TypeMismatch,
+        },
+    }
+}
+fn appendConstantChars(out: *std.ArrayList(i32), gpa: std.mem.Allocator, cls: *const Class, cp_index: u16) RunError!void {
+    switch ((cls.cp.get(cp_index) catch return error.LinkError).*) {
+        .string => |si| {
+            const chars = mutf8ToChars(gpa, cls.cp.utf8(si) catch return error.LinkError) catch return error.OutOfMemory;
+            defer gpa.free(chars);
+            out.appendSlice(gpa, chars) catch return error.OutOfMemory;
+        },
+        .integer => |v| try appendDecimalInt(out, gpa, v),
+        else => return error.UnsupportedOpcode,
+    }
+}
+fn doInvokeDynamic(f: *Frame, cls: *const Class, code: []const u8) RunError!void {
+    const idx = try u16At(code, f.pc + 1);
+    const dyn = switch ((cls.cp.get(idx) catch return error.LinkError).*) {
+        .invoke_dynamic => |d| d,
+        else => return error.LinkError,
+    };
+    const nat = switch ((cls.cp.get(dyn.name_and_type_index) catch return error.LinkError).*) {
+        .name_and_type => |x| x,
+        else => return error.LinkError,
+    };
+    const desc = cls.cp.utf8(nat.descriptor_index) catch return error.LinkError;
+    if (dyn.bootstrap_method_attr_index >= cls.bootstrap_methods.len) return error.LinkError;
+    const bm = cls.bootstrap_methods[dyn.bootstrap_method_attr_index];
+    const mh = switch ((cls.cp.get(bm.bootstrap_method_ref) catch return error.LinkError).*) {
+        .method_handle => |x| x,
+        else => return error.LinkError,
+    };
+    const bref = switch ((cls.cp.get(mh.reference_index) catch return error.LinkError).*) {
+        .methodref => |r| r,
+        .interface_methodref => |r| r,
+        else => return error.LinkError,
+    };
+    const bclass = try refClassName(cls, bref.class_index);
+    const bnat = switch ((cls.cp.get(bref.name_and_type_index) catch return error.LinkError).*) {
+        .name_and_type => |x| x,
+        else => return error.LinkError,
+    };
+    const bname = cls.cp.utf8(bnat.name_index) catch return error.LinkError;
+
+    if (std.mem.eql(u8, bclass, "java/lang/invoke/StringConcatFactory")) {
+        return doStringConcat(f, cls, desc, bm, std.mem.eql(u8, bname, "makeConcatWithConstants"));
+    }
+    return error.UnsupportedOpcode;
+}
+fn doStringConcat(f: *Frame, cls: *const Class, desc: []const u8, bm: attribute_decode.BootstrapMethod, with_constants: bool) RunError!void {
+    const heap = f.heap orelse return error.UnsupportedOpcode;
+    const mt = descriptor.parseMethodDescriptor(heap.gpa, desc) catch return error.LinkError;
+    defer heap.gpa.free(mt.params);
+    const n = mt.params.len;
+    if (n > 64) return error.LinkError;
+    var argvals: [64]Value = undefined;
+    var i: usize = n;
+    while (i > 0) {
+        i -= 1;
+        argvals[i] = try f.popKind(fieldKind(mt.params[i]));
+    }
+    var out: std.ArrayList(i32) = .empty;
+    defer out.deinit(heap.gpa);
+    if (with_constants) {
+        const recipe_utf8 = switch ((cls.cp.get(bm.arguments[0]) catch return error.LinkError).*) {
+            .string => |si| cls.cp.utf8(si) catch return error.LinkError,
+            else => return error.LinkError,
+        };
+        const recipe = mutf8ToChars(heap.gpa, recipe_utf8) catch return error.OutOfMemory;
+        defer heap.gpa.free(recipe);
+        var ai: usize = 0;
+        var ci: usize = 1;
+        for (recipe) |rc| {
+            if (rc == 1) {
+                if (ai >= n) return error.LinkError;
+                try appendArg(&out, heap, argvals[ai], mt.params[ai]);
+                ai += 1;
+            } else if (rc == 2) {
+                if (ci >= bm.arguments.len) return error.LinkError;
+                try appendConstantChars(&out, heap.gpa, cls, bm.arguments[ci]);
+                ci += 1;
+            } else {
+                out.append(heap.gpa, rc) catch return error.OutOfMemory;
+            }
+        }
+    } else {
+        var ai: usize = 0;
+        while (ai < n) : (ai += 1) try appendArg(&out, heap, argvals[ai], mt.params[ai]);
+    }
+    try f.push(.{ .reference = try newString(f, out.items) });
+}
+
 fn createString(f: *Frame, mutf8_bytes: []const u8) RunError!void {
     const heap = f.heap orelse return error.UnsupportedOpcode;
     const str_class = f.loader.find("java/lang/String") orelse return error.LinkError;
@@ -2229,6 +2369,22 @@ fn exec(alloc: std.mem.Allocator, class: ?*const Class, heap: ?*Heap, loader: *L
             f.pc += 5;
             continue :sw try step(&f, code);
         },
+        .invokedynamic => {
+            const cls = class orelse return error.UnsupportedOpcode;
+            doInvokeDynamic(&f, cls, code) catch |e| {
+                if (e == error.JavaException) {
+                    if (try handleException(&f, class, exceptions, f.budget.pending.?)) {
+                        f.budget.pending = null;
+                        continue :sw try step(&f, code);
+                    }
+                    return e;
+                }
+                try mapTrap(&f, class, exceptions, e);
+                continue :sw try step(&f, code);
+            };
+            f.pc += 5;
+            continue :sw try step(&f, code);
+        },
         .instanceof => {
             const cls = class orelse return error.UnsupportedOpcode;
             const hp = f.heap orelse return error.UnsupportedOpcode;
@@ -2809,6 +2965,7 @@ pub fn makeStub(gpa: std.mem.Allocator, arena: std.mem.Allocator, name: []const 
         .methods = methods,
         .instance_fields = &.{},
         .static_fields = &.{},
+        .bootstrap_methods = &.{},
     };
 }
 

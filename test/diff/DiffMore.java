@@ -82,4 +82,10 @@ public class DiffMore {
     static int strConcat() { String a = "foo"; String b = "bar"; String c = a.concat(b).concat("baz"); return c.length() * 100 + c.charAt(6); }
     static int strReplace() { String s = "a.b.c.d"; String r = s.replace('.', '/'); int acc = 0; for (int i = 0; i < r.length(); i++) acc += r.charAt(i); return acc; }
     static int strManip() { String s = "programming"; int score = 0; for (int i = 0; i < s.length() - 2; i++) { if (s.substring(i, i + 3).equals("gra")) score += 100; if (s.indexOf('r') == i) score += 10; } return score + s.substring(3, 7).length(); }
+
+    static int concatInt() { int x = 42; String s = "value=" + x + ", double=" + (x * 2); return s.length() * 1000 + s.charAt(6) + s.indexOf('d'); }
+    static int concatMix() { String s = "" + 1 + 2 + 3 + "-" + true + "-" + 'X' + "-" + 99L; return s.length() * 10000 + s.hashCode() % 10000; }
+    static int concatLoop() { String s = ""; for (int i = 0; i < 20; i++) s = s + i + ","; return s.length() * 100 + s.indexOf("15"); }
+    static int concatStr() { String a = "Hello"; String b = "World"; String s = a + ", " + b + "!"; return s.length() * 100 + s.charAt(7); }
+    static int concatNeg() { int a = -5; long b = -100L; String s = "a=" + a + " b=" + b; return s.length() * 10 + s.indexOf('-'); }
 }
