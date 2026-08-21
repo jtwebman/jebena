@@ -1,6 +1,6 @@
 package java.util;
 
-public class HashSet {
+public class HashSet implements Set {
     private final HashMap map;
     private static final Object PRESENT = new Object();
 
@@ -30,5 +30,9 @@ public class HashSet {
 
     public void clear() {
         map.clear();
+    }
+
+    public Iterator iterator() {
+        return map.keys().iterator();
     }
 }

@@ -5,7 +5,7 @@ package java.util;
  * Node chains, hash spread h ^ (h>>>16), resize (double) at load factor 0.75,
  * using key.hashCode()/equals(). No tree bins.
  */
-public class HashMap {
+public class HashMap implements Map {
     static class Node {
         final int hash;
         final Object key;
@@ -149,5 +149,35 @@ public class HashMap {
             }
         }
         return out;
+    }
+
+    public Set keySet() {
+        HashSet s = new HashSet();
+        for (int i = 0; i < table.length; i++) {
+            for (Node e = table[i]; e != null; e = e.next) {
+                s.add(e.key);
+            }
+        }
+        return s;
+    }
+
+    public Collection values() {
+        ArrayList v = new ArrayList();
+        for (int i = 0; i < table.length; i++) {
+            for (Node e = table[i]; e != null; e = e.next) {
+                v.add(e.value);
+            }
+        }
+        return v;
+    }
+
+    public Set entrySet() {
+        HashSet s = new HashSet();
+        for (int i = 0; i < table.length; i++) {
+            for (Node e = table[i]; e != null; e = e.next) {
+                s.add(new SimpleEntry(e.key, e.value));
+            }
+        }
+        return s;
     }
 }

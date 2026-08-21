@@ -214,6 +214,49 @@ public class JBaseSmoke {
         r += set.size();        // 10
         if (set.contains(5)) r += 22;
         if (!set.contains(50)) r += 33;
+
+        // Polymorphic declared types (interface dispatch) + Map views.
+        java.util.List<Integer> pl = new java.util.ArrayList<>();
+        pl.add(3);
+        pl.add(1);
+        pl.add(2);
+        int psum = 0;
+        for (int x : pl) {          // List iterator via interface
+            psum += x;
+        }
+        r += psum;                   // 6
+        r += pl.get(1);              // 1
+        r += pl.size();              // 3
+
+        java.util.Set<String> ps = new java.util.HashSet<>();
+        ps.add("x");
+        ps.add("y");
+        ps.add("x");
+        r += ps.size();              // 2
+        if (ps.contains("y")) r += 9;
+
+        java.util.Map<String, Integer> pm = new java.util.HashMap<>();
+        pm.put("a", 10);
+        pm.put("b", 20);
+        pm.put("c", 30);
+        r += pm.get("b");            // 20
+        r += pm.size();              // 3
+        int klen = 0;
+        for (Object k : pm.keySet()) {
+            klen += ((String) k).length();
+        }
+        r += klen;                   // 3
+        int vs = 0;
+        for (Object v : pm.values()) {
+            vs += (Integer) v;
+        }
+        r += vs;                     // 60
+        int esum = 0;
+        for (java.util.Map.Entry<String, Integer> e : pm.entrySet()) {
+            esum += e.getValue();
+            esum += e.getKey().length();
+        }
+        r += esum;                   // 63
         return r;
     }
 }

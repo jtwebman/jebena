@@ -5,7 +5,7 @@ package java.util;
  * stored as real wrapper instances. Growth doubles the backing array (copied by
  * a plain loop; no System.arraycopy dependency).
  */
-public class ArrayList implements java.lang.Iterable {
+public class ArrayList implements List {
     private Object[] elements;
     private int size;
 
@@ -86,6 +86,15 @@ public class ArrayList implements java.lang.Iterable {
         }
         elements[--size] = null;
         return old;
+    }
+
+    public boolean remove(Object o) {
+        int i = indexOf(o);
+        if (i < 0) {
+            return false;
+        }
+        remove(i);
+        return true;
     }
 
     public void clear() {
