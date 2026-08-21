@@ -8,3 +8,4 @@ One line per completed iteration (newest at bottom).
 2026-08-21 14:32  float/double->String: IEEE shortest round-trip (Double/Float.toString, String.valueOf, string concat, boxed toString). Differential oracle moved to JDK21 (JDK17 legacy FloatingDecimal is non-shortest / non-SE-conformant)  (tests 107, diff 137)
 2026-08-21 14:44  Comparator + Arrays.sort(T[], Comparator): lambda + static-method-ref comparators, stable insertion sort re-entering the interpreter per compare  (tests 107, diff 143)
 2026-08-21 14:52  Character intrinsics + String batch (toUpperCase/toLowerCase/trim/strip/equalsIgnoreCase/indexOf(II)/lastIndexOf/repeat/toCharArray)  (tests 107, diff 152)
+2026-08-21 15:04  Phase 1 begins: own clean-room java.base. jbase/ + build-jbase.sh (javac --patch-module), real java/lang/Object overrides the stub, native identityHashCode seed, jbase-smoke proves our compiled Object runs as real bytecode  (tests 107, diff 152, smoke 111)

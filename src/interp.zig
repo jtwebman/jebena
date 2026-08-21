@@ -2246,6 +2246,14 @@ fn invokeStatic(f: *Frame, cls: *const Class, code: []const u8) RunError!void {
             return f.push(.{ .reference = try newString(f, tmp.items) });
         }
     }
+    if (std.mem.eql(u8, owner_name, "java/lang/Object")) {
+        // Native-method registry seed: identity hash is VM-provided. Non-null -> the
+        // heap id (a stable per-object value); null -> 0, matching System.identityHashCode.
+        if (eq2(mname, mdesc, "identityHashCode", "(Ljava/lang/Object;)I")) {
+            const r = try f.popRef();
+            return f.pushInt(if (r) |id| @bitCast(id) else 0);
+        }
+    }
     if (std.mem.eql(u8, owner_name, "java/lang/Character")) return characterIntrinsic(f, mname, mdesc);
     if (std.mem.eql(u8, owner_name, "java/lang/Double") or std.mem.eql(u8, owner_name, "java/lang/Float") or
         std.mem.eql(u8, owner_name, "java/lang/Boolean") or

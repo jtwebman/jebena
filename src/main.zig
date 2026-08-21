@@ -76,7 +76,35 @@ fn cmdRun(gpa: std.mem.Allocator, io: std.Io, it: *std.process.Args.Iterator) !v
     var loader = IC.Loader.init(gpa);
     defer loader.deinit();
 
-    // Core java.lang stub hierarchy.
+    // Parse the provided class files first. Any class supplied as real bytecode
+    // (e.g. our own clean-room jbase/out/java/lang/Object.class) overrides the
+    // built-in Zig stub of the same name — this is the stub -> real migration path.
+    var cfs: std.ArrayList(*jebena.ClassFile) = .empty;
+    defer {
+        for (cfs.items) |cf| cf.deinit();
+        cfs.deinit(gpa);
+    }
+    for (files.items) |path| {
+        const bytes = try readFile(io, gpa, path);
+        defer gpa.free(bytes);
+        const cf = try a.create(jebena.ClassFile);
+        cf.* = jebena.ClassFile.parse(gpa, bytes) catch |e| {
+            std.debug.print("{s}: parse error: {s}\n", .{ path, @errorName(e) });
+            return e;
+        };
+        try cfs.append(gpa, cf);
+    }
+    const provided = struct {
+        fn has(list: []const *jebena.ClassFile, name: []const u8) bool {
+            for (list) |cf| {
+                const n = cf.constant_pool.classNameOf(cf.this_class) catch continue;
+                if (std.mem.eql(u8, n, name)) return true;
+            }
+            return false;
+        }
+    }.has;
+
+    // Core java.lang stub hierarchy (skipped for any class provided as real bytecode).
     inline for (.{
         .{ "java/lang/Object", @as(?[]const u8, null) },
         .{ "java/lang/String", @as(?[]const u8, "java/lang/Object") },
@@ -108,27 +136,12 @@ fn cmdRun(gpa: std.mem.Allocator, io: std.Io, it: *std.process.Args.Iterator) !v
         .{ "java/lang/IndexOutOfBoundsException", @as(?[]const u8, "java/lang/RuntimeException") },
         .{ "java/lang/ArrayIndexOutOfBoundsException", @as(?[]const u8, "java/lang/IndexOutOfBoundsException") },
     }) |pair| {
-        const super = if (pair[1]) |sn| loader.find(sn) else null;
-        const c = try a.create(IC.Class);
-        c.* = try IC.makeStub(gpa, a, pair[0], pair[1], super);
-        try loader.register(c);
-    }
-
-    // Parse the user class files.
-    var cfs: std.ArrayList(*jebena.ClassFile) = .empty;
-    defer {
-        for (cfs.items) |cf| cf.deinit();
-        cfs.deinit(gpa);
-    }
-    for (files.items) |path| {
-        const bytes = try readFile(io, gpa, path);
-        defer gpa.free(bytes);
-        const cf = try a.create(jebena.ClassFile);
-        cf.* = jebena.ClassFile.parse(gpa, bytes) catch |e| {
-            std.debug.print("{s}: parse error: {s}\n", .{ path, @errorName(e) });
-            return e;
-        };
-        try cfs.append(gpa, cf);
+        if (!provided(cfs.items, pair[0])) { // skip if real bytecode supplied for this class
+            const super = if (pair[1]) |sn| loader.find(sn) else null;
+            const c = try a.create(IC.Class);
+            c.* = try IC.makeStub(gpa, a, pair[0], pair[1], super);
+            try loader.register(c);
+        }
     }
 
     // Build Class metadata, resolving supers before subclasses (iterate to a fixpoint).

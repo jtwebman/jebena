@@ -15,32 +15,30 @@ highest-value item that is currently tractable. Every change must keep
 - [x] Comparator + Arrays.sort(T[], Comparator): lambda/method-ref comparators, stable, re-enters interpreter per compare; [ ] Collections.sort (needs List)
 - [ ] keep GROWING scripts/differential.sh every iteration (it finds real bugs)
 
-## Phase 1 — real java.base (COMMITTED DIRECTION, 2026-08-21)
 
-Decision: bytecode-primary + intrinsic-accelerated (the HotSpot model). Jebena loads
-the REAL java.base class files and executes their bytecode; hand-written Zig stays as
-(a) genuine native methods and (b) speed intrinsics for hot, well-specified leaf
-methods (Math, arraycopy, String hash/compare, parse/format). This is what every fast
-production JVM does. Rationale: compatibility, reflection, and user-subclassing of
-library types all require real classes; reimplementing all of java.base in Zig cannot
-run real-world jars (Spring, JDBC).
+## Phase 1 — our OWN clean-room java.base (COMMITTED, 2026-08-21)
 
-Bootstrap policy (clean-room + licensing): DO NOT redistribute OpenJDK class files.
-Jebena loads java.base from an installed JDK's module image at runtime (bring-your-own
--JDK). Our VM stays clean-room; the class library is the platform's. Revisit writing
-our own java.base later if the thesis requires a fully from-scratch stack.
+Write java.base ourselves as clean-room Java SOURCE (from the spec), compile to
+bytecode, and run it on our VM. NOT OpenJDK's classes (GPL + not clean-room); NOT a
+pure-Zig library (breaks reflection/subclassing). Bytecode-primary; Zig provides the
+native-method registry and optional hot-path intrinsics. This is the 100%-from-scratch
+stack that honors the project thesis.
 
-Concrete steps (each a loop iteration or few):
-- [ ] classfile source: read .class bytes from a JDK module image (jimage/`lib/modules`)
-      or an extracted dir; Loader falls back to it when a class isn't on the app path.
-- [ ] native-method registry: ACC_NATIVE methods dispatch to Zig; repurpose existing
-      intrinsics as the native impls (Object/System/Unsafe/Class primitives).
-- [ ] bring up real java/lang/Object, then leaf classes with light <clinit>.
-- [ ] real java/lang/String (byte[] value + coder, StringLatin1/StringUTF16 natives).
-- [ ] System.initPhase1 / <clinit> dependency ordering for the core set.
-- [ ] real boxing (Integer/Long/Double...), Number, Math (keep Zig intrinsics on top).
-- [ ] real java.util core: AbstractCollection/List, ArrayList, HashMap, Arrays, Objects.
-- [ ] keep every prior differential test green throughout (regression guard).
+Steps (each a loop iteration or few):
+- [x] jbase/ source tree + scripts/build-jbase.sh (javac --patch-module java.base -> jbase/out)
+      compilation of our own java/lang (may need --patch-module / -Xbootclasspath).
+- [x] cmdRun: a provided real .class (e.g. jbase Object) overrides the Zig stub of the same name
+- [~] native-method registry seed: Object.identityHashCode dispatches to Zig (generalize ACC_NATIVE lookup next)
+      native impls (Object identity-hashCode/getClass, System.arraycopy, float<->bits).
+- [x] clean-room java/lang/Object (equals/hashCode/native identityHashCode) loaded + executed as real bytecode (scripts/jbase-smoke.sh: 111)
+      execute a method from OUR compiled bytecode end-to-end (prove the pipeline).
+- [ ] clean-room java/lang/String (char[]/byte[] backing), StringBuilder, Integer/Long/
+      Double boxing, Math, Number — each replacing a Zig stub, differential-verified.
+- [ ] clean-room java.util core: Objects, AbstractCollection/List, ArrayList, HashMap,
+      HashSet, Arrays, Comparator, Collections.
+- [ ] <clinit> dependency ordering for the core set.
+- [ ] keep ALL prior differential tests green throughout (regression guard); migrate
+      stubs -> real classes one at a time.
 
 ## Phase 1 — the real java.base (the "hard 20%", most of a real JVM)
 - [ ] extract java.base .class files from the installed JDK (jmods/modules)
