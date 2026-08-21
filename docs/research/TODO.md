@@ -33,3 +33,4 @@ Working list. Check off as done; commit each. Ordered roughly by dependency.
 - [x] wire std.Io file API so `jebena parse`/`disasm <file>` work
 - [ ] kcov coverage in CI (currently coverage is by construction)
 - [ ] a run harness that finds and runs a real `public static void main`
+- [x] differential testing vs real `java` (OpenJDK 17): scripts/differential.sh runs each program on both and compares; 15/15 byte-identical incl. overflow edge cases
