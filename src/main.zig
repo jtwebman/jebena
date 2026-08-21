@@ -79,6 +79,7 @@ fn cmdRun(gpa: std.mem.Allocator, io: std.Io, it: *std.process.Args.Iterator) !v
     // Core java.lang stub hierarchy.
     inline for (.{
         .{ "java/lang/Object", @as(?[]const u8, null) },
+        .{ "java/lang/String", @as(?[]const u8, "java/lang/Object") },
         .{ "java/lang/Throwable", @as(?[]const u8, "java/lang/Object") },
         .{ "java/lang/Error", @as(?[]const u8, "java/lang/Throwable") },
         .{ "java/lang/Exception", @as(?[]const u8, "java/lang/Throwable") },

@@ -16,6 +16,7 @@ const constant_pool = @import("constant_pool.zig");
 const ConstantPool = constant_pool.ConstantPool;
 const attribute_decode = @import("attribute_decode.zig");
 const descriptor = @import("descriptor.zig");
+const mutf8_mod = @import("mutf8.zig");
 
 pub const Value = union(enum) {
     int: i32,
@@ -198,7 +199,8 @@ const Frame = struct {
 
 pub const Instance = struct { class: *const Class, fields: []Value };
 pub const Array = struct { elem: Kind, data: []Value };
-pub const HeapObj = union(enum) { instance: Instance, array: Array };
+pub const StringObj = struct { class: *const Class, chars: []i32 }; // UTF-16 code units
+pub const HeapObj = union(enum) { instance: Instance, array: Array, string: StringObj };
 
 const stub_cp_entries = [_]constant_pool.Constant{.unusable};
 const stub_return_code = [_]u8{0xb1}; // just `return`
@@ -236,6 +238,7 @@ pub const Heap = struct {
         for (self.objects.items) |maybe| if (maybe) |o| switch (o) {
             .instance => |x| self.gpa.free(x.fields),
             .array => |x| self.gpa.free(x.data),
+            .string => |x| self.gpa.free(x.chars),
         };
         self.objects.deinit(self.gpa);
         self.marked.deinit(self.gpa);
@@ -269,6 +272,9 @@ pub const Heap = struct {
         for (data) |*d| d.* = defaultValue(elem);
         return self.put(.{ .array = .{ .elem = elem, .data = data } });
     }
+    pub fn putString(self: *Heap, class: *const Class, chars: []i32) !u32 {
+        return self.put(.{ .string = .{ .class = class, .chars = chars } });
+    }
     pub fn get(self: *Heap, id: u32) *HeapObj {
         return if (self.objects.items[id]) |*o| o else unreachable;
     }
@@ -291,6 +297,7 @@ fn markObject(heap: *Heap, id: u32) void {
     switch (heap.get(id).*) {
         .instance => |x| for (x.fields) |v| markValue(heap, v),
         .array => |x| if (x.elem == .reference) for (x.data) |v| markValue(heap, v),
+        .string => {},
     }
 }
 fn remapValuePtr(v: *Value, forwarding: []const u32) void {
@@ -314,6 +321,7 @@ fn remapObject(obj: *HeapObj, forwarding: []const u32) void {
     switch (obj.*) {
         .instance => |*x| for (x.fields) |*v| remapValuePtr(v, forwarding),
         .array => |*x| if (x.elem == .reference) for (x.data) |*v| remapValuePtr(v, forwarding),
+        .string => {},
     }
 }
 
@@ -348,6 +356,7 @@ fn collectMajor(f: *Frame) void {
                 switch (obj) {
                     .instance => |x| heap.gpa.free(x.fields),
                     .array => |x| heap.gpa.free(x.data),
+                    .string => |x| heap.gpa.free(x.chars),
                 }
                 heap.objects.items[old] = null;
             }
@@ -392,6 +401,7 @@ fn markYoungObject(heap: *Heap, id: u32) void {
     switch (heap.get(id).*) {
         .instance => |x| for (x.fields) |v| markYoungValue(heap, v),
         .array => |x| if (x.elem == .reference) for (x.data) |v| markYoungValue(heap, v),
+        .string => {},
     }
 }
 /// Fast, non-moving collection of the young generation. Roots into the young gen
@@ -416,6 +426,7 @@ fn collectMinor(f: *Frame) void {
             if (heap.objects.items[id]) |obj| switch (obj) {
                 .instance => |x| for (x.fields) |v| markYoungValue(heap, v),
                 .array => |x| if (x.elem == .reference) for (x.data) |v| markYoungValue(heap, v),
+                .string => {},
             };
         }
     }
@@ -429,6 +440,7 @@ fn collectMinor(f: *Frame) void {
                     switch (obj) {
                         .instance => |x| heap.gpa.free(x.fields),
                         .array => |x| heap.gpa.free(x.data),
+                        .string => |x| heap.gpa.free(x.chars),
                     }
                     heap.objects.items[id] = null;
                     heap.free_list.append(heap.gpa, id) catch {};
@@ -887,6 +899,8 @@ fn invokeInstance(f: *Frame, cls: *const Class, code: []const u8, is_special: bo
     const mname = cls.cp.utf8(nat.name_index) catch return error.LinkError;
     const mdesc = cls.cp.utf8(nat.descriptor_index) catch return error.LinkError;
 
+    if (std.mem.eql(u8, cname, "java/lang/String")) return stringIntrinsic(f, mname, mdesc);
+
     // Bootstrap stub: java/lang/Object.<init> is a no-op (we have no JDK loaded).
     if (is_special and std.mem.eql(u8, mname, "<init>") and std.mem.eql(u8, cname, "java/lang/Object")) {
         _ = (try f.popRef()) orelse return error.NullPointer; // consume `this`
@@ -913,6 +927,7 @@ fn invokeInstance(f: *Frame, cls: *const Class, code: []const u8, is_special: bo
     const heap = f.heap orelse return error.UnsupportedOpcode;
     const rclass = if (is_special) dclass else switch (heap.get(oid).*) {
         .instance => |x| x.class,
+        .string => |x| x.class,
         else => return error.LinkError,
     };
     const tr = rclass.resolve(mname, mdesc) orelse return error.MethodNotFound;
@@ -1044,6 +1059,77 @@ fn mathIntrinsic(f: *Frame, name: []const u8, desc: []const u8) RunError!void {
     if (eq2(name, desc, "signum", "(D)D")) {
         const x = try f.popDouble();
         return f.pushDouble(if (std.math.isNan(x)) x else if (x > 0) @as(f64, 1) else if (x < 0) @as(f64, -1) else x);
+    }
+    return error.UnsupportedOpcode;
+}
+
+fn mutf8ToChars(gpa: std.mem.Allocator, m: []const u8) ![]i32 {
+    const utf8 = try mutf8_mod.decodeAlloc(gpa, m);
+    defer gpa.free(utf8);
+    var out: std.ArrayList(i32) = .empty;
+    errdefer out.deinit(gpa);
+    const view = std.unicode.Utf8View.initUnchecked(utf8);
+    var it = view.iterator();
+    while (it.nextCodepoint()) |cp| {
+        if (cp <= 0xFFFF) {
+            try out.append(gpa, @intCast(cp));
+        } else {
+            const c = cp - 0x10000;
+            try out.append(gpa, @intCast(0xD800 + (c >> 10)));
+            try out.append(gpa, @intCast(0xDC00 + (c & 0x3FF)));
+        }
+    }
+    return out.toOwnedSlice(gpa);
+}
+fn createString(f: *Frame, mutf8_bytes: []const u8) RunError!void {
+    const heap = f.heap orelse return error.UnsupportedOpcode;
+    const str_class = f.loader.find("java/lang/String") orelse return error.LinkError;
+    const chars = mutf8ToChars(heap.gpa, mutf8_bytes) catch return error.OutOfMemory;
+    try f.push(.{ .reference = try heap.putString(str_class, chars) });
+}
+fn strChars(heap: *Heap, id: u32) RunError![]i32 {
+    return switch (heap.get(id).*) {
+        .string => |s| s.chars,
+        else => error.LinkError,
+    };
+}
+fn stringIntrinsic(f: *Frame, name: []const u8, desc: []const u8) RunError!void {
+    const heap = f.heap orelse return error.UnsupportedOpcode;
+    if (eq2(name, desc, "length", "()I")) return f.pushInt(@intCast((try strChars(heap, (try f.popRef()) orelse return error.NullPointer)).len));
+    if (eq2(name, desc, "isEmpty", "()Z")) return f.pushInt(if ((try strChars(heap, (try f.popRef()) orelse return error.NullPointer)).len == 0) 1 else 0);
+    if (eq2(name, desc, "charAt", "(I)C")) {
+        const idx = try f.popInt();
+        const s = try strChars(heap, (try f.popRef()) orelse return error.NullPointer);
+        if (idx < 0 or idx >= s.len) return error.ArrayIndexOutOfBounds;
+        return f.pushInt(s[@intCast(idx)]);
+    }
+    if (eq2(name, desc, "hashCode", "()I")) {
+        const s = try strChars(heap, (try f.popRef()) orelse return error.NullPointer);
+        var h: i32 = 0;
+        for (s) |c| h = 31 *% h +% c;
+        return f.pushInt(h);
+    }
+    if (eq2(name, desc, "equals", "(Ljava/lang/Object;)Z")) {
+        const other = try f.popRef();
+        const self_chars = try strChars(heap, (try f.popRef()) orelse return error.NullPointer);
+        var result: i32 = 0;
+        if (other) |oid| switch (heap.get(oid).*) {
+            .string => |os| if (std.mem.eql(i32, self_chars, os.chars)) {
+                result = 1;
+            },
+            else => {},
+        };
+        return f.pushInt(result);
+    }
+    if (eq2(name, desc, "compareTo", "(Ljava/lang/String;)I")) {
+        const other = try strChars(heap, (try f.popRef()) orelse return error.NullPointer);
+        const self_chars = try strChars(heap, (try f.popRef()) orelse return error.NullPointer);
+        const n = @min(self_chars.len, other.len);
+        var i: usize = 0;
+        while (i < n) : (i += 1) {
+            if (self_chars[i] != other[i]) return f.pushInt(self_chars[i] - other[i]);
+        }
+        return f.pushInt(@as(i32, @intCast(self_chars.len)) - @as(i32, @intCast(other.len)));
     }
     return error.UnsupportedOpcode;
 }
@@ -1253,6 +1339,7 @@ fn loadConstant(f: *Frame, class: ?*const Class, index: u16) RunError!void {
     switch ((cls.cp.get(index) catch return error.LinkError).*) {
         .integer => |v| try f.pushInt(v),
         .float => |v| try f.pushFloat(v),
+        .string => |si| try createString(f, cls.cp.utf8(si) catch return error.LinkError),
         else => return error.UnsupportedOpcode,
     }
 }
@@ -2075,6 +2162,7 @@ fn exec(alloc: std.mem.Allocator, class: ?*const Class, heap: ?*Heap, loader: *L
             var result: i32 = 0;
             if (r) |id| switch (hp.get(id).*) {
                 .instance => |x| result = if (isInstanceOf(x.class, target)) 1 else 0,
+                .string => |x| result = if (isInstanceOf(x.class, target)) 1 else 0,
                 .array => {}, // array instanceof: not modeled -> 0
             };
             try f.pushInt(result);
@@ -2088,6 +2176,7 @@ fn exec(alloc: std.mem.Allocator, class: ?*const Class, heap: ?*Heap, loader: *L
             const r = try f.popRef();
             if (r) |id| switch (hp.get(id).*) {
                 .instance => |x| if (!isInstanceOf(x.class, target)) return error.LinkError, // ClassCastException (no JDK class yet)
+                .string => |x| if (!isInstanceOf(x.class, target)) return error.LinkError,
                 .array => {},
             };
             try f.push(.{ .reference = r });

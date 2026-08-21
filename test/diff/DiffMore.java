@@ -66,4 +66,13 @@ public class DiffMore {
     static int sortBig() { int[] a = new int[500]; int x = 12345; for (int i = 0; i < 500; i++) { x = (x * 1103515245 + 12345) & 0x7fffffff; a[i] = x % 1000; } Arrays.sort(a); int s = 0; for (int i = 1; i < 500; i++) if (a[i - 1] > a[i]) s++; return s * 100000 + a[0] + a[499]; }
     static int fillCopy() { int[] a = new int[6]; Arrays.fill(a, 7); int[] b = Arrays.copyOf(a, 10); int s = 0; for (int v : b) s += v; return s * 10 + b.length; }
     static int eqTest() { int[] a = { 1, 2, 3 }; int[] b = { 1, 2, 3 }; int[] c = { 1, 2, 4 }; return (Arrays.equals(a, b) ? 1 : 0) * 10 + (Arrays.equals(a, c) ? 1 : 0); }
+
+    static int strLen() { String a = "hello"; String b = ""; String c = "a longer string with spaces"; return a.length() * 1000 + c.length() + (b.isEmpty() ? 1 : 0); }
+    static int strChar() { String s = "ABCDEFG"; int acc = 0; for (int i = 0; i < s.length(); i++) acc += s.charAt(i); return acc; }
+    static int strHash() { return "hello".hashCode() + "".hashCode() + "a".hashCode() + "Hello, World!".hashCode() / 1000; }
+    static int strEq() { String a = "test"; String b = "test"; String c = "best"; return (a.equals(b) ? 1 : 0) * 100 + (a.equals(c) ? 1 : 0) * 10 + (a.equals(null) ? 1 : 0); }
+    static int strCmp() { return sig("apple".compareTo("apple")) + sig("apple".compareTo("banana")) * 10 + sig("banana".compareTo("apple")) * 100 + sig("app".compareTo("apple")) * 1000; }
+    static int sig(int x) { return x > 0 ? 1 : (x < 0 ? -1 : 0); }
+    static int strLoop() { String[] words = { "the", "quick", "brown", "fox" }; int total = 0; for (String w : words) { total += w.length() * 100 + w.charAt(0); } return total; }
+    static int strUnicode() { String s = "\u00e9\u4e2d\u6587"; return s.length() * 100000 + s.charAt(0) + s.charAt(1) + s.charAt(2); }
 }
