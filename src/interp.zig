@@ -1547,6 +1547,90 @@ fn builderIntrinsic(f: *Frame, mname: []const u8, mdesc: []const u8) RunError!vo
     return error.UnsupportedOpcode;
 }
 
+fn pendingException(f: *Frame, name: []const u8) RunError {
+    // Allocate a Java exception and hand it to the invoke-site catch, which runs
+    // the current frame's handler search. Used by intrinsics (which have no frame
+    // class/exception-table of their own).
+    const heap = f.heap orelse return error.JavaException;
+    const cls = f.loader.find(name) orelse return error.JavaException;
+    const eid = heap.allocInstance(cls) catch return error.OutOfMemory;
+    f.budget.pending = eid;
+    return error.JavaException;
+}
+fn asciiUpperChar(c: i32) i32 {
+    return if (c >= 'a' and c <= 'z') c - 32 else c;
+}
+fn asciiLowerChar(c: i32) i32 {
+    return if (c >= 'A' and c <= 'Z') c + 32 else c;
+}
+fn isAsciiLetter(c: i32) bool {
+    return (c >= 'A' and c <= 'Z') or (c >= 'a' and c <= 'z');
+}
+fn isJavaWhitespace(c: i32) bool {
+    // ASCII subset of java.lang.Character.isWhitespace: HT..CR, FS..US, and SPACE.
+    return (c >= 0x09 and c <= 0x0D) or (c >= 0x1C and c <= 0x1F) or c == 0x20;
+}
+fn charDigit(c: i32, radix: i32) i32 {
+    var d: i32 = -1;
+    if (c >= '0' and c <= '9') {
+        d = c - '0';
+    } else if (c >= 'a' and c <= 'z') {
+        d = c - 'a' + 10;
+    } else if (c >= 'A' and c <= 'Z') {
+        d = c - 'A' + 10;
+    }
+    return if (d >= 0 and d < radix) d else -1;
+}
+fn characterIntrinsic(f: *Frame, name: []const u8, desc: []const u8) RunError!void {
+    if (eq2(name, desc, "valueOf", "(C)Ljava/lang/Character;")) return boxWrapper(f, "java/lang/Character", .{ .int = try f.popInt() });
+    if (eq2(name, desc, "toString", "(C)Ljava/lang/String;")) {
+        const c = try f.popInt();
+        return f.push(.{ .reference = try newString(f, &[_]i32{c}) });
+    }
+    if (eq2(name, desc, "isDigit", "(C)Z")) {
+        const c = try f.popInt();
+        return f.pushInt(if (c >= '0' and c <= '9') 1 else 0);
+    }
+    if (eq2(name, desc, "isLetter", "(C)Z")) {
+        const c = try f.popInt();
+        return f.pushInt(if (isAsciiLetter(c)) 1 else 0);
+    }
+    if (eq2(name, desc, "isLetterOrDigit", "(C)Z")) {
+        const c = try f.popInt();
+        return f.pushInt(if (isAsciiLetter(c) or (c >= '0' and c <= '9')) 1 else 0);
+    }
+    if (eq2(name, desc, "isWhitespace", "(C)Z")) {
+        const c = try f.popInt();
+        return f.pushInt(if (isJavaWhitespace(c)) 1 else 0);
+    }
+    if (eq2(name, desc, "isUpperCase", "(C)Z")) {
+        const c = try f.popInt();
+        return f.pushInt(if (c >= 'A' and c <= 'Z') 1 else 0);
+    }
+    if (eq2(name, desc, "isLowerCase", "(C)Z")) {
+        const c = try f.popInt();
+        return f.pushInt(if (c >= 'a' and c <= 'z') 1 else 0);
+    }
+    if (eq2(name, desc, "toUpperCase", "(C)C")) return f.pushInt(asciiUpperChar(try f.popInt()));
+    if (eq2(name, desc, "toLowerCase", "(C)C")) return f.pushInt(asciiLowerChar(try f.popInt()));
+    if (eq2(name, desc, "compare", "(CC)I")) {
+        const b = try f.popInt();
+        const a = try f.popInt();
+        return f.pushInt(a - b);
+    }
+    if (eq2(name, desc, "digit", "(CI)I")) {
+        const radix = try f.popInt();
+        const c = try f.popInt();
+        return f.pushInt(charDigit(c, radix));
+    }
+    if (eq2(name, desc, "getNumericValue", "(C)I")) {
+        const c = try f.popInt();
+        if (c >= '0' and c <= '9') return f.pushInt(c - '0');
+        if (isAsciiLetter(c)) return f.pushInt(asciiLowerChar(c) - 'a' + 10);
+        return f.pushInt(-1);
+    }
+    return error.UnsupportedOpcode;
+}
 fn stringIntrinsic(f: *Frame, name: []const u8, desc: []const u8) RunError!void {
     const heap = f.heap orelse return error.UnsupportedOpcode;
     if (eq2(name, desc, "length", "()I")) return f.pushInt(@intCast((try strChars(heap, (try f.popRef()) orelse return error.NullPointer)).len));
@@ -1643,6 +1727,88 @@ fn stringIntrinsic(f: *Frame, name: []const u8, desc: []const u8) RunError!void 
         }
         const str_class = f.loader.find("java/lang/String") orelse return error.LinkError;
         return f.push(.{ .reference = try heap.putString(str_class, buf) });
+    }
+    if (eq2(name, desc, "toUpperCase", "()Ljava/lang/String;")) {
+        const s = try strChars(heap, (try f.popRef()) orelse return error.NullPointer);
+        const buf = heap.gpa.alloc(i32, s.len) catch return error.OutOfMemory;
+        for (s, 0..) |c, i| buf[i] = asciiUpperChar(c);
+        const str_class = f.loader.find("java/lang/String") orelse return error.LinkError;
+        return f.push(.{ .reference = try heap.putString(str_class, buf) });
+    }
+    if (eq2(name, desc, "toLowerCase", "()Ljava/lang/String;")) {
+        const s = try strChars(heap, (try f.popRef()) orelse return error.NullPointer);
+        const buf = heap.gpa.alloc(i32, s.len) catch return error.OutOfMemory;
+        for (s, 0..) |c, i| buf[i] = asciiLowerChar(c);
+        const str_class = f.loader.find("java/lang/String") orelse return error.LinkError;
+        return f.push(.{ .reference = try heap.putString(str_class, buf) });
+    }
+    if (eq2(name, desc, "trim", "()Ljava/lang/String;")) {
+        const s = try strChars(heap, (try f.popRef()) orelse return error.NullPointer);
+        var start: usize = 0;
+        var end: usize = s.len;
+        while (start < end and s[start] <= ' ') start += 1;
+        while (end > start and s[end - 1] <= ' ') end -= 1;
+        return f.push(.{ .reference = try newString(f, s[start..end]) });
+    }
+    if (eq2(name, desc, "strip", "()Ljava/lang/String;")) {
+        const s = try strChars(heap, (try f.popRef()) orelse return error.NullPointer);
+        var start: usize = 0;
+        var end: usize = s.len;
+        while (start < end and isJavaWhitespace(s[start])) start += 1;
+        while (end > start and isJavaWhitespace(s[end - 1])) end -= 1;
+        return f.push(.{ .reference = try newString(f, s[start..end]) });
+    }
+    if (eq2(name, desc, "equalsIgnoreCase", "(Ljava/lang/String;)Z")) {
+        const other = try strChars(heap, (try f.popRef()) orelse return error.NullPointer);
+        const s = try strChars(heap, (try f.popRef()) orelse return error.NullPointer);
+        var result: i32 = 1;
+        if (s.len != other.len) {
+            result = 0;
+        } else for (s, other) |a, b| {
+            if (asciiLowerChar(a) != asciiLowerChar(b)) {
+                result = 0;
+                break;
+            }
+        }
+        return f.pushInt(result);
+    }
+    if (eq2(name, desc, "indexOf", "(II)I")) {
+        const from = try f.popInt();
+        const ch = try f.popInt();
+        const s = try strChars(heap, (try f.popRef()) orelse return error.NullPointer);
+        var i: usize = if (from < 0) 0 else @intCast(from);
+        while (i < s.len) : (i += 1) if (s[i] == ch) return f.pushInt(@intCast(i));
+        return f.pushInt(-1);
+    }
+    if (eq2(name, desc, "lastIndexOf", "(I)I")) {
+        const ch = try f.popInt();
+        const s = try strChars(heap, (try f.popRef()) orelse return error.NullPointer);
+        var i: usize = s.len;
+        while (i > 0) {
+            i -= 1;
+            if (s[i] == ch) return f.pushInt(@intCast(i));
+        }
+        return f.pushInt(-1);
+    }
+    if (eq2(name, desc, "repeat", "(I)Ljava/lang/String;")) {
+        const count = try f.popInt();
+        if (count < 0) return pendingException(f, "java/lang/IllegalArgumentException");
+        const s = try strChars(heap, (try f.popRef()) orelse return error.NullPointer);
+        const n: usize = @intCast(count);
+        const buf = heap.gpa.alloc(i32, s.len * n) catch return error.OutOfMemory;
+        var k: usize = 0;
+        while (k < n) : (k += 1) @memcpy(buf[k * s.len ..][0..s.len], s);
+        const str_class = f.loader.find("java/lang/String") orelse return error.LinkError;
+        return f.push(.{ .reference = try heap.putString(str_class, buf) });
+    }
+    if (eq2(name, desc, "toCharArray", "()[C")) {
+        const rid = (try f.popRef()) orelse return error.NullPointer;
+        const len = (try strChars(heap, rid)).len;
+        const aid = try heap.allocArray(.int, len);
+        const arr = try arrayOf(f, aid);
+        const src = try strChars(heap, rid); // re-fetch: allocArray may have moved the string
+        for (src, 0..) |c, i| arr.data[i] = .{ .int = c };
+        return f.push(.{ .reference = aid });
     }
     return error.UnsupportedOpcode;
 }
@@ -2080,8 +2246,9 @@ fn invokeStatic(f: *Frame, cls: *const Class, code: []const u8) RunError!void {
             return f.push(.{ .reference = try newString(f, tmp.items) });
         }
     }
+    if (std.mem.eql(u8, owner_name, "java/lang/Character")) return characterIntrinsic(f, mname, mdesc);
     if (std.mem.eql(u8, owner_name, "java/lang/Double") or std.mem.eql(u8, owner_name, "java/lang/Float") or
-        std.mem.eql(u8, owner_name, "java/lang/Boolean") or std.mem.eql(u8, owner_name, "java/lang/Character") or
+        std.mem.eql(u8, owner_name, "java/lang/Boolean") or
         std.mem.eql(u8, owner_name, "java/lang/Short") or std.mem.eql(u8, owner_name, "java/lang/Byte"))
         return boxStatic(f, owner_name, mname, mdesc);
     const tclass = try resolveClass(f, cls, try refClassName(cls, ref.class_index));

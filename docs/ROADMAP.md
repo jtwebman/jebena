@@ -11,7 +11,7 @@ highest-value item that is currently tractable. Every change must keep
 - [x] boxing: Integer/Long/Double/Float/Boolean/Character/Short/Byte (valueOf/xxxValue/equals/hashCode/parse/toString); [ ] generic functional interfaces w/ box-unbox adaptation
       functional interfaces + autoboxing work
 - [ ] remaining opcodes / edge cases surfaced by differential fuzzing
-- [ ] more intrinsics: Character, more Math/Integer/Long/String, Objects, Arrays.*
+- [x] Character intrinsics (isDigit/isLetter/isWhitespace/case/digit/compare/getNumericValue) + String toUpperCase/toLowerCase/trim/strip/equalsIgnoreCase/indexOf(II)/lastIndexOf/repeat/toCharArray; [ ] more Math/Objects/Arrays
 - [x] Comparator + Arrays.sort(T[], Comparator): lambda/method-ref comparators, stable, re-enters interpreter per compare; [ ] Collections.sort (needs List)
 - [ ] keep GROWING scripts/differential.sh every iteration (it finds real bugs)
 

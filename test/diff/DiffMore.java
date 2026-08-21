@@ -123,4 +123,14 @@ public class DiffMore {
     static int sortStr() { String[] a = { "banana", "apple", "cherry", "date" }; java.util.Arrays.sort(a, (x, y) -> x.compareTo(y)); int r = 0; for (String t : a) r = r * 31 + t.charAt(0); return r; }
     static int sortByLen() { String[] a = { "ccc", "a", "bb", "dd", "e", "fff" }; java.util.Arrays.sort(a, (x, y) -> x.length() - y.length()); StringBuilder sb = new StringBuilder(); for (String t : a) sb.append(t); return ck(sb.toString()); }
     static int sortBigC() { Integer[] a = new Integer[50]; for (int i = 0; i < 50; i++) a[i] = (i * 37 + 11) % 100; java.util.Arrays.sort(a, (x, y) -> x - y); int h = 0; for (Integer v : a) h = h * 31 + v; return h; }
+
+    static int upLow() { String a = "Hello, World!"; return ck(a.toUpperCase() + "|" + a.toLowerCase()); }
+    static int trimTest() { return ck("[" + "  hi there  ".trim() + "]" + "[" + "\t\n x \r".strip() + "]"); }
+    static int eqIgnore() { int r = 0; if ("HELLO".equalsIgnoreCase("hello")) r += 1; if ("abc".equalsIgnoreCase("abd")) r += 2; if ("Java".equalsIgnoreCase("JAVA")) r += 4; return r; }
+    static int idxTest() { String s = "abcabcabc"; return s.indexOf('c', 3) * 1000 + s.lastIndexOf('a') * 10 + s.indexOf('z', 0) + 100; }
+    static int repeatTest() { return ck("ab".repeat(5) + "|" + "x".repeat(0) + "|" + "-".repeat(3)); }
+    static int charArr() { char[] cs = "Zebra".toCharArray(); int h = 0; for (char c : cs) h = h * 31 + c; return h; }
+    static int charClass() { int r = 0; for (char c = 0; c < 128; c++) { if (Character.isDigit(c)) r += 1; if (Character.isLetter(c)) r += 3; if (Character.isLetterOrDigit(c)) r += 5; if (Character.isWhitespace(c)) r += 7; if (Character.isUpperCase(c)) r += 11; if (Character.isLowerCase(c)) r += 13; } return r; }
+    static int charConv() { int r = 0; for (char c = 'a'; c <= 'z'; c++) r += Character.toUpperCase(c); for (char c = 'A'; c <= 'Z'; c++) r += Character.toLowerCase(c); return r; }
+    static int charDig() { int r = 0; r += Character.digit('7', 10) * 100; r += Character.digit('f', 16) * 10; r += Character.getNumericValue('9'); r += Character.compare('a', 'b'); return r; }
 }
