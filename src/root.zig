@@ -9,6 +9,8 @@ pub const ConstantPool = constant_pool.ConstantPool;
 pub const Constant = constant_pool.Constant;
 pub const attribute = @import("attribute.zig");
 pub const AttributeInfo = attribute.AttributeInfo;
+pub const mutf8 = @import("mutf8.zig");
+pub const descriptor = @import("descriptor.zig");
 pub const class_file = @import("class_file.zig");
 pub const ClassFile = class_file.ClassFile;
 pub const MemberInfo = class_file.MemberInfo;
@@ -20,4 +22,6 @@ test {
     _ = @import("attribute.zig");
     _ = @import("class_file.zig");
     _ = @import("fuzz.zig");
+    _ = @import("mutf8.zig");
+    _ = @import("descriptor.zig");
 }

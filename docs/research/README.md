@@ -34,7 +34,7 @@ LXR *is* the RC + region hybrid, and MMTk makes the collector pluggable.
 
 ## Deep-dive docs (TODO — one per subsystem)
 
-- [x] 01-classfile-verifier  PARSER DONE (structural, all tag kinds, fuzzed, 100% path coverage). Verifier passes = next.
+- [x] 01-classfile-verifier  PARSER + mUTF-8 + descriptors DONE, fuzzed. Verifier (Pass 2/3) = next.
 - [x] 02-interpreter  DONE (see 02-interpreter.md): labeled-switch dispatch + quickening/IC ladder, skip template interpreter
 - [x] 03-gc  DONE (see 03-gc.md): spec constraints + LXR target + native-grow plan
 - [ ] 04-jit-baseline         (copy-and-patch stencils)
