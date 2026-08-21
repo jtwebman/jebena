@@ -80,8 +80,17 @@ fn cmdRun(gpa: std.mem.Allocator, io: std.Io, it: *std.process.Args.Iterator) !v
     inline for (.{
         .{ "java/lang/Object", @as(?[]const u8, null) },
         .{ "java/lang/Throwable", @as(?[]const u8, "java/lang/Object") },
+        .{ "java/lang/Error", @as(?[]const u8, "java/lang/Throwable") },
         .{ "java/lang/Exception", @as(?[]const u8, "java/lang/Throwable") },
         .{ "java/lang/RuntimeException", @as(?[]const u8, "java/lang/Exception") },
+        .{ "java/lang/ArithmeticException", @as(?[]const u8, "java/lang/RuntimeException") },
+        .{ "java/lang/NullPointerException", @as(?[]const u8, "java/lang/RuntimeException") },
+        .{ "java/lang/IllegalArgumentException", @as(?[]const u8, "java/lang/RuntimeException") },
+        .{ "java/lang/IllegalStateException", @as(?[]const u8, "java/lang/RuntimeException") },
+        .{ "java/lang/ClassCastException", @as(?[]const u8, "java/lang/RuntimeException") },
+        .{ "java/lang/NegativeArraySizeException", @as(?[]const u8, "java/lang/RuntimeException") },
+        .{ "java/lang/IndexOutOfBoundsException", @as(?[]const u8, "java/lang/RuntimeException") },
+        .{ "java/lang/ArrayIndexOutOfBoundsException", @as(?[]const u8, "java/lang/IndexOutOfBoundsException") },
     }) |pair| {
         const super = if (pair[1]) |sn| loader.find(sn) else null;
         const c = try a.create(IC.Class);

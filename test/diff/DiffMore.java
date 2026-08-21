@@ -25,4 +25,16 @@ public class DiffMore {
     static int gcExc() { int s = 0; for (int i = 0; i < 500; i++) { try { int[] a = new int[10]; a[i % 10] = i; if (i % 50 == 0) throw new RuntimeException(); s += a[i % 10]; } catch (RuntimeException e) { s += 1; } } return s; }
     static int deepMutual() { return count(2000); }
     static int count(int n) { return n == 0 ? 0 : 1 + count(n - 1); }
+
+    static int divZero() { int r = 0; try { r = 10 / 0; } catch (ArithmeticException e) { r = 99; } return r; }
+    static int divZeroLong() { long r = 0; try { r = 10L / 0L; } catch (ArithmeticException e) { r = 77; } return (int) r; }
+    static int npe() { int r = 0; int[] a = null; try { r = a.length; } catch (NullPointerException e) { r = 42; } return r; }
+    static int aioobe() { int r = 0; int[] a = new int[3]; try { a[5] = 1; } catch (ArrayIndexOutOfBoundsException e) { r = 55; } return r; }
+    static int aioobeNeg() { int r = 0; int[] a = new int[3]; try { r = a[-1]; } catch (ArrayIndexOutOfBoundsException e) { r = 66; } return r; }
+    static int negArr() { int r = 0; try { int[] a = new int[-1]; r = a.length; } catch (NegativeArraySizeException e) { r = 88; } return r; }
+    static int catchSuper() { int r = 0; try { int x = 1 / 0; if (x > 0) r = 1; } catch (RuntimeException e) { r = 7; } return r; }
+    static int catchThrowable() { int r = 0; try { int[] a = null; r = a[0]; } catch (Throwable t) { r = 9; } return r; }
+    static int finallyOnExc() { int r = 0; try { r = 1 / 0; } catch (ArithmeticException e) { r = 3; } finally { r += 10; } return r; }
+    static int multiCatch() { int r = 0; try { int[] a = new int[2]; a[9] = 1; } catch (ArithmeticException | ArrayIndexOutOfBoundsException e) { r = 4; } return r; }
+    static int gcArith() { int s = 0; for (int i = 0; i < 300; i++) { int[] junk = new int[8]; try { s += junk.length / (i % 7); } catch (ArithmeticException e) { s += 100; } } return s; }
 }
