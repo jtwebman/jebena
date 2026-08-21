@@ -32,7 +32,7 @@ Steps (each a loop iteration or few):
       native impls (Object identity-hashCode/getClass, System.arraycopy, float<->bits).
 - [x] clean-room java/lang/Object (equals/hashCode/native identityHashCode) loaded + executed as real bytecode (scripts/jbase-smoke.sh: 111)
       execute a method from OUR compiled bytecode end-to-end (prove the pipeline).
-- [ ] clean-room java/lang/String (char[]/byte[] backing), StringBuilder, Integer/Long/
+- [x] migration switch: Class.is_stub; intrinsics defer to a loaded real class (invokeStatic/invokeInstance). [x] clean-room java/lang/Math (abs/max/min/floorDiv/floorMod) runs as real bytecode. [ ] clean-room String/boxing next
       Double boxing, Math, Number — each replacing a Zig stub, differential-verified.
 - [ ] clean-room java.util core: Objects, AbstractCollection/List, ArrayList, HashMap,
       HashSet, Arrays, Comparator, Collections.

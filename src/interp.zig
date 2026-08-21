@@ -645,6 +645,7 @@ pub const Class = struct {
     instance_fields: []Field,
     static_fields: []Field,
     bootstrap_methods: []const attribute_decode.BootstrapMethod,
+    is_stub: bool = false,
 
     pub const Field = struct { name: []const u8, kind: Kind };
     pub const Param = struct { kind: Kind, slot: u16 };
@@ -968,8 +969,11 @@ fn invokeInstance(f: *Frame, cls: *const Class, code: []const u8, is_special: bo
     const mname = cls.cp.utf8(nat.name_index) catch return error.LinkError;
     const mdesc = cls.cp.utf8(nat.descriptor_index) catch return error.LinkError;
 
-    if (std.mem.eql(u8, cname, "java/lang/String")) return stringIntrinsic(f, mname, mdesc);
-    if (std.mem.eql(u8, cname, "java/lang/StringBuilder") or std.mem.eql(u8, cname, "java/lang/StringBuffer")) return builderIntrinsic(f, mname, mdesc);
+    const recv_is_real = if (f.loader.find(cname)) |rc| !rc.is_stub else false;
+    if (!recv_is_real) {
+        if (std.mem.eql(u8, cname, "java/lang/String")) return stringIntrinsic(f, mname, mdesc);
+        if (std.mem.eql(u8, cname, "java/lang/StringBuilder") or std.mem.eql(u8, cname, "java/lang/StringBuffer")) return builderIntrinsic(f, mname, mdesc);
+    }
 
     // Bootstrap stub: java/lang/Object.<init> is a no-op (we have no JDK loaded).
     if (is_special and std.mem.eql(u8, mname, "<init>") and std.mem.eql(u8, cname, "java/lang/Object")) {
@@ -2252,31 +2256,38 @@ fn invokeStatic(f: *Frame, cls: *const Class, code: []const u8) RunError!void {
     const mname = cls.cp.utf8(nat.name_index) catch return error.LinkError;
     const mdesc = cls.cp.utf8(nat.descriptor_index) catch return error.LinkError;
     const owner_name = try refClassName(cls, ref.class_index);
-    if (std.mem.eql(u8, owner_name, "java/lang/Math")) return mathIntrinsic(f, mname, mdesc);
-    if (std.mem.eql(u8, owner_name, "java/lang/System")) return systemIntrinsic(f, mname, mdesc);
-    if (std.mem.eql(u8, owner_name, "java/lang/Integer")) return integerIntrinsic(f, mname, mdesc);
-    if (std.mem.eql(u8, owner_name, "java/lang/Long")) return longIntrinsic(f, mname, mdesc);
-    if (std.mem.eql(u8, owner_name, "java/util/Arrays")) return arraysIntrinsic(f, mname, mdesc);
-    if (std.mem.eql(u8, owner_name, "java/util/Objects")) return objectsIntrinsic(f, mname, mdesc);
-    if (std.mem.eql(u8, owner_name, "java/lang/String")) {
-        if (eq2(mname, mdesc, "valueOf", "(D)Ljava/lang/String;")) return floatString(f, f64, try f.popDouble());
-        if (eq2(mname, mdesc, "valueOf", "(F)Ljava/lang/String;")) return floatString(f, f32, try f.popFloat());
-        if (eq2(mname, mdesc, "valueOf", "(I)Ljava/lang/String;")) return floatStringInt(f, @as(i64, try f.popInt()));
-        if (eq2(mname, mdesc, "valueOf", "(J)Ljava/lang/String;")) return floatStringInt(f, try f.popLong());
-        if (eq2(mname, mdesc, "valueOf", "(Z)Ljava/lang/String;")) {
-            const b = try f.popInt();
-            const heap = f.heap orelse return error.UnsupportedOpcode;
-            var tmp: std.ArrayList(i32) = .empty;
-            defer tmp.deinit(heap.gpa);
-            try appendAscii(&tmp, heap.gpa, if (b != 0) "true" else "false");
-            return f.push(.{ .reference = try newString(f, tmp.items) });
+    // Migration switch: intrinsics only stand in for a stub (or not-yet-loaded) class.
+    // When our own clean-room class is loaded (real bytecode), skip the intrinsic and
+    // run/dispatch the real method — intrinsics are an optional acceleration, not the
+    // source of truth.
+    const owner_is_real = if (f.loader.find(owner_name)) |oc| !oc.is_stub else false;
+    if (!owner_is_real) {
+        if (std.mem.eql(u8, owner_name, "java/lang/Math")) return mathIntrinsic(f, mname, mdesc);
+        if (std.mem.eql(u8, owner_name, "java/lang/System")) return systemIntrinsic(f, mname, mdesc);
+        if (std.mem.eql(u8, owner_name, "java/lang/Integer")) return integerIntrinsic(f, mname, mdesc);
+        if (std.mem.eql(u8, owner_name, "java/lang/Long")) return longIntrinsic(f, mname, mdesc);
+        if (std.mem.eql(u8, owner_name, "java/util/Arrays")) return arraysIntrinsic(f, mname, mdesc);
+        if (std.mem.eql(u8, owner_name, "java/util/Objects")) return objectsIntrinsic(f, mname, mdesc);
+        if (std.mem.eql(u8, owner_name, "java/lang/String")) {
+            if (eq2(mname, mdesc, "valueOf", "(D)Ljava/lang/String;")) return floatString(f, f64, try f.popDouble());
+            if (eq2(mname, mdesc, "valueOf", "(F)Ljava/lang/String;")) return floatString(f, f32, try f.popFloat());
+            if (eq2(mname, mdesc, "valueOf", "(I)Ljava/lang/String;")) return floatStringInt(f, @as(i64, try f.popInt()));
+            if (eq2(mname, mdesc, "valueOf", "(J)Ljava/lang/String;")) return floatStringInt(f, try f.popLong());
+            if (eq2(mname, mdesc, "valueOf", "(Z)Ljava/lang/String;")) {
+                const b = try f.popInt();
+                const heap = f.heap orelse return error.UnsupportedOpcode;
+                var tmp: std.ArrayList(i32) = .empty;
+                defer tmp.deinit(heap.gpa);
+                try appendAscii(&tmp, heap.gpa, if (b != 0) "true" else "false");
+                return f.push(.{ .reference = try newString(f, tmp.items) });
+            }
         }
+        if (std.mem.eql(u8, owner_name, "java/lang/Character")) return characterIntrinsic(f, mname, mdesc);
+        if (std.mem.eql(u8, owner_name, "java/lang/Double") or std.mem.eql(u8, owner_name, "java/lang/Float") or
+            std.mem.eql(u8, owner_name, "java/lang/Boolean") or
+            std.mem.eql(u8, owner_name, "java/lang/Short") or std.mem.eql(u8, owner_name, "java/lang/Byte"))
+            return boxStatic(f, owner_name, mname, mdesc);
     }
-    if (std.mem.eql(u8, owner_name, "java/lang/Character")) return characterIntrinsic(f, mname, mdesc);
-    if (std.mem.eql(u8, owner_name, "java/lang/Double") or std.mem.eql(u8, owner_name, "java/lang/Float") or
-        std.mem.eql(u8, owner_name, "java/lang/Boolean") or
-        std.mem.eql(u8, owner_name, "java/lang/Short") or std.mem.eql(u8, owner_name, "java/lang/Byte"))
-        return boxStatic(f, owner_name, mname, mdesc);
     const tclass = try resolveClass(f, cls, try refClassName(cls, ref.class_index));
     const tr = tclass.resolve(mname, mdesc) orelse return error.MethodNotFound;
     const target = tr.method;
@@ -3726,6 +3737,7 @@ pub fn makeStub(gpa: std.mem.Allocator, arena: std.mem.Allocator, name: []const 
         .instance_fields = &.{},
         .static_fields = &.{},
         .bootstrap_methods = &.{},
+        .is_stub = true,
     };
 }
 
