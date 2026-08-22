@@ -470,6 +470,17 @@ public class JBaseSmoke {
                 .collect(java.util.stream.Collectors.groupingBy(x -> ((Integer) x) % 3));
         r += groups.size();                                   // keys 0,1,2 = 3
 
+        // === String.format ===
+        if (String.format("%05d", 42).equals("00042")) r += 100000;
+        if (String.format("%-8s|", "hi").equals("hi      |")) r += 200000;
+        if (String.format("%.2f", 3.14159).equals("3.14")) r += 300;
+        if (String.format("%x", 255).equals("ff")) r += 30;
+        if (String.format("[%8.3f]", 3.14159).equals("[   3.142]")) r += 40;
+        r += String.format("%d and %s and %b", 42, "hi", true).length(); // "42 and hi and true"
+        java.lang.StringBuffer sbuf = new java.lang.StringBuffer();
+        sbuf.append("a").append(1).append(true);
+        r += sbuf.toString().length();                        // "a1true" = 6
+
         // === Reflection: getClass -> methods/fields/ctors, invoke/get/set/newInstance ===
         ReflectTarget rt0 = new ReflectTarget(5, "hi");
         Class<?> rc = rt0.getClass();
@@ -492,6 +503,21 @@ public class JBaseSmoke {
             }
         }
         r += rt0.x;       // 99 (set worked)
+        for (java.lang.reflect.Method mm : rc.getDeclaredMethods()) {
+            if (mm.getName().equals("addTo")) {
+                MyAnno mma = (MyAnno) mm.getAnnotation(MyAnno.class);
+                if (mma != null && mma.value().equals("m")) r += 6000;
+                r += mma.num();  // 7
+                if (mm.isAnnotationPresent(MyAnno.class)) r += 60;
+            }
+        }
+        for (java.lang.reflect.Field ff : rc.getDeclaredFields()) {
+            if (ff.getName().equals("x")) {
+                MyAnno ffa = (MyAnno) ff.getAnnotation(MyAnno.class);
+                if (ffa != null) r += ffa.num();  // 9
+                if (ff.isAnnotationPresent(MyAnno.class)) r += 90;
+            }
+        }
         for (java.lang.reflect.Constructor ctorM : rc.getDeclaredConstructors()) {
             if (ctorM.getParameterCount() == 2) {
                 ReflectTarget made = (ReflectTarget) ctorM.newInstance(new Object[] { 42, "made" });

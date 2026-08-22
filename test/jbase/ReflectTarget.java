@@ -1,6 +1,7 @@
 package jebena;
 
 public class ReflectTarget {
+    @MyAnno(value = "f", num = 9)
     public int x;
     public String label;
 
@@ -14,6 +15,7 @@ public class ReflectTarget {
         this.label = label;
     }
 
+    @MyAnno(value = "m", num = 7)
     public int addTo(int n) {
         return x + n;
     }

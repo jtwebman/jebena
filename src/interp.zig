@@ -780,6 +780,15 @@ fn decodeAnnotations(arena: std.mem.Allocator, cp: anytype, info: []const u8) ![
     }
     return out.toOwnedSlice(arena);
 }
+fn decodeMemberAnnotations(arena: std.mem.Allocator, cp: anytype, attrs: anytype) []const AnnotationInfo {
+    for (attrs) |ai| {
+        const an = cp.utf8(ai.name_index) catch continue;
+        if (std.mem.eql(u8, an, "RuntimeVisibleAnnotations")) {
+            return decodeAnnotations(arena, cp, ai.info) catch &.{};
+        }
+    }
+    return &.{};
+}
 pub const Class = struct {
     gpa: std.mem.Allocator,
     cp: ConstantPool,
@@ -797,7 +806,7 @@ pub const Class = struct {
     /// True for a runtime-built java.lang.reflect.Proxy class (dispatch to handler).
     is_proxy: bool = false,
 
-    pub const Field = struct { name: []const u8, kind: Kind };
+    pub const Field = struct { name: []const u8, kind: Kind, annotations: []const AnnotationInfo = &.{} };
     pub const Param = struct { kind: Kind, slot: u16 };
     pub const Method = struct {
         name: []const u8,
@@ -808,6 +817,7 @@ pub const Class = struct {
         ret: ?Kind,
         is_static: bool,
         is_native: bool,
+        annotations: []const AnnotationInfo = &.{},
     };
 
     fn kindOf(ft: descriptor.FieldType) Kind {
@@ -845,6 +855,7 @@ pub const Class = struct {
             const field = Field{
                 .name = try cf.constant_pool.utf8(fld.name_index),
                 .kind = kindOf(try descriptor.parseFieldDescriptor(fdesc)),
+                .annotations = decodeMemberAnnotations(arena, cf.constant_pool, fld.attributes),
             };
             if (fld.access_flags.isStatic()) {
                 static_fields[si] = field;
@@ -884,6 +895,7 @@ pub const Class = struct {
                 .ret = if (mt.ret) |r| kindOf(r) else null,
                 .is_static = is_static,
                 .is_native = is_native,
+                .annotations = decodeMemberAnnotations(arena, cf.constant_pool, m.attributes),
             };
         }
         var class_annos: []const AnnotationInfo = &.{};
@@ -2659,11 +2671,14 @@ fn boxAnnoVal(f: *Frame, v: AnnoVal) RunError!Value {
     };
 }
 fn reflectGetAnnotation(f: *Frame, class_mirror: u32, anno_mirror: u32) RunError!void {
-    const heap = f.heap orelse return error.UnsupportedOpcode;
     const cls = try mirrorClass(f, class_mirror);
+    return buildAnnotationProxy(f, cls.annotations, anno_mirror);
+}
+fn buildAnnotationProxy(f: *Frame, annos: []const AnnotationInfo, anno_mirror: u32) RunError!void {
+    const heap = f.heap orelse return error.UnsupportedOpcode;
     const anno_cls = try mirrorClass(f, anno_mirror);
     var found: ?AnnotationInfo = null;
-    for (cls.annotations) |ai| {
+    for (annos) |ai| {
         if (std.mem.eql(u8, ai.name, anno_cls.name)) {
             found = ai;
             break;
@@ -3123,6 +3138,26 @@ fn nativeInvoke(f: *Frame, owner: *const Class, method: *const Class.Method, slo
             return f.pushInt(@intCast(f.loader.classes.items[ref.class_idx].methods[ref.member_idx].params.len));
         }
         if (eq2(mn, md, "invoke", "(Ljava/lang/Object;[Ljava/lang/Object;)Ljava/lang/Object;")) return reflectInvoke(f, self, slots);
+        if (eq2(mn, md, "getAnnotation", "(Ljava/lang/Class;)Ljava/lang/annotation/Annotation;")) {
+            const ref = try memberIndices(f, self);
+            const arg = switch (slots[method.params[0].slot]) {
+                .reference => |r| r orelse return error.NullPointer,
+                else => return error.TypeMismatch,
+            };
+            return buildAnnotationProxy(f, f.loader.classes.items[ref.class_idx].methods[ref.member_idx].annotations, arg);
+        }
+        if (eq2(mn, md, "isAnnotationPresent", "(Ljava/lang/Class;)Z")) {
+            const ref = try memberIndices(f, self);
+            const arg = switch (slots[method.params[0].slot]) {
+                .reference => |r| r orelse return error.NullPointer,
+                else => return error.TypeMismatch,
+            };
+            const anno_cls = try mirrorClass(f, arg);
+            for (f.loader.classes.items[ref.class_idx].methods[ref.member_idx].annotations) |an| {
+                if (std.mem.eql(u8, an.name, anno_cls.name)) return f.pushInt(1);
+            }
+            return f.pushInt(0);
+        }
     }
     if (std.mem.eql(u8, on, "java/lang/reflect/Field")) {
         const self = switch (slots[0]) {
@@ -3135,6 +3170,26 @@ fn nativeInvoke(f: *Frame, owner: *const Class, method: *const Class.Method, slo
         }
         if (eq2(mn, md, "get", "(Ljava/lang/Object;)Ljava/lang/Object;")) return reflectFieldGet(f, self, slots);
         if (eq2(mn, md, "set", "(Ljava/lang/Object;Ljava/lang/Object;)V")) return reflectFieldSet(f, self, slots);
+        if (eq2(mn, md, "getAnnotation", "(Ljava/lang/Class;)Ljava/lang/annotation/Annotation;")) {
+            const ref = try memberIndices(f, self);
+            const arg = switch (slots[method.params[0].slot]) {
+                .reference => |r| r orelse return error.NullPointer,
+                else => return error.TypeMismatch,
+            };
+            return buildAnnotationProxy(f, f.loader.classes.items[ref.class_idx].instance_fields[ref.member_idx].annotations, arg);
+        }
+        if (eq2(mn, md, "isAnnotationPresent", "(Ljava/lang/Class;)Z")) {
+            const ref = try memberIndices(f, self);
+            const arg = switch (slots[method.params[0].slot]) {
+                .reference => |r| r orelse return error.NullPointer,
+                else => return error.TypeMismatch,
+            };
+            const anno_cls = try mirrorClass(f, arg);
+            for (f.loader.classes.items[ref.class_idx].instance_fields[ref.member_idx].annotations) |an| {
+                if (std.mem.eql(u8, an.name, anno_cls.name)) return f.pushInt(1);
+            }
+            return f.pushInt(0);
+        }
     }
     if (std.mem.eql(u8, on, "java/lang/reflect/Constructor")) {
         const self = switch (slots[0]) {

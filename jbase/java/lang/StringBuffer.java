@@ -1,0 +1,164 @@
+package java.lang;
+
+/**
+ * Clean-room java.lang.StringBuffer backed by a growable char[]. This is the
+ * single-threaded, thread-unsafe twin of StringBuilder (no synchronization);
+ * it keeps its own char[] rather than sharing StringBuilder internals. Every
+ * append(...) returns this for chaining; toString() snapshots into a String.
+ */
+public final class StringBuffer implements CharSequence {
+    private char[] value;
+    private int count;
+
+    public StringBuffer() {
+        value = new char[16];
+        count = 0;
+    }
+
+    public StringBuffer(int capacity) {
+        value = new char[capacity < 1 ? 1 : capacity];
+        count = 0;
+    }
+
+    public StringBuffer(String str) {
+        this();
+        append(str);
+    }
+
+    private void ensure(int min) {
+        if (min > value.length) {
+            int nc = value.length * 2 + 2;
+            if (nc < min) {
+                nc = min;
+            }
+            char[] nv = new char[nc];
+            for (int i = 0; i < count; i++) {
+                nv[i] = value[i];
+            }
+            value = nv;
+        }
+    }
+
+    public int length() {
+        return count;
+    }
+
+    public char charAt(int index) {
+        if (index < 0 || index >= count) {
+            throw new StringIndexOutOfBoundsException();
+        }
+        return value[index];
+    }
+
+    public StringBuffer append(char c) {
+        ensure(count + 1);
+        value[count++] = c;
+        return this;
+    }
+
+    public StringBuffer append(String str) {
+        String s = (str == null) ? "null" : str;
+        int len = s.length();
+        ensure(count + len);
+        for (int i = 0; i < len; i++) {
+            value[count++] = s.charAt(i);
+        }
+        return this;
+    }
+
+    public StringBuffer append(CharSequence cs) {
+        return append(cs == null ? "null" : cs.toString());
+    }
+
+    public StringBuffer append(Object o) {
+        return append(String.valueOf(o));
+    }
+
+    public StringBuffer append(int i) {
+        return append(String.valueOf(i));
+    }
+
+    public StringBuffer append(long l) {
+        return append(String.valueOf(l));
+    }
+
+    public StringBuffer append(boolean b) {
+        return append(b ? "true" : "false");
+    }
+
+    public StringBuffer append(double d) {
+        return append(String.valueOf(d));
+    }
+
+    public StringBuffer append(float f) {
+        return append(String.valueOf(f));
+    }
+
+    public StringBuffer append(char[] chars) {
+        ensure(count + chars.length);
+        for (int i = 0; i < chars.length; i++) {
+            value[count++] = chars[i];
+        }
+        return this;
+    }
+
+    public StringBuffer reverse() {
+        for (int i = 0, j = count - 1; i < j; i++, j--) {
+            char t = value[i];
+            value[i] = value[j];
+            value[j] = t;
+        }
+        return this;
+    }
+
+    public StringBuffer deleteCharAt(int index) {
+        if (index < 0 || index >= count) {
+            throw new StringIndexOutOfBoundsException();
+        }
+        for (int i = index; i < count - 1; i++) {
+            value[i] = value[i + 1];
+        }
+        count--;
+        return this;
+    }
+
+    public StringBuffer insert(int offset, String str) {
+        if (offset < 0 || offset > count) {
+            throw new StringIndexOutOfBoundsException();
+        }
+        String s = (str == null) ? "null" : str;
+        int len = s.length();
+        ensure(count + len);
+        for (int i = count - 1; i >= offset; i--) {
+            value[i + len] = value[i];
+        }
+        for (int i = 0; i < len; i++) {
+            value[offset + i] = s.charAt(i);
+        }
+        count += len;
+        return this;
+    }
+
+    public void setLength(int newLength) {
+        if (newLength < 0) {
+            throw new StringIndexOutOfBoundsException();
+        }
+        ensure(newLength);
+        for (int i = count; i < newLength; i++) {
+            value[i] = '\0';
+        }
+        count = newLength;
+    }
+
+    public CharSequence subSequence(int start, int end) {
+        return toString().substring(start, end);
+    }
+
+    public String toString() {
+        char[] r = new char[count];
+        for (int i = 0; i < count; i++) {
+            r[i] = value[i];
+        }
+        return new String(r);
+    }
+}

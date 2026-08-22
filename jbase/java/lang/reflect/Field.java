@@ -12,6 +12,10 @@ public final class Field {
 
     public native void set(Object obj, Object value);
 
+    public native boolean isAnnotationPresent(Class annotationClass);
+
+    public native java.lang.annotation.Annotation getAnnotation(Class annotationClass);
+
     public String toString() {
         return getName();
     }

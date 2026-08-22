@@ -13,6 +13,10 @@ public final class Method {
 
     public native Object invoke(Object receiver, Object[] args);
 
+    public native boolean isAnnotationPresent(Class annotationClass);
+
+    public native java.lang.annotation.Annotation getAnnotation(Class annotationClass);
+
     public String toString() {
         return getName();
     }

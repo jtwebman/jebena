@@ -247,6 +247,10 @@ public final class String implements CharSequence, Comparable<String> {
         return (o == null) ? "null" : o.toString();
     }
 
+    public static String format(String fmt, Object... args) {
+        return java.util.Formatter.formatStatic(fmt, args);
+    }
+
     // Numeric valueOf reuse the VM's decimal/shortest-float formatting.
     public static native String valueOf(int i);
 
