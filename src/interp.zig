@@ -3731,25 +3731,46 @@ fn makeChildFrame(alloc: std.mem.Allocator, p: PendingCall, caller: *Frame) RunE
 /// pops on return, and unwinds across frames on an uncaught exception. Native /
 /// intrinsic re-entry (reflection, lambdas, proxies) still calls exec, each with
 /// its own call stack; the GC parent-chain links them.
-fn exec(alloc: std.mem.Allocator, class: ?*const Class, heap: ?*Heap, loader: *Loader, budget: *Budget, code: []const u8, max_stack: u16, max_locals: u16, arg_slots: []const Value, exceptions: []const attribute_decode.ExceptionTableEntry, parent: ?*Frame) RunError!?Value {
+/// Heap-allocate the base frame of a fiber (uniform with child frames so the
+/// whole call stack is fiber-owned and freed the same way, and its address is
+/// stable for the GC parent-chain).
+fn makeBaseFrame(alloc: std.mem.Allocator, class: ?*const Class, heap: ?*Heap, loader: *Loader, budget: *Budget, code: []const u8, max_stack: u16, max_locals: u16, arg_slots: []const Value, exceptions: []const attribute_decode.ExceptionTableEntry, parent: ?*Frame) RunError!*Frame {
     if (arg_slots.len > max_locals) return error.BadLocal;
-    const stack = try alloc.alloc(Value, max_stack);
-    defer alloc.free(stack);
-    const locals = try alloc.alloc(Value, max_locals);
-    defer alloc.free(locals);
-    for (locals) |*l| l.* = .{ .int = 0 };
-    for (arg_slots, 0..) |v, i| locals[i] = v;
-    var frame_storage = Frame{ .stack = stack, .locals = locals, .budget = budget, .heap = heap, .loader = loader, .parent = parent, .code = code, .class = class, .exceptions = exceptions };
+    const base = alloc.create(Frame) catch return error.OutOfMemory;
+    errdefer alloc.destroy(base);
+    const st = alloc.alloc(Value, max_stack) catch return error.OutOfMemory;
+    errdefer alloc.free(st);
+    const lc = alloc.alloc(Value, max_locals) catch return error.OutOfMemory;
+    for (lc) |*l| l.* = .{ .int = 0 };
+    for (arg_slots, 0..) |v, i| lc[i] = v;
+    base.* = Frame{ .stack = st, .locals = lc, .budget = budget, .heap = heap, .loader = loader, .parent = parent, .code = code, .class = class, .exceptions = exceptions };
+    return base;
+}
 
-    var call_stack: std.ArrayList(*Frame) = .empty;
-    defer {
-        for (call_stack.items) |cf| if (cf != &frame_storage) freeChildFrame(alloc, cf);
-        call_stack.deinit(alloc);
+/// A green-thread fiber: its own explicit Java call stack (frame 0 is the base).
+/// The whole stack is heap-owned so a fiber's state survives scheduler switches
+/// (stage 3) and can be marked as GC roots even while parked.
+const Fiber = struct {
+    alloc: std.mem.Allocator,
+    call_stack: std.ArrayList(*Frame) = .empty,
+
+    fn deinit(self: *Fiber) void {
+        for (self.call_stack.items) |cf| freeChildFrame(self.alloc, cf);
+        self.call_stack.deinit(self.alloc);
     }
-    call_stack.append(alloc, &frame_storage) catch return error.OutOfMemory;
+};
 
-    while (call_stack.items.len > 0) {
-        const top = call_stack.items[call_stack.items.len - 1];
+fn exec(alloc: std.mem.Allocator, class: ?*const Class, heap: ?*Heap, loader: *Loader, budget: *Budget, code: []const u8, max_stack: u16, max_locals: u16, arg_slots: []const Value, exceptions: []const attribute_decode.ExceptionTableEntry, parent: ?*Frame) RunError!?Value {
+    const base = try makeBaseFrame(alloc, class, heap, loader, budget, code, max_stack, max_locals, arg_slots, exceptions, parent);
+    var fiber = Fiber{ .alloc = alloc };
+    defer fiber.deinit();
+    fiber.call_stack.append(alloc, base) catch {
+        freeChildFrame(alloc, base);
+        return error.OutOfMemory;
+    };
+
+    while (fiber.call_stack.items.len > 0) {
+        const top = fiber.call_stack.items[fiber.call_stack.items.len - 1];
         const res = runFrame(top) catch |e| {
             // Reduction budget exhausted: yield and resume. Single-fiber for now
             // (run-to-completion); a scheduler will switch fibers here (stage 3).
@@ -3761,31 +3782,31 @@ fn exec(alloc: std.mem.Allocator, class: ?*const Class, heap: ?*Heap, loader: *L
         };
         switch (res) {
             .returned => |rv| {
-                const finished = call_stack.pop().?;
-                if (finished == &frame_storage) return rv;
-                const caller = call_stack.items[call_stack.items.len - 1];
+                if (fiber.call_stack.items.len == 1) return rv;
+                const finished = fiber.call_stack.pop().?;
+                const caller = fiber.call_stack.items[fiber.call_stack.items.len - 1];
                 caller.pc = finished.return_pc;
                 if (rv) |v| try caller.pushKind(v);
                 freeChildFrame(alloc, finished);
             },
             .call => |p| {
                 defer alloc.free(p.slots);
-                if (call_stack.items.len >= budget.max_depth) return error.CallDepthExceeded;
+                if (fiber.call_stack.items.len >= budget.max_depth) return error.CallDepthExceeded;
                 const child = try makeChildFrame(alloc, p, top);
-                call_stack.append(alloc, child) catch {
+                fiber.call_stack.append(alloc, child) catch {
                     freeChildFrame(alloc, child);
                     return error.OutOfMemory;
                 };
             },
             .threw => {
                 while (true) {
-                    const cur = call_stack.items[call_stack.items.len - 1];
+                    const cur = fiber.call_stack.items[fiber.call_stack.items.len - 1];
                     if (try handleException(cur, cur.class, cur.exceptions, budget.pending.?)) {
                         budget.pending = null;
                         break;
                     }
-                    const finished = call_stack.pop().?;
-                    if (finished == &frame_storage) return error.JavaException;
+                    if (fiber.call_stack.items.len == 1) return error.JavaException;
+                    const finished = fiber.call_stack.pop().?;
                     freeChildFrame(alloc, finished);
                 }
             },
