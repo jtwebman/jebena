@@ -3459,9 +3459,20 @@ fn nativeInvoke(f: *Frame, owner: *const Class, method: *const Class.Method, slo
                 else => return error.LinkError,
             };
             if (fid_val.long < 0) return;
-            const fib = f.loader.scheduler.fiberById(@intCast(fid_val.long)) orelse return;
+            const sched = &f.loader.scheduler;
+            const fib = sched.fiberById(@intCast(fid_val.long)) orelse return;
             if (fib.status == .done) return;
-            try f.loader.scheduler.pump(fib, f.budget);
+            if (sched.carriers_total > 1) {
+                // Real carriers: spin-wait (polling the safepoint) while OTHER
+                // carriers run the joinee. A native can't suspend the interpreter,
+                // so the joining carrier busy-waits; parking is a later optimization.
+                while (fib.status != .done) {
+                    if (sched.safepoint_requested.load(.acquire)) sched.waitForSafepointRelease();
+                    std.atomic.spinLoopHint();
+                }
+            } else {
+                try sched.pump(fib, f.budget); // single carrier: inline-pump the run-queue
+            }
             return;
         }
         if (eq2(mn, md, "isAlive", "()Z")) {
@@ -4082,6 +4093,9 @@ const Scheduler = struct {
     /// Incremented on spawn, decremented on completion. Atomic for multi-carrier.
     outstanding: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
     shutdown: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    /// Bitmask of carrier ids that ran >=1 fiber; used to verify real parallelism.
+    carriers_ran: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
+    trace_carriers: bool = false,
     /// Guards the shared ready-queue + all-registry + next_id (Stage 4d). Taken
     /// only for the brief queue mutations, never across driveFiber. Uncontended
     /// with one carrier.
@@ -4107,6 +4121,7 @@ const Scheduler = struct {
         self.carrier.current = null;
         self.outstanding.store(0, .release);
         self.shutdown.store(false, .release);
+        self.carriers_ran.store(0, .release);
     }
 
     /// Create a fiber around an already-built base frame and enqueue it ready.
@@ -4148,6 +4163,39 @@ const Scheduler = struct {
         try self.carrierLoop(&self.carrier);
     }
 
+    /// Multi-carrier run (4d-4-iii b2): spawn requested_carriers-1 std.Thread
+    /// carriers, run carrier 0 on the calling (main) OS thread, join the rest.
+    /// Each carrier owns its own Budget; carrierLoop exits when outstanding==0.
+    /// Opt-in via JEBENA_CARRIERS>1; the single-carrier run() stays the default.
+    fn runMulti(self: *Scheduler, budget: *Budget) RunError!void {
+        const n = self.requested_carriers;
+        self.carriers_total = n;
+        self.parked.store(0, .release);
+        defer self.carriers_total = 1; // restore for reset / next top-level run
+        const carriers = self.gpa.alloc(Carrier, n) catch return error.OutOfMemory;
+        defer self.gpa.free(carriers);
+        for (carriers, 0..) |*c, i| c.* = .{ .id = @intCast(i), .budget = budget.* };
+        const threads = self.gpa.alloc(std.Thread, n - 1) catch return error.OutOfMemory;
+        defer self.gpa.free(threads);
+        var spawned: usize = 0;
+        for (0..n - 1) |i| {
+            threads[i] = std.Thread.spawn(.{}, carrierWorker, .{ self, &carriers[i + 1] }) catch break;
+            spawned += 1;
+        }
+        const main_err = self.carrierLoop(&carriers[0]);
+        self.shutdown.store(true, .release); // tell idle workers to exit
+        for (threads[0..spawned]) |t| t.join();
+        if (self.trace_carriers)
+            std.debug.print("jebena: carriers-ran={d}\n", .{@popCount(self.carriers_ran.load(.acquire))});
+        try main_err; // carrier 0 error propagates; worker errors are isolated in fiber.err
+    }
+
+    /// Worker-carrier thread entry: run the carrier loop; a fatal drive error is
+    /// isolated (recorded in the fiber and left; the run's result is carrier 0's).
+    fn carrierWorker(self: *Scheduler, carrier: *Carrier) void {
+        self.carrierLoop(carrier) catch {};
+    }
+
     /// The loop a single carrier runs: pull a ready fiber, drive it, requeue on
     /// yield / retire (outstanding--) on completion. When nothing is ready, exit
     /// once no fibers remain (or shutdown), else poll the safepoint and spin.
@@ -4183,6 +4231,7 @@ const Scheduler = struct {
                     _ = self.outstanding.fetchSub(1, .acq_rel);
                 },
             }
+            if (carrier.id < 32) _ = self.carriers_ran.fetchOr(@as(u32, 1) << @intCast(carrier.id), .acq_rel);
         }
     }
 
@@ -4211,6 +4260,8 @@ const Scheduler = struct {
     }
 
     fn fiberById(self: *Scheduler, id: u64) ?*Fiber {
+        self.lock.lock();
+        defer self.lock.unlock();
         for (self.all.items) |fib| if (fib.id == id) return fib;
         return null;
     }
@@ -4343,7 +4394,12 @@ fn runFiber(loader: *Loader, class: ?*const Class, heap: ?*Heap, budget: *Budget
         return e;
     };
     defer loader.scheduler.reset();
-    try loader.scheduler.run(budget);
+    const sched = &loader.scheduler;
+    if (sched.requested_carriers > 1 and sched.carriers_total == 1) {
+        try sched.runMulti(budget); // top-level multi-carrier run (opt-in)
+    } else {
+        try sched.run(budget); // single carrier, or nested native re-entry
+    }
     return fib.result;
 }
 

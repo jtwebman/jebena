@@ -33,7 +33,8 @@ pub fn main(init: std.process.Init) !void {
             (std.fmt.parseInt(u32, v, 10) catch 1)
         else
             1;
-        try cmdRun(gpa, io, &args, carriers);
+        const trace = init.environ_map.get("JEBENA_CARRIER_TRACE") != null;
+        try cmdRun(gpa, io, &args, carriers, trace);
     } else {
         return usage();
     }
@@ -64,7 +65,7 @@ fn runEntry(loader: *IC.Loader, cls: *const IC.Class, method: []const u8, desc: 
 /// Load a compiled multi-class program from disk and run a static no-arg method.
 /// Provides a minimal java.lang stub chain so user classes can extend
 /// Object/Throwable/Exception/RuntimeException.
-fn cmdRun(gpa: std.mem.Allocator, io: std.Io, it: *std.process.Args.Iterator, carriers: u32) !void {
+fn cmdRun(gpa: std.mem.Allocator, io: std.Io, it: *std.process.Args.Iterator, carriers: u32, trace: bool) !void {
     const main_class = it.next() orelse return usage();
     const method = it.next() orelse return usage();
 
@@ -92,6 +93,7 @@ fn cmdRun(gpa: std.mem.Allocator, io: std.Io, it: *std.process.Args.Iterator, ca
     loader.io = io; // portable IO handle for System.out / clocks
     loader.class_arena = a; // arena for lazily-built Classes
     loader.scheduler.requested_carriers = if (carriers == 0) 1 else carriers; // opt-in parallelism (4d-4)
+    loader.scheduler.trace_carriers = trace; // diagnostic: prints distinct carriers that ran work
     try loader.classpath.appendSlice(gpa, cpdirs.items);
     defer loader.deinit();
 

@@ -166,6 +166,58 @@ This Zig build has NO `std.Thread.Mutex` — sync primitives live under `std.Io`
 locking = `std.atomic` (spinlocks / `std.atomic.Value`) or `std.Io.Mutex` via the
 loader's `io` handle. `Scheduler.safepoint_requested` is a `std.atomic.Value(bool)`.
 
+## Stage 4d-4-iii(b2): real std.Thread carriers — LANDED (opt-in), 2026-08-21
+
+Real multicore parallelism now works. `JEBENA_CARRIERS=N` (N>1) spawns N-1
+`std.Thread` carriers; carrier 0 runs on the main OS thread. Each carrier owns
+its own `Budget` and runs `Scheduler.carrierLoop`: pop a ready fiber, re-point
+its frames at the carrier's budget, drive it, requeue on yield / retire on
+completion (`outstanding--`). Carriers exit when `outstanding==0` (all fibers
+done) or `shutdown` is set; the main thread joins the workers and returns the
+main fiber's result. `runMulti` orchestrates spawn+join; `runFiber` takes it only
+for the top-level run (`carriers_total==1` guard), so nested native re-entry
+stays single-carrier.
+
+**Blocking under multiple carriers is spin-wait, not parking (for now).** A
+native (`Thread.join0`) can't suspend the interpreter, so when `carriers_total>1`
+the joining carrier busy-waits `while (target.status != .done)`, polling the
+safepoint each spin, while the *other* carriers run the joinee. Correct and
+simple; real parking (yield the carrier back to `carrierLoop`) is a later
+optimization. The single-carrier path still inline-pumps the run-queue.
+
+**Proven:** `scripts/thread-stress.sh` runs 8 fibers × 1000 (AtomicInteger +
+AtomicLong) at `JEBENA_CARRIERS=4`, 10 reps, timeout-guarded: total is exactly
+24000 every time (no lost updates, no crash, no hang) AND `JEBENA_CARRIER_TRACE`
+confirms ≥2 (in practice all 4) distinct carriers ran work — genuine
+parallelism, not a serialized fallback. The default (1 carrier) stays
+byte-identical and deterministic; parallelism is strictly opt-in.
+
+**Why the stress workload is race-free here:** once running, the fibers touch
+only locked atomics (AtomicInteger/Long natives under `atomics_lock`) and the
+locked ready-queue; they allocate nothing in the hot loop (so no GC fires) and
+load no classes (all linked during single-threaded startup). So the moving GC
+and lazy class-loading paths are simply not exercised concurrently.
+
+**Known limitations (opt-in path only; default single carrier unaffected) —
+harden next:**
+- `Object.wait/notify` under `carriers_total>1` is NOT yet correct: the native
+  finds the calling fiber via `self.carrier.current`, which is null when workers
+  run on their own carrier structs. Not exercised by the gate at N>1 (the
+  wait/notify smoke runs at the default 1 carrier). Needs a frame→fiber lookup +
+  a spin-on-notified path mirroring `join0`.
+- Concurrent **lazy class loading / `getMirror` / string interning** are not yet
+  serialized (step (d)). The stress workload does all of these single-threaded
+  before the parallel phase, so they're safe there, but a program that first-
+  loads a class or interns from a worker under N>1 could race. Fix: a coarse
+  loader lock around load+register+getMirror+intern, released across `<clinit>`.
+- **Concurrent GC** at a safepoint is wired (all carriers poll `safepoint_requested`
+  in `carrierLoop`, the join spin, and `step()`), but not yet stress-tested under
+  real allocation pressure across carriers (the stress loop doesn't allocate).
+- Pre-existing: ~18 `DebugAllocator` leaks on the StressMain workload (in
+  `primitiveClass`'s `gpa.dupe` and friends) — present at HEAD before this change,
+  identical count at 1 and 4 carriers, so not a parallelism regression. Fix
+  separately.
+
 ## Policy (2026-08-21, from the user): thread-safety is now non-negotiable
 
 Every feature added from here on MUST:
