@@ -1771,6 +1771,53 @@ pub fn runInLoaderWithHeap(loader: *Loader, class: *const Class, name: []const u
     return runFiber(loader, rr.owner, heap, budget, c.code, c.max_stack, c.max_locals, slots[0..n], c.exception_table);
 }
 
+/// Build a `java.lang.String[]` on `heap` from raw UTF-8 argv, for a program's
+/// `main(String[])` entry point. Requires the real (non-stub) java.lang.String to
+/// be loaded (jbase on the classpath). No bytecode runs here, so no safepoint /
+/// GC can fire between the allocations; each heap.get is re-fetched right before
+/// use so no data pointer is held across an intervening allocation. Returns the
+/// array's heap id.
+pub fn buildArgsArray(loader: *Loader, heap: *Heap, argv: []const []const u8) RunError!u32 {
+    const str_class = loader.find("java/lang/String") orelse return error.LinkError;
+    if (str_class.is_stub) return error.LinkError; // a real main needs the real String
+    const vi = str_class.findField("value") orelse return error.LinkError;
+    const aid = try heap.allocArray(.reference, argv.len);
+    for (argv, 0..) |s, i| {
+        const chars = mutf8ToChars(heap.gpa, s) catch return error.OutOfMemory;
+        defer heap.gpa.free(chars);
+        const cid = try heap.allocArray(.int, chars.len);
+        switch (heap.get(cid).*) {
+            .array => |*arr| for (chars, 0..) |c, j| {
+                arr.data[j] = .{ .int = c };
+            },
+            else => return error.LinkError,
+        }
+        const sid = try heap.allocInstance(str_class);
+        switch (heap.get(sid).*) {
+            .instance => |*inst| inst.fields[vi] = .{ .reference = cid },
+            else => return error.LinkError,
+        }
+        switch (heap.get(aid).*) {
+            .array => |*arr| arr.data[i] = .{ .reference = sid },
+            else => return error.LinkError,
+        }
+    }
+    return aid;
+}
+
+/// Run a program's `public static void main(String[])`, building a real
+/// `String[]` from `argv`. Classes are initialized before the args are built so
+/// java.lang.String is ready; the args array is then rooted in main's local 0.
+pub fn runMain(loader: *Loader, class: *const Class, argv: []const []const u8, budget: *Budget) RunError!?Value {
+    var heap = Heap{ .gpa = loader.gpa };
+    if (loader.gc_interval) |gi| heap.gc_interval = gi;
+    defer heap.deinit();
+    for (0..loader.classes.count()) |i| try loader.ensureInit(loader.classes.get(i).*, &heap, budget);
+    const aid = try buildArgsArray(loader, &heap, argv);
+    const args = [_]Value{.{ .reference = aid }};
+    return runInLoaderWithHeap(loader, class, "main", "([Ljava/lang/String;)V", &args, budget, &heap);
+}
+
 fn eq2(a: []const u8, b: []const u8, x: []const u8, y: []const u8) bool {
     return std.mem.eql(u8, a, x) and std.mem.eql(u8, b, y);
 }

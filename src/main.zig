@@ -49,7 +49,8 @@ fn usage() void {
         \\usage:
         \\  jebena parse  <file.class>
         \\  jebena disasm <file.class>
-        \\  jebena run    <MainClass> <method> <file.class>...
+        \\  jebena run    <MainClass> <method> <file.class|dir>...
+        \\  jebena run    <MainClass> main <classpath>... -- <program args>...
         \\  jebena                 (no args: self-demo)
         \\
     , .{});
@@ -61,6 +62,16 @@ const RunResult = struct { value: ?IC.Value = null, err: ?anyerror = null };
 fn runEntry(loader: *IC.Loader, cls: *const IC.Class, method: []const u8, desc: []const u8, out: *RunResult) void {
     var b = IC.Budget{};
     out.value = IC.runInLoader(loader, cls, method, desc, &.{}, &b) catch |e| {
+        out.err = e;
+        return;
+    };
+}
+
+/// Entry point for a real program: run main(String[]) with argv marshalled into
+/// a Java String[]. main is void, so the result value is unused.
+fn runMainEntry(loader: *IC.Loader, cls: *const IC.Class, argv: []const []const u8, out: *RunResult) void {
+    var b = IC.Budget{};
+    out.value = IC.runMain(loader, cls, argv, &b) catch |e| {
         out.err = e;
         return;
     };
@@ -80,7 +91,15 @@ fn cmdRun(gpa: std.mem.Allocator, io: std.Io, it: *std.process.Args.Iterator, ca
     defer files.deinit(gpa);
     var cpdirs: std.ArrayList([]const u8) = .empty;
     defer cpdirs.deinit(gpa);
+    // Program arguments for a main(String[]) entry come after a `--` separator;
+    // everything before it is classpath (explicit .class files or directories).
+    var prog_args: std.ArrayList([]const u8) = .empty;
+    defer prog_args.deinit(gpa);
     while (it.next()) |pth| {
+        if (std.mem.eql(u8, pth, "--")) {
+            while (it.next()) |a| try prog_args.append(gpa, a);
+            break;
+        }
         if (std.mem.endsWith(u8, pth, ".class")) {
             try files.append(gpa, pth);
         } else {
@@ -210,6 +229,9 @@ fn cmdRun(gpa: std.mem.Allocator, io: std.Io, it: *std.process.Args.Iterator, ca
         std.debug.print("class not found: {s}\n", .{main_class});
         return error.ClassNotFound;
     };
+    // Prefer a static no-arg method (the differential/demo harness form). If none
+    // matches and the requested method is a `public static void main(String[])`,
+    // run it as a real program entry point with argv marshalled into a String[].
     var desc: ?[]const u8 = null;
     for (cls.methods) |m| {
         if (std.mem.eql(u8, m.name, method) and m.params.len == 0 and m.is_static) {
@@ -217,10 +239,32 @@ fn cmdRun(gpa: std.mem.Allocator, io: std.Io, it: *std.process.Args.Iterator, ca
             break;
         }
     }
-    const d = desc orelse {
-        std.debug.print("no static no-arg method '{s}' in {s}\n", .{ method, main_class });
-        return error.MethodNotFound;
-    };
+
+    if (desc == null) {
+        var has_main = false;
+        for (cls.methods) |m| {
+            if (std.mem.eql(u8, m.name, method) and m.is_static and
+                std.mem.eql(u8, m.descriptor, "([Ljava/lang/String;)V"))
+            {
+                has_main = true;
+                break;
+            }
+        }
+        if (!has_main) {
+            std.debug.print("no static no-arg method or main(String[]) '{s}' in {s}\n", .{ method, main_class });
+            return error.MethodNotFound;
+        }
+        // Program entry point: run main(String[]) on the big-stack thread.
+        var mresult = RunResult{};
+        const mt = try std.Thread.spawn(.{ .stack_size = 512 * 1024 * 1024 }, runMainEntry, .{ &loader, cls, prog_args.items, &mresult });
+        mt.join();
+        if (mresult.err) |e| {
+            std.debug.print("execution error: {s}\n", .{@errorName(e)});
+            return e;
+        }
+        return;
+    }
+    const d = desc.?;
 
     // Run on a thread with a large stack: the interpreter uses native recursion,
     // so deep Java recursion needs a big native stack (like a real JVM's -Xss).
