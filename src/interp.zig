@@ -48,6 +48,7 @@ pub const RunError = error{
     ArrayIndexOutOfBounds,
     JavaException,
     Truncated,
+    Yield,
 } || bc.DecodeError || std.mem.Allocator.Error;
 
 pub const Budget = struct {
@@ -57,6 +58,12 @@ pub const Budget = struct {
     max_depth: usize = 2500,
     /// Exception object id currently propagating up the native call stack.
     pending: ?u32 = null,
+    /// Reduction budget (BEAM-style): decremented per interpreted op; at zero
+    /// step() returns error.Yield so the driver can yield the fiber. Refilled to
+    /// reduction_quantum on each yield. A large default means single runs never
+    /// thrash; a scheduler (stage 3) sets a small quantum for fair preemption.
+    reductions: u32 = 4_000_000,
+    reduction_quantum: u32 = 4_000_000,
 };
 
 fn isTop(v: Value) bool {
@@ -576,6 +583,8 @@ fn opAt(code: []const u8, pc: usize) RunError!Op {
 fn step(f: *Frame) RunError!Op {
     f.budget.steps += 1;
     if (f.budget.steps > f.budget.max_steps) return error.StepLimitExceeded;
+    if (f.budget.reductions == 0) return error.Yield;
+    f.budget.reductions -= 1;
     return opAt(f.code, f.pc);
 }
 fn s8(code: []const u8, off: usize) RunError!i32 {
@@ -3741,7 +3750,15 @@ fn exec(alloc: std.mem.Allocator, class: ?*const Class, heap: ?*Heap, loader: *L
 
     while (call_stack.items.len > 0) {
         const top = call_stack.items[call_stack.items.len - 1];
-        const res = try runFrame(top);
+        const res = runFrame(top) catch |e| {
+            // Reduction budget exhausted: yield and resume. Single-fiber for now
+            // (run-to-completion); a scheduler will switch fibers here (stage 3).
+            if (e == error.Yield) {
+                budget.reductions = budget.reduction_quantum;
+                continue;
+            }
+            return e;
+        };
         switch (res) {
             .returned => |rv| {
                 const finished = call_stack.pop().?;
@@ -4925,6 +4942,22 @@ test "Recur: recursion still works" {
     defer arena.deinit();
     try testing.expectEqual(Value{ .int = 55 }, (try cls.callStatic("fib", "(I)I", &.{10})).?);
     try testing.expectEqual(Value{ .int = 12 }, (try cls.callStatic("gcd", "(II)I", &.{ 48, 36 })).?);
+}
+
+test "reduction yield points resume to the same result (BEAM-style preemption)" {
+    var cf: ClassFile = undefined;
+    var arena: std.heap.ArenaAllocator = undefined;
+    const cls = try loadClass("testdata/Recur.class", &cf, &arena);
+    defer cf.deinit();
+    defer arena.deinit();
+    // A tiny reduction quantum forces the interpreter to yield every few ops
+    // mid-execution (deep in the recursive fib frame stack); the driver must
+    // refill and resume, producing the identical result. Proves the resumable
+    // interpreter is correct across yields.
+    var b = Budget{ .reductions = 3, .reduction_quantum = 3 };
+    try testing.expectEqual(Value{ .int = 55 }, (try cls.callStaticValues("fib", "(I)I", &.{.{ .int = 10 }}, &b)).?);
+    var b2 = Budget{ .reductions = 1, .reduction_quantum = 1 };
+    try testing.expectEqual(Value{ .int = 12 }, (try cls.callStaticValues("gcd", "(II)I", &.{ .{ .int = 48 }, .{ .int = 36 } }, &b2)).?);
 }
 
 test "Numeric: long results" {
