@@ -259,10 +259,12 @@ fn cmdRun(gpa: std.mem.Allocator, io: std.Io, it: *std.process.Args.Iterator, ca
         const mt = try std.Thread.spawn(.{ .stack_size = 512 * 1024 * 1024 }, runMainEntry, .{ &loader, cls, prog_args.items, &mresult });
         mt.join();
         if (mresult.err) |e| {
-            std.debug.print("execution error: {s}\n", .{@errorName(e)});
-            return e;
+            // runMain already printed the java-style "Exception in thread main"
+            // line for an uncaught Java exception; other errors get a diagnostic.
+            if (e != error.JavaException) std.debug.print("execution error: {s}\n", .{@errorName(e)});
+            std.process.exit(1);
         }
-        return;
+        return; // clean exit -> status 0
     }
     const d = desc.?;
 

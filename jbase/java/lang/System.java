@@ -14,6 +14,8 @@ public final class System {
 
     public static native int identityHashCode(Object x);
 
+    public static native void exit(int status);
+
     public static String lineSeparator() {
         return "\n";
     }

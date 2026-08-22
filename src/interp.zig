@@ -1805,9 +1805,53 @@ pub fn buildArgsArray(loader: *Loader, heap: *Heap, argv: []const []const u8) Ru
     return aid;
 }
 
+/// Print an uncaught exception the way `java` does its first line:
+/// `Exception in thread "main" <binary.class.Name>[: <message>]`. A full stack
+/// trace needs StackTraceElement (not built yet); the type+message line matches.
+/// Must run while `heap` is still alive (before runMain's defer deinit).
+fn reportUncaught(loader: *Loader, heap: *Heap, eid: u32) void {
+    const io = loader.io orelse return;
+    const stderr = std.Io.File.stderr();
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(heap.gpa);
+    buf.appendSlice(heap.gpa, "Exception in thread \"main\" ") catch return;
+    // Binary class name: java/lang/RuntimeException -> java.lang.RuntimeException.
+    if (classOf(heap, eid)) |cls| {
+        for (cls.name) |c| buf.append(heap.gpa, if (c == '/') '.' else c) catch return;
+    } else {
+        buf.appendSlice(heap.gpa, "java.lang.Throwable") catch return;
+    }
+    // Append ": <detailMessage>" if the Throwable carries one.
+    if (classOf(heap, eid)) |cls| {
+        if (cls.findField("detailMessage")) |fi| {
+            const msg_ref = switch (heap.get(eid).*) {
+                .instance => |inst| inst.fields[fi],
+                else => Value{ .reference = null },
+            };
+            if (msg_ref == .reference) if (msg_ref.reference) |sid| {
+                var chars: std.ArrayList(i32) = .empty;
+                defer chars.deinit(heap.gpa);
+                if (appendStringObj(&chars, heap, sid)) |_| {
+                    buf.appendSlice(heap.gpa, ": ") catch return;
+                    var ebuf: [4]u8 = undefined;
+                    for (chars.items) |ci| {
+                        const cp: u21 = @intCast(@as(u32, @bitCast(ci)) & 0xFFFF);
+                        const n = std.unicode.utf8Encode(cp, &ebuf) catch continue;
+                        buf.appendSlice(heap.gpa, ebuf[0..n]) catch return;
+                    }
+                } else |_| {}
+            };
+        }
+    }
+    buf.append(heap.gpa, '\n') catch return;
+    stderr.writeStreamingAll(io, buf.items) catch {};
+}
+
 /// Run a program's `public static void main(String[])`, building a real
 /// `String[]` from `argv`. Classes are initialized before the args are built so
 /// java.lang.String is ready; the args array is then rooted in main's local 0.
+/// An uncaught exception is reported to stderr (java-style first line) and
+/// re-raised so the caller can set a non-zero exit code.
 pub fn runMain(loader: *Loader, class: *const Class, argv: []const []const u8, budget: *Budget) RunError!?Value {
     var heap = Heap{ .gpa = loader.gpa };
     if (loader.gc_interval) |gi| heap.gc_interval = gi;
@@ -1815,7 +1859,12 @@ pub fn runMain(loader: *Loader, class: *const Class, argv: []const []const u8, b
     for (0..loader.classes.count()) |i| try loader.ensureInit(loader.classes.get(i).*, &heap, budget);
     const aid = try buildArgsArray(loader, &heap, argv);
     const args = [_]Value{.{ .reference = aid }};
-    return runInLoaderWithHeap(loader, class, "main", "([Ljava/lang/String;)V", &args, budget, &heap);
+    return runInLoaderWithHeap(loader, class, "main", "([Ljava/lang/String;)V", &args, budget, &heap) catch |e| {
+        if (e == error.JavaException) {
+            if (budget.pending) |eid| reportUncaught(loader, &heap, eid);
+        }
+        return e;
+    };
 }
 
 fn eq2(a: []const u8, b: []const u8, x: []const u8, y: []const u8) bool {
@@ -4141,6 +4190,12 @@ fn nativeInvoke(f: *Frame, owner: *const Class, method: *const Class.Method, slo
             };
             return f.pushInt(if (r) |id| @bitCast(id) else 0);
         }
+        if (eq2(mn, md, "exit", "(I)V")) {
+            // Halt the whole VM with the given status (JVM semantics: no return,
+            // no further bytecode). The OS truncates the status to 8 bits.
+            const code = slots[method.params[0].slot].int;
+            std.process.exit(@truncate(@as(u32, @bitCast(code))));
+        }
         if (eq2(mn, md, "arraycopy", "(Ljava/lang/Object;ILjava/lang/Object;II)V")) {
             const heap = f.heap orelse return error.UnsupportedOpcode;
             const src = switch (slots[method.params[0].slot]) {
@@ -4977,6 +5032,10 @@ const Scheduler = struct {
     /// in a later sub-step).
     fn run(self: *Scheduler, budget: *Budget) RunError!void {
         self.carrier.budget = budget.*; // seed carrier 0 from the run budget
+        // Surface the main fiber's in-flight exception id back to the caller's
+        // budget (the fiber ran on a copy). No GC runs after the loop, so the id
+        // stays valid for the caller (e.g. runMain's uncaught-exception report).
+        defer budget.pending = self.carrier.budget.pending;
         try self.carrierLoop(&self.carrier);
     }
 
@@ -5004,6 +5063,7 @@ const Scheduler = struct {
             spawned += 1;
         }
         const main_err = self.carrierLoop(&carriers[0]);
+        budget.pending = carriers[0].budget.pending; // surface main fiber's in-flight exception
         _ = self.carriers_alive.fetchSub(1, .acq_rel); // carrier 0 is leaving
         self.shutdown.store(true, .release); // tell idle workers to exit
         for (threads[0..spawned]) |t| t.join();
