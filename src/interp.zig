@@ -361,7 +361,7 @@ fn remapRoots(f: *Frame, forwarding: []const u32) void {
     // Parked scheduler fibers (NOT the running one — the parent chain already
     // covered it, and remapping is not idempotent).
     for (f.loader.scheduler.all.items) |fib| {
-        if (fib == f.loader.scheduler.current) continue;
+        if (fib == f.loader.scheduler.carrier.current) continue;
         for (fib.call_stack.items) |ff| {
             for (ff.stack[0..ff.sp]) |*v| remapValuePtr(v, forwarding);
             for (ff.locals) |*v| remapValuePtr(v, forwarding);
@@ -3250,7 +3250,7 @@ fn nativeInvoke(f: *Frame, owner: *const Class, method: *const Class.Method, slo
                 .reference => |r| r orelse return error.NullPointer,
                 else => return error.TypeMismatch,
             };
-            const fib = f.loader.scheduler.current orelse return; // no scheduler: no-op
+            const fib = f.loader.scheduler.carrier.current orelse return; // no scheduler: no-op
             fib.waiting_on = recv;
             fib.notified = false;
             try f.loader.scheduler.waitPump(fib, f.budget);
@@ -3902,6 +3902,13 @@ const Fiber = struct {
     }
 };
 
+/// A carrier: one unit of execution (later one per CPU / one std.Thread). Owns
+/// the fiber it is currently running. Stage 4d-1 uses a single carrier.
+const Carrier = struct {
+    id: u32 = 0,
+    current: ?*Fiber = null,
+};
+
 /// Cooperative scheduler over green-thread fibers (single carrier for now).
 /// Owned by the Loader so natives (Thread.start etc.) can reach it. FIFO
 /// run-queue; run-to-completion between reduction yields keeps scheduling
@@ -3911,7 +3918,7 @@ const Scheduler = struct {
     gpa: std.mem.Allocator,
     ready: std.ArrayList(*Fiber) = .empty,
     all: std.ArrayList(*Fiber) = .empty,
-    current: ?*Fiber = null,
+    carrier: Carrier = .{},
     next_id: u64 = 0,
     /// Stop-the-world request flag: a carrier sets it, all carriers park at their
     /// next safepoint poll, GC runs, then it clears. Atomic for cross-carrier
@@ -3935,7 +3942,7 @@ const Scheduler = struct {
         }
         self.all.clearRetainingCapacity();
         self.ready.clearRetainingCapacity();
-        self.current = null;
+        self.carrier.current = null;
     }
 
     /// Create a fiber around an already-built base frame and enqueue it ready.
@@ -3959,15 +3966,15 @@ const Scheduler = struct {
     fn run(self: *Scheduler, budget: *Budget) RunError!void {
         while (self.ready.items.len > 0) {
             const fib = self.ready.orderedRemove(0);
-            self.current = fib;
+            self.carrier.current = fib;
             fib.status = .running;
             const outcome = driveFiber(fib, budget) catch |e| {
                 fib.err = e;
                 fib.status = .done;
-                self.current = null;
+                self.carrier.current = null;
                 return e;
             };
-            self.current = null;
+            self.carrier.current = null;
             switch (outcome) {
                 .yielded => {
                     budget.reductions = budget.reduction_quantum;
@@ -4000,12 +4007,12 @@ const Scheduler = struct {
     /// runnable — a spurious return, which Java code tolerates via a while-loop
     /// re-check). Backs Object.wait() on the cooperative single carrier.
     fn waitPump(self: *Scheduler, waiter: *Fiber, budget: *Budget) RunError!void {
-        const saved = self.current;
-        defer self.current = saved;
+        const saved = self.carrier.current;
+        defer self.carrier.current = saved;
         while (!waiter.notified) {
             if (self.ready.items.len == 0) break;
             const fib = self.ready.orderedRemove(0);
-            self.current = fib;
+            self.carrier.current = fib;
             fib.status = .running;
             const outcome = driveFiber(fib, budget) catch |e| {
                 fib.err = e;
@@ -4028,12 +4035,12 @@ const Scheduler = struct {
     /// cooperative single carrier: a native can't suspend the interpreter, so it
     /// pumps the rest of the run-queue inline until its await condition holds.
     fn pump(self: *Scheduler, target: *Fiber, budget: *Budget) RunError!void {
-        const saved = self.current;
-        defer self.current = saved;
+        const saved = self.carrier.current;
+        defer self.carrier.current = saved;
         while (target.status != .done) {
             if (self.ready.items.len == 0) break; // nothing runnable (avoid hang)
             const fib = self.ready.orderedRemove(0);
-            self.current = fib;
+            self.carrier.current = fib;
             fib.status = .running;
             const outcome = driveFiber(fib, budget) catch |e| {
                 fib.err = e;
