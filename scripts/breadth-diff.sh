@@ -16,8 +16,8 @@ rm -rf "$OUT"; mkdir -p "$OUT"
 
 [ -d "$ROOT/jbase/out" ] || bash "$ROOT/scripts/build-jbase.sh" >/dev/null 2>&1
 "$JAVAC" -d "$OUT" "$ROOT"/test/diff/DiffColl.java "$ROOT"/test/diff/DiffRegex.java \
-  "$ROOT"/test/diff/DiffStream.java "$ROOT"/test/diff/DiffString.java "$ROOT"/test/diff/Driver.java \
-  || { echo "javac failed"; exit 1; }
+  "$ROOT"/test/diff/DiffStream.java "$ROOT"/test/diff/DiffString.java "$ROOT"/test/diff/DiffTrace.java \
+  "$ROOT"/test/diff/Driver.java || { echo "javac failed"; exit 1; }
 "$ZIG" build --build-file "$ROOT/build.zig" >/dev/null 2>&1
 JEBENA="$ROOT/zig-out/bin/jebena"
 
@@ -34,12 +34,14 @@ STREAM="mapFilterSum countDistinct sortedLimit intRange intRangeClosedSq mapToIn
 reduceMax joiningLen groupingSize skipCount findFirstEven matchFlags boxedSum toListSize"
 STRING="contains repeat repeatContent isBlank strip stripEmpty join joinEmpty \
 splitComma splitTrailingEmpty splitLimit splitRegex replaceSeq replaceEmptyTarget matches"
+TRACE="topLine topMethod topClass lineOrder fileName"
 
 CASES=""
 for m in $COLL; do CASES="$CASES DiffColl:$m"; done
 for m in $REGEX; do CASES="$CASES DiffRegex:$m"; done
 for m in $STREAM; do CASES="$CASES DiffStream:$m"; done
 for m in $STRING; do CASES="$CASES DiffString:$m"; done
+for m in $TRACE; do CASES="$CASES DiffTrace:$m"; done
 
 pass=0; fail=0
 printf "%-24s %12s %12s   %s\n" CASE JAVA JEBENA RESULT

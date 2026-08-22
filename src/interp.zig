@@ -1985,89 +1985,167 @@ fn throwableFillInStackTrace(f: *Frame, slots: []const Value) RunError!void {
     return f.push(.{ .reference = this_id });
 }
 
-/// Print an uncaught exception the way `java` does its first line:
-/// `Exception in thread "main" <binary.class.Name>[: <message>]`. A full stack
-/// trace needs StackTraceElement (not built yet); the type+message line matches.
-/// Must run while `heap` is still alive (before runMain's defer deinit).
-fn reportUncaught(loader: *Loader, heap: *Heap, eid: u32) void {
-    const io = loader.io orelse return;
-    const stderr = std.Io.File.stderr();
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(heap.gpa);
-    buf.appendSlice(heap.gpa, "Exception in thread \"main\" ") catch return;
-    // Binary class name: java/lang/RuntimeException -> java.lang.RuntimeException.
+/// Append a Throwable's `<binary.class.Name>[: <message>]` (its toString form).
+fn appendThrowableTypeMsg(buf: *std.ArrayList(u8), heap: *Heap, eid: u32) void {
     if (classOf(heap, eid)) |cls| {
         for (cls.name) |c| buf.append(heap.gpa, if (c == '/') '.' else c) catch return;
-    } else {
-        buf.appendSlice(heap.gpa, "java.lang.Throwable") catch return;
-    }
-    // Append ": <detailMessage>" if the Throwable carries one.
-    if (classOf(heap, eid)) |cls| {
         if (cls.findField("detailMessage")) |fi| {
             const msg_ref = switch (heap.get(eid).*) {
                 .instance => |inst| inst.fields[fi],
                 else => Value{ .reference = null },
             };
             if (msg_ref == .reference) if (msg_ref.reference) |sid| {
-                var chars: std.ArrayList(i32) = .empty;
-                defer chars.deinit(heap.gpa);
-                if (appendStringObj(&chars, heap, sid)) |_| {
-                    buf.appendSlice(heap.gpa, ": ") catch return;
-                    var ebuf: [4]u8 = undefined;
-                    for (chars.items) |ci| {
-                        const cp: u21 = @intCast(@as(u32, @bitCast(ci)) & 0xFFFF);
-                        const n = std.unicode.utf8Encode(cp, &ebuf) catch continue;
-                        buf.appendSlice(heap.gpa, ebuf[0..n]) catch return;
-                    }
-                } else |_| {}
+                buf.appendSlice(heap.gpa, ": ") catch return;
+                _ = appendJavaStringChars(buf, heap, sid);
             };
         }
+    } else {
+        buf.appendSlice(heap.gpa, "java.lang.Throwable") catch return;
     }
-    buf.append(heap.gpa, '\n') catch return;
-    // Stack-trace frames: `\tat <Class>.<method>(<File>:<line>)`, one per element
-    // of the captured stackTrace array (declaringClass is already dotted).
-    if (classOf(heap, eid)) |cls| {
-        if (cls.findField("stackTrace")) |sti| {
-            const arr_ref = switch (heap.get(eid).*) {
-                .instance => |inst| inst.fields[sti],
-                else => Value{ .reference = null },
-            };
-            if (arr_ref == .reference) if (arr_ref.reference) |aid| {
-                const elems: []const Value = switch (heap.get(aid).*) {
-                    .array => |a| a.data,
-                    else => &.{},
-                };
-                for (elems) |ev| {
-                    const ste_id = switch (ev) {
-                        .reference => |r| r orelse continue,
-                        else => continue,
-                    };
-                    const ecls = classOf(heap, ste_id) orelse continue;
-                    buf.appendSlice(heap.gpa, "\tat ") catch return;
-                    appendInstStringField(&buf, heap, ecls, ste_id, "declaringClass");
-                    buf.append(heap.gpa, '.') catch return;
-                    appendInstStringField(&buf, heap, ecls, ste_id, "methodName");
-                    buf.append(heap.gpa, '(') catch return;
-                    const has_file = appendInstStringFieldReported(&buf, heap, ecls, ste_id, "fileName");
-                    const line: i32 = if (ecls.findField("lineNumber")) |li| switch (heap.get(ste_id).*) {
-                        .instance => |inst| inst.fields[li].int,
-                        else => -1,
-                    } else -1;
-                    if (has_file) {
-                        if (line >= 0) {
-                            buf.append(heap.gpa, ':') catch return;
-                            var nb: [12]u8 = undefined;
-                            const ns = std.fmt.bufPrint(&nb, "{d}", .{line}) catch "";
-                            buf.appendSlice(heap.gpa, ns) catch return;
-                        }
-                    } else {
-                        buf.appendSlice(heap.gpa, "Unknown Source") catch return;
-                    }
-                    buf.append(heap.gpa, ')') catch return;
-                    buf.append(heap.gpa, '\n') catch return;
-                }
-            };
+}
+
+/// Append one `\tat <Class>.<method>(<File>:<line>)\n` frame line.
+fn appendFrameLine(buf: *std.ArrayList(u8), heap: *Heap, ste_id: u32) void {
+    const ecls = classOf(heap, ste_id) orelse return;
+    buf.appendSlice(heap.gpa, "\tat ") catch return;
+    appendInstStringField(buf, heap, ecls, ste_id, "declaringClass");
+    buf.append(heap.gpa, '.') catch return;
+    appendInstStringField(buf, heap, ecls, ste_id, "methodName");
+    buf.append(heap.gpa, '(') catch return;
+    const has_file = appendInstStringFieldReported(buf, heap, ecls, ste_id, "fileName");
+    const line: i32 = if (ecls.findField("lineNumber")) |li| switch (heap.get(ste_id).*) {
+        .instance => |inst| inst.fields[li].int,
+        else => -1,
+    } else -1;
+    if (has_file) {
+        if (line >= 0) {
+            buf.append(heap.gpa, ':') catch return;
+            var nb: [12]u8 = undefined;
+            const ns = std.fmt.bufPrint(&nb, "{d}", .{line}) catch "";
+            buf.appendSlice(heap.gpa, ns) catch return;
         }
+    } else {
+        buf.appendSlice(heap.gpa, "Unknown Source") catch return;
+    }
+    buf.append(heap.gpa, ')') catch return;
+    buf.append(heap.gpa, '\n') catch return;
+}
+
+/// The captured stackTrace element ids of a Throwable (empty if none).
+fn throwableFrames(heap: *Heap, eid: u32) []const Value {
+    const cls = classOf(heap, eid) orelse return &.{};
+    const sti = cls.findField("stackTrace") orelse return &.{};
+    const arr_ref = switch (heap.get(eid).*) {
+        .instance => |inst| inst.fields[sti],
+        else => return &.{},
+    };
+    const aid = switch (arr_ref) {
+        .reference => |r| r orelse return &.{},
+        else => return &.{},
+    };
+    return switch (heap.get(aid).*) {
+        .array => |a| a.data,
+        else => &.{},
+    };
+}
+
+/// The cause of a Throwable, or null (the JDK sentinel is cause == this).
+fn throwableCause(heap: *Heap, eid: u32) ?u32 {
+    const cls = classOf(heap, eid) orelse return null;
+    const ci = cls.findField("cause") orelse return null;
+    const cref = switch (heap.get(eid).*) {
+        .instance => |inst| inst.fields[ci],
+        else => return null,
+    };
+    const cid = switch (cref) {
+        .reference => |r| r orelse return null,
+        else => return null,
+    };
+    return if (cid == eid) null else cid;
+}
+
+/// Compare two StackTraceElement instances by (class, method, file, line).
+fn steEquals(heap: *Heap, a: u32, b: u32) bool {
+    const ca = classOf(heap, a) orelse return false;
+    const cb = classOf(heap, b) orelse return false;
+    inline for (.{ "declaringClass", "methodName", "fileName" }) |field| {
+        var sa: std.ArrayList(u8) = .empty;
+        defer sa.deinit(heap.gpa);
+        var sb: std.ArrayList(u8) = .empty;
+        defer sb.deinit(heap.gpa);
+        _ = appendInstStringField(&sa, heap, ca, a, field);
+        _ = appendInstStringField(&sb, heap, cb, b, field);
+        if (!std.mem.eql(u8, sa.items, sb.items)) return false;
+    }
+    const la: i32 = if (ca.findField("lineNumber")) |li| heap.get(a).instance.fields[li].int else -1;
+    const lb: i32 = if (cb.findField("lineNumber")) |li| heap.get(b).instance.fields[li].int else -1;
+    return la == lb;
+}
+
+/// Print an uncaught exception exactly as `java` does: the type+message line,
+/// each `\tat` frame, then the `Caused by:` chain with common-frame elision
+/// (`\t... N more`). Must run while `heap` is still alive.
+fn reportUncaught(loader: *Loader, heap: *Heap, eid: u32) void {
+    const io = loader.io orelse return;
+    const stderr = std.Io.File.stderr();
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(heap.gpa);
+    buf.appendSlice(heap.gpa, "Exception in thread \"main\" ") catch return;
+    appendThrowableTypeMsg(&buf, heap, eid);
+    buf.append(heap.gpa, '\n') catch return;
+    const frames = throwableFrames(heap, eid);
+    for (frames) |ev| {
+        const ste_id = switch (ev) {
+            .reference => |r| r orelse continue,
+            else => continue,
+        };
+        appendFrameLine(&buf, heap, ste_id);
+    }
+    // Cause chain with common-frame elision (mirrors JDK printEnclosedStackTrace).
+    var enclosing = frames;
+    var cause = throwableCause(heap, eid);
+    var guard: u32 = 0;
+    while (cause) |cid| {
+        guard += 1;
+        if (guard > 64) break; // defensive against a pathological cause cycle
+        const cframes = throwableFrames(heap, cid);
+        var m: isize = @as(isize, @intCast(cframes.len)) - 1;
+        var n: isize = @as(isize, @intCast(enclosing.len)) - 1;
+        while (m >= 0 and n >= 0) {
+            const cf = switch (cframes[@intCast(m)]) {
+                .reference => |r| r orelse break,
+                else => break,
+            };
+            const ef = switch (enclosing[@intCast(n)]) {
+                .reference => |r| r orelse break,
+                else => break,
+            };
+            if (!steEquals(heap, cf, ef)) break;
+            m -= 1;
+            n -= 1;
+        }
+        const common_signed: isize = @as(isize, @intCast(cframes.len)) - 1 - m;
+        const common: usize = if (common_signed > 0) @intCast(common_signed) else 0;
+        buf.appendSlice(heap.gpa, "Caused by: ") catch return;
+        appendThrowableTypeMsg(&buf, heap, cid);
+        buf.append(heap.gpa, '\n') catch return;
+        var i: isize = 0;
+        while (i <= m) : (i += 1) {
+            const ste_id = switch (cframes[@intCast(i)]) {
+                .reference => |r| r orelse continue,
+                else => continue,
+            };
+            appendFrameLine(&buf, heap, ste_id);
+        }
+        if (common != 0) {
+            buf.appendSlice(heap.gpa, "\t... ") catch return;
+            var nb: [12]u8 = undefined;
+            const ns = std.fmt.bufPrint(&nb, "{d}", .{common}) catch "";
+            buf.appendSlice(heap.gpa, ns) catch return;
+            buf.appendSlice(heap.gpa, " more\n") catch return;
+        }
+        enclosing = cframes;
+        cause = throwableCause(heap, cid);
     }
     stderr.writeStreamingAll(io, buf.items) catch {};
 }
@@ -2088,6 +2166,11 @@ fn appendInstStringFieldReported(buf: *std.ArrayList(u8), heap: *Heap, cls: *con
         .reference => |r| r orelse return false,
         else => return false,
     };
+    return appendJavaStringChars(buf, heap, sid);
+}
+
+/// Append the UTF-8 of a java.lang.String heap object to `buf`; true on success.
+fn appendJavaStringChars(buf: *std.ArrayList(u8), heap: *Heap, sid: u32) bool {
     var chars: std.ArrayList(i32) = .empty;
     defer chars.deinit(heap.gpa);
     appendStringObj(&chars, heap, sid) catch return false;

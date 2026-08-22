@@ -35,6 +35,31 @@ public final class StackTraceElement {
         return lineNumber;
     }
 
+    public boolean equals(Object obj) {
+        if (obj == this) {
+            return true;
+        }
+        if (!(obj instanceof StackTraceElement)) {
+            return false;
+        }
+        StackTraceElement e = (StackTraceElement) obj;
+        return e.declaringClass.equals(declaringClass)
+                && e.lineNumber == lineNumber
+                && eq(methodName, e.methodName)
+                && eq(fileName, e.fileName);
+    }
+
+    private static boolean eq(Object a, Object b) {
+        return (a == null) ? (b == null) : a.equals(b);
+    }
+
+    public int hashCode() {
+        int result = 31 * declaringClass.hashCode() + methodName.hashCode();
+        result = 31 * result + (fileName == null ? 0 : fileName.hashCode());
+        result = 31 * result + lineNumber;
+        return result;
+    }
+
     public String toString() {
         String base = declaringClass + "." + methodName;
         if (fileName != null) {
