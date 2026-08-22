@@ -793,12 +793,35 @@ public class JBaseSmoke {
         ath.join();
         r += threadAlloc;                                      // len("0..49") = 90
 
+
+        // Object.wait/notify handoff between two fibers (deterministic).
+        Runnable wproducer = () -> {
+            synchronized (waitLock) {
+                waitFlag = 1;
+                waitLock.notify();
+            }
+        };
+        Thread wpt = new Thread(wproducer);
+        synchronized (waitLock) {
+            wpt.start();
+            while (waitFlag == 0) {
+                try {
+                    waitLock.wait();
+                } catch (InterruptedException e) {
+                }
+            }
+        }
+        wpt.join();
+        r += waitFlag * 33;                                    // 33
+
         return r;
     }
 
     static int threadCounter = 0;
     static int threadSub = 0;
     static int threadAlloc = 0;
+    static final Object waitLock = new Object();
+    static int waitFlag = 0;
 
     static class Worker extends Thread {
         public void run() {

@@ -26,5 +26,13 @@ public class Object {
 
     // VM-provided: a stable identity hash for the object. Wired to Zig until the
     // real object-header hash lands.
+    public final native void wait();
+
+    public final native void wait(long timeout);
+
+    public final native void notify();
+
+    public final native void notifyAll();
+
     static native int identityHashCode(Object o);
 }

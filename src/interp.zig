@@ -402,6 +402,7 @@ fn collectMajor(f: *Frame) void {
             for (ff.stack[0..ff.sp]) |v| markValue(heap, v);
             for (ff.locals) |v| markValue(heap, v);
         }
+        if (fib.waiting_on) |id| markObject(heap, id);
     }
     for (f.loader.statics.items) |st| for (st) |v| markValue(heap, v);
     if (f.budget.pending) |eid| markObject(heap, eid);
@@ -446,6 +447,9 @@ fn collectMajor(f: *Frame) void {
     }
     for (f.loader.mirrors.items) |*m| if (m.*) |id| {
         m.* = forwarding[id];
+    };
+    for (f.loader.scheduler.all.items) |fib| if (fib.waiting_on) |id| {
+        fib.waiting_on = forwarding[id];
     };
 
     // 4. Move live objects (and their generation/remembered bits) to new slots.
@@ -504,6 +508,7 @@ fn collectMinor(f: *Frame) void {
             for (ff.stack[0..ff.sp]) |v| markYoungValue(heap, v);
             for (ff.locals) |v| markYoungValue(heap, v);
         }
+        if (fib.waiting_on) |id| markYoungObject(heap, id);
     }
     for (f.loader.statics.items) |st| for (st) |v| markYoungValue(heap, v);
     if (f.budget.pending) |eid| markYoungObject(heap, eid);
@@ -3237,6 +3242,42 @@ fn nativeInvoke(f: *Frame, owner: *const Class, method: *const Class.Method, slo
             };
             return f.pushInt(if (r) |id| @bitCast(id) else 0);
         }
+        if (eq2(mn, md, "wait", "()V") or eq2(mn, md, "wait", "(J)V")) {
+            const recv = switch (slots[0]) {
+                .reference => |r| r orelse return error.NullPointer,
+                else => return error.TypeMismatch,
+            };
+            const fib = f.loader.scheduler.current orelse return; // no scheduler: no-op
+            fib.waiting_on = recv;
+            fib.notified = false;
+            try f.loader.scheduler.waitPump(fib, f.budget);
+            fib.waiting_on = null;
+            fib.notified = false;
+            return;
+        }
+        if (eq2(mn, md, "notify", "()V")) {
+            const recv = switch (slots[0]) {
+                .reference => |r| r orelse return error.NullPointer,
+                else => return error.TypeMismatch,
+            };
+            for (f.loader.scheduler.all.items) |w| {
+                if (!w.notified and w.waiting_on == recv) {
+                    w.notified = true;
+                    break;
+                }
+            }
+            return;
+        }
+        if (eq2(mn, md, "notifyAll", "()V")) {
+            const recv = switch (slots[0]) {
+                .reference => |r| r orelse return error.NullPointer,
+                else => return error.TypeMismatch,
+            };
+            for (f.loader.scheduler.all.items) |w| {
+                if (w.waiting_on == recv) w.notified = true;
+            }
+            return;
+        }
     }
     if (std.mem.eql(u8, on, "java/lang/Thread")) {
         const heap = f.heap orelse return error.UnsupportedOpcode;
@@ -3847,6 +3888,10 @@ const Fiber = struct {
     err: ?RunError = null,
     /// The java.lang.Thread object backing this fiber (heap id), if any.
     thread_id: ?u32 = null,
+    /// Monitor object this fiber is blocked in Object.wait() on (heap id), or null.
+    waiting_on: ?u32 = null,
+    /// Set by notify()/notifyAll() to wake this waiting fiber.
+    notified: bool = false,
 
     fn deinit(self: *Fiber) void {
         for (self.call_stack.items) |cf| freeChildFrame(self.alloc, cf);
@@ -3930,6 +3975,33 @@ const Scheduler = struct {
     fn fiberById(self: *Scheduler, id: u64) ?*Fiber {
         for (self.all.items) |fib| if (fib.id == id) return fib;
         return null;
+    }
+
+    /// Run ready fibers until the given waiter has been notified (or nothing is
+    /// runnable — a spurious return, which Java code tolerates via a while-loop
+    /// re-check). Backs Object.wait() on the cooperative single carrier.
+    fn waitPump(self: *Scheduler, waiter: *Fiber, budget: *Budget) RunError!void {
+        const saved = self.current;
+        defer self.current = saved;
+        while (!waiter.notified) {
+            if (self.ready.items.len == 0) break;
+            const fib = self.ready.orderedRemove(0);
+            self.current = fib;
+            fib.status = .running;
+            const outcome = driveFiber(fib, budget) catch |e| {
+                fib.err = e;
+                fib.status = .done;
+                continue;
+            };
+            switch (outcome) {
+                .yielded => {
+                    budget.reductions = budget.reduction_quantum;
+                    fib.status = .ready;
+                    self.ready.append(self.gpa, fib) catch return error.OutOfMemory;
+                },
+                .completed => fib.status = .done,
+            }
+        }
     }
 
     /// Run ready fibers (other than the caller, which is blocked in a native)
