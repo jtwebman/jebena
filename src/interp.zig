@@ -4078,6 +4078,10 @@ const Scheduler = struct {
     /// 4d-4). carriers_total stays 1 (the active count) until real carrier threads
     /// are actually spawned; this just records the request.
     requested_carriers: u32 = 1,
+    /// Live (not-yet-done) fiber count; a carrier exits its loop once this hits 0.
+    /// Incremented on spawn, decremented on completion. Atomic for multi-carrier.
+    outstanding: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
+    shutdown: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     /// Guards the shared ready-queue + all-registry + next_id (Stage 4d). Taken
     /// only for the brief queue mutations, never across driveFiber. Uncontended
     /// with one carrier.
@@ -4101,6 +4105,8 @@ const Scheduler = struct {
         self.all.clearRetainingCapacity();
         self.ready.clearRetainingCapacity();
         self.carrier.current = null;
+        self.outstanding.store(0, .release);
+        self.shutdown.store(false, .release);
     }
 
     /// Create a fiber around an already-built base frame and enqueue it ready.
@@ -4130,6 +4136,7 @@ const Scheduler = struct {
         errdefer _ = self.ready.pop();
         try fib.call_stack.append(self.gpa, base); // fib now owns base
         self.next_id += 1;
+        _ = self.outstanding.fetchAdd(1, .acq_rel);
         return fib;
     }
 
@@ -4138,25 +4145,43 @@ const Scheduler = struct {
     /// in a later sub-step).
     fn run(self: *Scheduler, budget: *Budget) RunError!void {
         self.carrier.budget = budget.*; // seed carrier 0 from the run budget
-        const cb = &self.carrier.budget;
-        while (self.popReady()) |fib| {
+        try self.carrierLoop(&self.carrier);
+    }
+
+    /// The loop a single carrier runs: pull a ready fiber, drive it, requeue on
+    /// yield / retire (outstanding--) on completion. When nothing is ready, exit
+    /// once no fibers remain (or shutdown), else poll the safepoint and spin.
+    /// One carrier today; 4d-4-iii(b) runs N of these on N std.Threads at once.
+    fn carrierLoop(self: *Scheduler, carrier: *Carrier) RunError!void {
+        const cb = &carrier.budget;
+        while (true) {
+            const fib = self.popReady() orelse {
+                if (self.shutdown.load(.acquire) or self.outstanding.load(.acquire) == 0) return;
+                if (self.safepoint_requested.load(.acquire)) self.waitForSafepointRelease();
+                std.atomic.spinLoopHint();
+                continue;
+            };
             for (fib.call_stack.items) |fr| fr.budget = cb; // this carrier now owns the fiber
-            self.carrier.current = fib;
+            carrier.current = fib;
             fib.status = .running;
             const outcome = driveFiber(fib, cb) catch |e| {
                 fib.err = e;
                 fib.status = .done;
-                self.carrier.current = null;
+                carrier.current = null;
+                _ = self.outstanding.fetchSub(1, .acq_rel);
                 return e;
             };
-            self.carrier.current = null;
+            carrier.current = null;
             switch (outcome) {
                 .yielded => {
                     cb.reductions = cb.reduction_quantum;
                     fib.status = .ready;
                     try self.pushReady(fib);
                 },
-                .completed => fib.status = .done,
+                .completed => {
+                    fib.status = .done;
+                    _ = self.outstanding.fetchSub(1, .acq_rel);
+                },
             }
         }
     }
@@ -4204,6 +4229,7 @@ const Scheduler = struct {
             const outcome = driveFiber(fib, budget) catch |e| {
                 fib.err = e;
                 fib.status = .done;
+                _ = self.outstanding.fetchSub(1, .acq_rel);
                 continue;
             };
             switch (outcome) {
@@ -4212,7 +4238,10 @@ const Scheduler = struct {
                     fib.status = .ready;
                     try self.pushReady(fib);
                 },
-                .completed => fib.status = .done,
+                .completed => {
+                    fib.status = .done;
+                    _ = self.outstanding.fetchSub(1, .acq_rel);
+                },
             }
         }
     }
@@ -4232,6 +4261,7 @@ const Scheduler = struct {
             const outcome = driveFiber(fib, budget) catch |e| {
                 fib.err = e;
                 fib.status = .done;
+                _ = self.outstanding.fetchSub(1, .acq_rel);
                 continue; // spawned-fiber error is isolated (does not kill the pumper)
             };
             switch (outcome) {
@@ -4240,7 +4270,10 @@ const Scheduler = struct {
                     fib.status = .ready;
                     try self.pushReady(fib);
                 },
-                .completed => fib.status = .done,
+                .completed => {
+                    fib.status = .done;
+                    _ = self.outstanding.fetchSub(1, .acq_rel);
+                },
             }
         }
     }
