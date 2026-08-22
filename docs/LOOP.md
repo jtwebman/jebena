@@ -42,6 +42,7 @@ Each iteration is one small, verified, committed step. Never leave the tree red.
    - `bash scripts/calc-smoke.sh` — a recursive-descent integer calculator (tokenize/parse/eval, +-*/ + parens + unary minus, a cross-frame divide-by-zero caught as ArithmeticException "/ by zero"); full stdout byte-identical to real java
    - `bash scripts/json-smoke.sh` — a JSON-ish pretty-printer over a nested LinkedHashMap/ArrayList model (recursion + instanceof dispatch + ordered iteration + StringBuilder + boxing/null/empty); full stdout byte-identical to real java
    - `bash scripts/cch-compute-stress.sh` — ConcurrentHashMap.computeIfAbsent single-create atomicity: 8 fibers race to create+increment a shared AtomicInteger per key (5 keys) -> 40005 at carriers 1 & 4 (+GC), matches real java
+   - `bash scripts/rpn-smoke.sh` — an RPN integer evaluator over ArrayDeque (push/pop/size + split + parseInt + arithmetic + caught ArithmeticException/IllegalStateException); full stdout byte-identical to real java
    - `bash scripts/portability-check.sh` — VM cross-compiles for macOS/Linux (aarch64/x86_64)
    - `zig fmt --check src/ build.zig` — formatted
    If anything fails: fix it, or revert the change. Do not commit red.
