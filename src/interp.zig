@@ -925,7 +925,7 @@ pub const Class = struct {
     }
     /// Like find, but also returns the class that declares the method (which owns
     /// the code and its constant pool -- essential for inherited methods).
-    const Resolved = struct { method: *const Method, owner: *const Class };
+    pub const Resolved = struct { method: *const Method, owner: *const Class };
     fn resolve(self: *const Class, name: []const u8, desc: []const u8) ?Resolved {
         var c: ?*const Class = self;
         while (c) |cc| {
@@ -1137,6 +1137,28 @@ fn computeParams(gpa: std.mem.Allocator, mdesc: []const u8, is_static: bool) Run
     return .{ .params = params, .arg_slots = slot };
 }
 
+fn findDefaultInInterface(f: *Frame, iface_name: []const u8, name: []const u8, desc: []const u8) ?Class.Resolved {
+    const ic = f.loader.find(iface_name) orelse return null;
+    for (ic.methods) |*m| {
+        if (m.code != null and std.mem.eql(u8, m.name, name) and std.mem.eql(u8, m.descriptor, desc)) {
+            return .{ .method = m, .owner = ic };
+        }
+    }
+    for (ic.interfaces) |sup| {
+        if (findDefaultInInterface(f, sup, name, desc)) |res| return res;
+    }
+    return null;
+}
+fn resolveInterfaceDefault(f: *Frame, start: *const Class, name: []const u8, desc: []const u8) ?Class.Resolved {
+    var c: ?*const Class = start;
+    while (c) |cc| {
+        for (cc.interfaces) |ifn| {
+            if (findDefaultInInterface(f, ifn, name, desc)) |res| return res;
+        }
+        c = cc.super;
+    }
+    return null;
+}
 fn invokeInstance(f: *Frame, cls: *const Class, code: []const u8, is_special: bool) RunError!void {
     const idx = try u16At(code, f.pc + 1);
     const c = cls.cp.get(idx) catch return error.LinkError;
@@ -1196,7 +1218,7 @@ fn invokeInstance(f: *Frame, cls: *const Class, code: []const u8, is_special: bo
         else => return error.LinkError,
     };
     if (rclass.is_proxy) return proxyDispatch(f, oid, cname, mname, mdesc, slots, pl.params);
-    const tr = rclass.resolve(mname, mdesc) orelse return error.MethodNotFound;
+    const tr = rclass.resolve(mname, mdesc) orelse (resolveInterfaceDefault(f, rclass, mname, mdesc) orelse return error.MethodNotFound);
     const target = tr.method;
     const owner = tr.owner;
 
@@ -3166,6 +3188,7 @@ fn invokeStatic(f: *Frame, cls: *const Class, code: []const u8) RunError!void {
     const mref = cls.cp.get(idx) catch return error.LinkError;
     const ref = switch (mref.*) {
         .methodref => |r| r,
+        .interface_methodref => |r| r, // static interface methods (Java 8+)
         else => return error.LinkError,
     };
     const nat = switch ((cls.cp.get(ref.name_and_type_index) catch return error.LinkError).*) {

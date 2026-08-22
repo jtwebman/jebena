@@ -434,6 +434,42 @@ public class JBaseSmoke {
         r += ma.num();                    // 42
         if (ac.getAnnotation(OtherAnno.class) == null) r += 4000;
 
+        // Interface default method (Iterable.forEach) resolved on a class impl.
+        StringBuilder fb = new StringBuilder();
+        java.util.List<Integer> fl = new java.util.ArrayList<>();
+        fl.add(1);
+        fl.add(2);
+        fl.add(3);
+        fl.forEach(x -> fb.append(x));
+        if (fb.toString().equals("123")) r += 8000;
+
+        // === Stream API ===
+        java.util.List<Integer> sl = new java.util.ArrayList<>();
+        for (int i = 1; i <= 10; i++) {
+            sl.add(i);
+        }
+        java.util.List evens = sl.stream().filter(x -> ((Integer) x) % 2 == 0)
+                .map(x -> ((Integer) x) * 10).toList();
+        int es = 0;
+        for (Object o : evens) {
+            es += (Integer) o;
+        }
+        r += es;                                              // 20+40+60+80+100 = 300
+        r += (int) sl.stream().filter(x -> ((Integer) x) > 5).count();  // 5
+        String joined = (String) sl.stream().map(x -> String.valueOf(x))
+                .collect(java.util.stream.Collectors.joining(","));
+        r += joined.length();                                 // "1,2,...,10" = 20
+        if (sl.stream().anyMatch(x -> ((Integer) x) == 7)) r += 70;
+        if (sl.stream().allMatch(x -> ((Integer) x) > 0)) r += 700;
+        Object sred = sl.stream().reduce(0, (p, q) -> ((Integer) p) + ((Integer) q));
+        r += (Integer) sred;                                   // 55
+        r += java.util.stream.IntStream.rangeClosed(1, 5).sum();          // 15
+        r += (int) java.util.stream.IntStream.range(0, 100).boxed().count(); // 100
+        r += (int) sl.stream().mapToInt(x -> (Integer) x).sum();          // 55
+        java.util.Map groups = (java.util.Map) sl.stream()
+                .collect(java.util.stream.Collectors.groupingBy(x -> ((Integer) x) % 3));
+        r += groups.size();                                   // keys 0,1,2 = 3
+
         // === Reflection: getClass -> methods/fields/ctors, invoke/get/set/newInstance ===
         ReflectTarget rt0 = new ReflectTarget(5, "hi");
         Class<?> rc = rt0.getClass();

@@ -14,4 +14,12 @@ public interface Collection extends java.lang.Iterable {
     void clear();
 
     Iterator iterator();
+
+    default java.util.stream.Stream stream() {
+        java.util.ArrayList tmp = new java.util.ArrayList();
+        for (Object o : this) {
+            tmp.add(o);
+        }
+        return java.util.stream.Stream.ofList(tmp);
+    }
 }
