@@ -302,8 +302,10 @@ park on one monitor, notifyAll = 16), plus join-stress (16 joiners). All the
 spin/pump blocking paths for join/monitor/wait are replaced by parking. This
 unblocks CyclicBarrier, Executors/thread-pools, and blocking queues.
 
-Next: (e) re-add CyclicBarrier + BarrierStress (reverted iter 79 -- should pass
-now); (f) Executors/thread-pool + BlockingQueue.
+Next: (e) CyclicBarrier re-added and PASSES (iter 86) now that blocking parks --
+BarrierStress (4 parties x100 rounds = 600) green at carriers 1 & 4 (+GC), in
+juc-stress.sh; it deadlocked under the old spin model at iter 79. (f) Executors/
+thread-pool + BlockingQueue next.
 
 **Known limitations (opt-in path only; default single carrier unaffected) —
 harden next:**

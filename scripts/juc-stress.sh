@@ -13,7 +13,7 @@ OUT=/tmp/jebena-juc
 rm -rf "$OUT"; mkdir -p "$OUT"
 bash "$ROOT/scripts/build-jbase.sh" >/dev/null
 "$JAVAC" -d "$OUT" "$ROOT"/test/stress/LatchStress.java "$ROOT"/test/stress/SemStress.java \
-  "$ROOT"/test/stress/RLockStress.java "$ROOT"/test/stress/CondStress.java "$ROOT/test/diff/Driver.java"
+  "$ROOT"/test/stress/RLockStress.java "$ROOT"/test/stress/CondStress.java "$ROOT"/test/stress/BarrierStress.java "$ROOT/test/diff/Driver.java"
 "$ZIG" build --build-file "$ROOT/build.zig" >/dev/null 2>&1
 JEBENA="$ROOT/zig-out/bin/jebena"
 JBASE=$(find "$ROOT/jbase/out" -name '*.class' | tr '\n' ' ')
@@ -28,11 +28,11 @@ check() { # $1 main  $2 label  $3 env  $4 reps  $5 exp
   done
 }
 # CountDownLatch, Semaphore, ReentrantLock (mutex+reentrancy), ReentrantLock+Condition.
-for main in LatchStress SemStress RLockStress CondStress; do
+for main in LatchStress SemStress RLockStress CondStress BarrierStress; do
   EXP=$("$JAVA" -cp "$OUT" Driver "st.$main" demo 2>/dev/null)
   check "$main" "carriers=1" "JEBENA_CARRIERS=1" 3 "$EXP"
   check "$main" "carriers=4" "JEBENA_CARRIERS=4" 8 "$EXP"
   check "$main" "carriers=4+GC" "JEBENA_GC_INTERVAL=300 JEBENA_CARRIERS=4" 4 "$EXP"
 done
 [ "$fail" = 0 ] || exit 1
-echo "juc-stress: OK — CountDownLatch + Semaphore + ReentrantLock + Condition on monitors/wait-notify (carriers 1 & 4, +GC), matches real java"
+echo "juc-stress: OK — CountDownLatch + Semaphore + ReentrantLock + Condition + CyclicBarrier on monitors/parking (carriers 1 & 4, +GC), matches real java"
