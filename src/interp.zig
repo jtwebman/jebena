@@ -616,6 +616,11 @@ fn maybeCollect(f: *Frame) void {
     if (heap.allocs_since_gc >= heap.gc_interval) {
         heap.allocs_since_gc = 0;
         heap.minor_count += 1;
+        // Stop-the-world: park all other carriers, collect, release. One carrier
+        // => no others to wait for, so this runs the collection immediately.
+        const sched = &f.loader.scheduler;
+        sched.requestSafepoint();
+        defer sched.releaseSafepoint();
         if (heap.minors_per_major != 0 and heap.minor_count % heap.minors_per_major == 0) {
             collectMajor(f);
         } else {
@@ -3944,6 +3949,10 @@ const Scheduler = struct {
     /// next safepoint poll, GC runs, then it clears. Atomic for cross-carrier
     /// visibility. Never set with one carrier (poll is a no-op fast path).
     safepoint_requested: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    /// Number of carriers in the pool (1 today) and how many are parked at the
+    /// safepoint. The requester waits until parked == carriers_total-1 (all others).
+    carriers_total: u32 = 1,
+    parked: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
 
     fn deinit(self: *Scheduler) void {
         for (self.all.items) |fib| {
@@ -4011,11 +4020,23 @@ const Scheduler = struct {
     /// today, so it is never set (poll is a no-op fast path); Stage 4d makes this
     /// atomic and adds the actual carrier parking.
     fn waitForSafepointRelease(self: *Scheduler) void {
-        // Block this carrier until the collecting carrier clears the request.
-        // With one carrier the flag is never set, so this never spins.
-        while (self.safepoint_requested.load(.acquire)) {
-            std.atomic.spinLoopHint();
-        }
+        // Park at the safepoint: register as parked, spin until released, unpark.
+        // With one carrier the flag is never observed set here, so this is a no-op.
+        _ = self.parked.fetchAdd(1, .acq_rel);
+        while (self.safepoint_requested.load(.acquire)) std.atomic.spinLoopHint();
+        _ = self.parked.fetchSub(1, .acq_rel);
+    }
+
+    /// Request stop-the-world: set the flag and wait for every OTHER carrier to
+    /// park at its poll. With one carrier there are no others, so this returns
+    /// immediately and the caller has exclusive heap access.
+    fn requestSafepoint(self: *Scheduler) void {
+        self.safepoint_requested.store(true, .release);
+        while (self.parked.load(.acquire) < self.carriers_total - 1) std.atomic.spinLoopHint();
+    }
+
+    fn releaseSafepoint(self: *Scheduler) void {
+        self.safepoint_requested.store(false, .release);
     }
 
     fn fiberById(self: *Scheduler, id: u64) ?*Fiber {
