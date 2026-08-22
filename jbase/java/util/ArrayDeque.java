@@ -19,21 +19,23 @@ public class ArrayDeque implements Deque {
     }
 
     private void doubleCapacity() {
+        // Called only when the ring buffer is full (head == tail after an add), so
+        // it holds exactly oldCap elements. size() reads 0 here (head == tail looks
+        // empty), so copy oldCap elements, not size(), or the deque loses them all.
         int oldCap = elements.length;
         int newCap = oldCap << 1;
         if (newCap <= 0) {
             newCap = oldCap + 1;
         }
         Object[] a = new Object[newCap];
-        int n = size();
         int idx = head;
-        for (int i = 0; i < n; i++) {
+        for (int i = 0; i < oldCap; i++) {
             a[i] = elements[idx];
             idx = (idx + 1) % oldCap;
         }
         elements = a;
         head = 0;
-        tail = n;
+        tail = oldCap;
     }
 
     public int size() {

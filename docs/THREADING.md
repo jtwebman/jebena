@@ -304,18 +304,17 @@ unblocks CyclicBarrier, Executors/thread-pools, and blocking queues.
 
 Next: (e) CyclicBarrier re-added and PASSES (iter 86) now that blocking parks --
 BarrierStress (4 parties x100 rounds = 600) green at carriers 1 & 4 (+GC), in
-juc-stress.sh; it deadlocked under the old spin model at iter 79. (f) blocking queues + Executors: IN PROGRESS. Attempting
-LinkedBlockingQueue (iter 87) surfaced TWO bugs, so it was reverted to keep green:
-(1) java.util.LinkedList.addLast LinkErrors -- instantiating the private static
-nested LinkedList$Node fails (pre-existing; no gate test exercised LinkedList.addLast;
-ArrayDeque/ArrayList work fine). (2) More important: wait/Condition parking hangs at
-ONE carrier under a sustained blocking loop -- a producer/consumer over
-LinkedBlockingQueue with ~100 items hangs at JEBENA_CARRIERS=1 (3 items is fine, and
-carriers=4 is fine), a volume-dependent LOST-WAKEUP in the cooperative wait path that
-the low-volume CondStress/waitnotify tests didn't catch. Next: minimal-repro the c=1
-wait lost-wakeup with raw synchronized+wait at high volume, FIX it (latent since the
-iter85 wait-parking), then land LinkedBlockingQueue (WIP at /tmp/*.wip.java) +
-Executors. Also fix LinkedList$Node.
+juc-stress.sh; it deadlocked under the old spin model at iter 79. (f) blocking queues: LinkedBlockingQueue LANDED (iter 88). The
+"c=1 wait lost-wakeup" suspected at iter 87 was a RED HERRING -- raw synchronized+
+wait/notify AND ReentrantLock+Condition both pass at high volume (1000+ cycles) at
+carriers 1 & 4. The real bug was java.util.ArrayDeque.doubleCapacity(): it ran when
+the ring buffer was full (head==tail) but used size() for the copy count, and size()
+reads 0 when head==tail, so growth past capacity 16 dropped ALL elements. Fixed
+(copy oldCap). LinkedBlockingQueue (on ReentrantLock + 2 Conditions, backed by
+ArrayDeque) now works: queue-stress.sh runs a 4-producer/4-consumer drain (consumers
+PARK on the empty queue) = 400 at carriers 1 & 4 (+GC), plus an ArrayDeque
+growth/wrap regression test. Next: Executors/thread-pool on top; also fix
+LinkedList$Node (addLast still LinkErrors, separate bug).
 
 **Known limitations (opt-in path only; default single carrier unaffected) —
 harden next:**
