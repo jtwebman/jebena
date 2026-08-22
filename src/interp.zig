@@ -1643,7 +1643,7 @@ fn invokeInstance(f: *Frame, cls: *const Class, code: []const u8, is_special: bo
     const oid = (try f.popRef()) orelse return error.NullPointer;
     const heap = f.heap orelse return error.UnsupportedOpcode;
     switch (heap.get(oid).*) {
-        .lambda => |lam| return dispatchLambda(f, lam, slots, pl.params),
+        .lambda => |lam| return dispatchLambdaPending(f, lam, slots, pl.params, pending),
         .boxed => return boxedMethod(f, oid, slots, pl.params, mname, mdesc),
         .array => {
             // Arrays expose Object.clone() as a shallow copy (used by enum values()).
@@ -2078,6 +2078,46 @@ fn dispatchLambda(f: *Frame, lam: LambdaObj, sam_slots: []const Value, sam_param
     };
     const ir = recv_class.resolve(lam.impl_name, lam.impl_desc) orelse return error.MethodNotFound;
     return runImplInstance(f, ir.owner, ir.method, recv_id, logical[1..n]);
+}
+
+/// Like dispatchLambda but for the invoke site: for a static-impl lambda (kind 6)
+/// it runs the body on the fiber's EXPLICIT call stack (sets `pending`, so the
+/// driver pushes a normal child frame) rather than a nested synchronous exec. This
+/// makes lambda bodies suspendable -> parkable. Other kinds fall back to the exec
+/// path (synchronous) for now. Semantics-preserving.
+fn dispatchLambdaPending(f: *Frame, lam: LambdaObj, sam_slots: []const Value, sam_params: []const Class.Param, pending: *?PendingCall) RunError!void {
+    if (lam.impl_kind != 6) return dispatchLambda(f, lam, sam_slots, sam_params);
+    var logical: [128]Value = undefined;
+    var n: usize = 0;
+    for (lam.captures) |c| {
+        logical[n] = c;
+        n += 1;
+    }
+    for (sam_params) |pp| {
+        logical[n] = sam_slots[pp.slot];
+        n += 1;
+    }
+    const impl_cls = f.loader.find(lam.impl_class) orelse return error.LinkError;
+    const ir = impl_cls.resolve(lam.impl_name, lam.impl_desc) orelse return error.MethodNotFound;
+    const impl = ir.method;
+    if (impl.is_native) return runImplStatic(f, ir.owner, impl, logical[0..n]); // natives keep exec path
+    const cc = impl.code orelse return error.LinkError;
+    if (n != impl.params.len) return error.LinkError;
+    const buf = f.loader.gpa.alloc(Value, impl.arg_slots) catch return error.OutOfMemory;
+    for (buf) |*b| b.* = .{ .int = 0 };
+    for (impl.params, 0..) |pp, k| {
+        buf[pp.slot] = logical[k];
+        if (pp.kind == .long or pp.kind == .double) buf[pp.slot + 1] = .top;
+    }
+    pending.* = .{
+        .owner = ir.owner,
+        .code = cc.code,
+        .max_stack = cc.max_stack,
+        .max_locals = cc.max_locals,
+        .exception_table = cc.exception_table,
+        .slots = buf,
+        .is_sync = false,
+    };
 }
 fn doStringConcat(f: *Frame, cls: *const Class, desc: []const u8, bm: attribute_decode.BootstrapMethod, with_constants: bool) RunError!void {
     const heap = f.heap orelse return error.UnsupportedOpcode;
