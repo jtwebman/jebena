@@ -441,7 +441,22 @@ postgres:16-alpine over docker (trust auth, 127.0.0.1:5432) — both return 1,
 matching real java. `pg-stress.sh` runs the mock always; the live check is opt-in
 behind JEBENA_PGTEST.
 
-Next: (4) an HTTP endpoint that queries Postgres and returns a row.
+Step 4 (2026-08-22): **the capstone — a Postgres-backed HTTP API on jebena.**
+`test/stress/DbApi.java`: an HTTP server fiber answers GET "/" by opening a
+Postgres connection (PgQuery's wire client), running SELECT 1, and returning the
+value in the HTTP body ("db=1"). Validated both against an in-process mock PG
+(always-green) and a LIVE postgres:16-alpine over docker — both return 308 and
+match real java. `dbapi-stress.sh` runs the mock at carriers 3 & 4 (+GC); the
+live end-to-end check is opt-in behind JEBENA_PGTEST. Three fibers block
+concurrently (HTTP client + HTTP server + PG backend), so it needs carriers >= 3.
+
+**The user's goal is achieved: a clean-room Java runtime, running AI-written
+bytecode, serves an HTTP request by querying Postgres over hand-written wire
+protocols on portable std.Io sockets.**
+
+Next: richer queries (WHERE / multiple rows / typed columns); the big remaining
+item is lifting the blocking-I/O carrier limit via poll/epoll fiber-yield so
+blocking socket ops PARK the fiber (like join/monitor/wait) and work at carriers=1.
 
 ## Policy (2026-08-21, from the user): thread-safety is now non-negotiable
 

@@ -26,6 +26,7 @@ Each iteration is one small, verified, committed step. Never leave the tree red.
    - `bash scripts/net-stress.sh` — java.net loopback echo (Socket/ServerSocket over std.Io TCP), carriers 2 & 4 +GC, skips cleanly if sockets unavailable
    - `bash scripts/http-stress.sh` — hand-written HTTP/1.1 request-parse + 200 response over java.net, carriers 2 & 4 +GC, skips cleanly if sockets unavailable
    - `bash scripts/pg-stress.sh` — Postgres v3 wire client (SELECT 1) vs a spec-faithful mock backend, carriers 2 & 4 +GC; also hits a live Postgres when JEBENA_PGTEST is set + reachable
+   - `bash scripts/dbapi-stress.sh` — Postgres-backed HTTP API (GET -> PG SELECT 1 -> HTTP body), carriers 3 & 4 +GC; also end-to-end vs live Postgres when JEBENA_PGTEST is set
    - `bash scripts/portability-check.sh` — VM cross-compiles for macOS/Linux (aarch64/x86_64)
    - `zig fmt --check src/ build.zig` — formatted
    If anything fails: fix it, or revert the change. Do not commit red.
