@@ -283,8 +283,11 @@ the full gate is green.) Proven by scripts/join-stress.sh: 16 joiners park on on
 worker (16 blocked >> 4 carriers, which would deadlock under spin) = 1016 at
 carriers 1 & 4 and with GC forced. All 14 prior gate scripts stay green.
 
-Next: (c) monitorenter contention -> park + monitorexit wake; (d) Object.wait/notify
--> park; (e) re-add CyclicBarrier; (f) Executors/thread-pool + blocking queues.
+Next: steps (c) monitorenter->park and (d) wait/notify->park must land TOGETHER --
+attempting (c) alone (iter 84) kept sync/join green but HUNG the monitor+wait combo
+at carriers=4, because wait still SPINS (holding a carrier) while workers park on the
+monitor. WIP at /tmp/interp.monpark.wip.bak. Then (e) re-add CyclicBarrier; (f)
+Executors/thread-pool + blocking queues.
 
 **Known limitations (opt-in path only; default single carrier unaffected) —
 harden next:**
