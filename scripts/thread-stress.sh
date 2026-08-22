@@ -17,7 +17,7 @@ rm -rf "$OUT"; mkdir -p "$OUT"
 bash "$ROOT/scripts/build-jbase.sh" >/dev/null
 # Compile only StressMain (not test/stress/*.java: other stress mains like
 # LoadStress depend on classpath-dir helper classes not present here).
-"$JAVAC" -d "$OUT" "$ROOT"/test/stress/StressMain.java "$ROOT/test/diff/Driver.java"
+"$JAVAC" -d "$OUT" "$ROOT"/test/stress/StressMain.java "$ROOT"/test/stress/CurThread.java "$ROOT/test/diff/Driver.java"
 "$ZIG" build --build-file "$ROOT/build.zig" >/dev/null 2>&1
 JEBENA="$ROOT/zig-out/bin/jebena"
 EXP=$("$JAVA" -cp "$OUT" Driver st.StressMain demo 2>/dev/null)
@@ -41,5 +41,15 @@ for rep in $(seq 1 10); do
   [ "$GOT" = "$EXP" ] || { echo "thread-stress: FAIL carriers=4 rep=$rep total jebena=$GOT java=$EXP"; fail=1; }
   [ "${RAN:-0}" -ge 2 ] || { echo "thread-stress: FAIL carriers=4 rep=$rep not parallel (carriers-ran=${RAN:-0}, want >=2)"; fail=1; }
 done
+# Per-fiber Thread.currentThread(): 8 workers each see a Thread distinct from main.
+CTEXP=$("$JAVA" -cp "$OUT" Driver st.CurThread demo 2>/dev/null)
+for cfg in "JEBENA_CARRIERS=1" "JEBENA_CARRIERS=4"; do
+  for rep in 1 2 3; do
+    ALL=$(timeout 30 bash -c "$cfg '$JEBENA' run st/CurThread demo $APP $JBASE" 2>&1)
+    [ $? -eq 124 ] && { echo "thread-stress: FAIL CurThread $cfg rep=$rep HANG"; fail=1; }
+    GOT=$(printf '%s\n' "$ALL" | sed -n 's/.*demo() = \(-\?[0-9]*\).*/\1/p')
+    [ "$GOT" = "$CTEXP" ] || { echo "thread-stress: FAIL CurThread $cfg rep=$rep jebena=$GOT java=$CTEXP"; fail=1; }
+  done
+done
 [ "$fail" = 0 ] || exit 1
-echo "thread-stress: OK — 8 fibers x1000 (AtomicInteger+AtomicLong) = $EXP; carriers=1 deterministic + carriers=4 REAL parallel (>=2 carriers ran), matches real java"
+echo "thread-stress: OK — 8 fibers x1000 (AtomicInteger+AtomicLong) = $EXP; per-fiber currentThread = $CTEXP; carriers=1 deterministic + carriers=4 REAL parallel (>=2 carriers ran), matches real java"

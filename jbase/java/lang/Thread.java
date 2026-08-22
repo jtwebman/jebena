@@ -89,9 +89,7 @@ public class Thread implements Runnable {
         return priority;
     }
 
-    public static Thread currentThread() {
-        return currentThread;
-    }
+    public static native Thread currentThread();
 
     public static void sleep(long millis) {
         // Cooperative single carrier: deterministic no-op (real timers: stage 4).

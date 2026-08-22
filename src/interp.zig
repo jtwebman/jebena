@@ -484,6 +484,17 @@ fn owningThreadId(sched: *Scheduler, f: *Frame) u64 {
     return 0;
 }
 
+/// The top-level scheduled fiber (in `all`) whose call chain reached f -- the one
+/// carrying the java.lang.Thread object (thread_id). Used by Thread.currentThread().
+fn owningThreadFiber(sched: *Scheduler, f: *Frame) ?*Fiber {
+    var root: *Frame = f;
+    while (root.parent) |pp| root = pp;
+    sched.lock.lock();
+    defer sched.lock.unlock();
+    for (sched.all.items) |fib| for (fib.call_stack.items) |ff| if (ff == root) return fib;
+    return null;
+}
+
 /// The fiber whose call_stack directly contains frame f -- a scheduled fiber (all)
 /// or an in-flight native re-entry (nested exec). This is the execution context
 /// that blocks in Object.wait() (its notified/waiting_on flags are the wait state);
@@ -3681,6 +3692,17 @@ fn nativeInvoke(f: *Frame, owner: *const Class, method: *const Class.Method, slo
     }
     if (std.mem.eql(u8, on, "java/lang/Thread")) {
         const heap = f.heap orelse return error.UnsupportedOpcode;
+        if (eq2(mn, md, "currentThread", "()Ljava/lang/Thread;")) {
+            // Per-fiber: the running scheduled fiber's Thread object; main fiber (no
+            // Thread) falls back to the static `currentThread` field (the main Thread).
+            const sched = &f.loader.scheduler;
+            if (owningThreadFiber(sched, f)) |fib| {
+                if (fib.thread_id) |ttid| return f.push(.{ .reference = ttid });
+            }
+            const tcls = f.loader.find("java/lang/Thread") orelse return error.LinkError;
+            const si = tcls.findStatic("currentThread") orelse return error.LinkError;
+            return f.pushKind((try f.loader.staticsOf(tcls))[si]);
+        }
         const tid = switch (slots[0]) {
             .reference => |r| r orelse return error.NullPointer,
             else => return error.TypeMismatch,
