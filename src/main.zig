@@ -34,7 +34,11 @@ pub fn main(init: std.process.Init) !void {
         else
             1;
         const trace = init.environ_map.get("JEBENA_CARRIER_TRACE") != null;
-        try cmdRun(gpa, io, &args, carriers, trace);
+        const gc_interval: ?usize = if (init.environ_map.get("JEBENA_GC_INTERVAL")) |v|
+            (std.fmt.parseInt(usize, v, 10) catch null)
+        else
+            null;
+        try cmdRun(gpa, io, &args, carriers, trace, gc_interval);
     } else {
         return usage();
     }
@@ -65,7 +69,7 @@ fn runEntry(loader: *IC.Loader, cls: *const IC.Class, method: []const u8, desc: 
 /// Load a compiled multi-class program from disk and run a static no-arg method.
 /// Provides a minimal java.lang stub chain so user classes can extend
 /// Object/Throwable/Exception/RuntimeException.
-fn cmdRun(gpa: std.mem.Allocator, io: std.Io, it: *std.process.Args.Iterator, carriers: u32, trace: bool) !void {
+fn cmdRun(gpa: std.mem.Allocator, io: std.Io, it: *std.process.Args.Iterator, carriers: u32, trace: bool, gc_interval: ?usize) !void {
     const main_class = it.next() orelse return usage();
     const method = it.next() orelse return usage();
 
@@ -94,6 +98,7 @@ fn cmdRun(gpa: std.mem.Allocator, io: std.Io, it: *std.process.Args.Iterator, ca
     loader.class_arena = a; // arena for lazily-built Classes
     loader.scheduler.requested_carriers = if (carriers == 0) 1 else carriers; // opt-in parallelism (4d-4)
     loader.scheduler.trace_carriers = trace; // diagnostic: prints distinct carriers that ran work
+    loader.gc_interval = gc_interval; // JEBENA_GC_INTERVAL: force frequent GC for stress
     try loader.classpath.appendSlice(gpa, cpdirs.items);
     defer loader.deinit();
 

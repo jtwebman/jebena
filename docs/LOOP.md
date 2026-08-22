@@ -14,6 +14,7 @@ Each iteration is one small, verified, committed step. Never leave the tree red.
    - `bash scripts/jbase-smoke.sh` + `bash scripts/output-smoke.sh` — our own clean-room java.base bytecode runs correctly
    - `bash scripts/classpath-smoke.sh` — lazy directory classpath loading matches real java
    - `bash scripts/thread-stress.sh` — green-thread scheduler + AtomicInteger under many fibers (carriers 1 & 4)
+   - `bash scripts/alloc-gc-stress.sh` — moving mark-compact GC under heavy allocation (single carrier; GC forced)
    - `bash scripts/portability-check.sh` — VM cross-compiles for macOS/Linux (aarch64/x86_64)
    - `zig fmt --check src/ build.zig` — formatted
    If anything fails: fix it, or revert the change. Do not commit red.

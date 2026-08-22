@@ -246,6 +246,10 @@ const SpinLock = struct {
     fn lock(self: *SpinLock) void {
         while (self.state.swap(true, .acquire)) std.atomic.spinLoopHint();
     }
+    /// Non-blocking acquire: true if we got the lock, false if already held.
+    fn tryLock(self: *SpinLock) bool {
+        return !self.state.swap(true, .acquire);
+    }
     fn unlock(self: *SpinLock) void {
         self.state.store(false, .release);
     }
@@ -372,21 +376,19 @@ fn remapValuePtr(v: *Value, forwarding: []const u32) void {
     }
 }
 fn remapRoots(f: *Frame, forwarding: []const u32) void {
-    var fr: ?*Frame = f;
-    while (fr) |ff| {
+    const sched = &f.loader.scheduler;
+    // Every live frame belongs to exactly one fiber's call_stack -- a scheduled
+    // fiber (all) or an in-flight native re-entry (nested exec). Remap each fiber's
+    // frames exactly once; remap is NOT idempotent, so we do not also walk parent
+    // chains (which would re-cover frames already handled here).
+    for (sched.all.items) |fib| for (fib.call_stack.items) |ff| {
         for (ff.stack[0..ff.sp]) |*v| remapValuePtr(v, forwarding);
         for (ff.locals) |*v| remapValuePtr(v, forwarding);
-        fr = ff.parent;
-    }
-    // Parked scheduler fibers (NOT the running one — the parent chain already
-    // covered it, and remapping is not idempotent).
-    for (f.loader.scheduler.all.items) |fib| {
-        if (fib == f.loader.scheduler.carrier.current) continue;
-        for (fib.call_stack.items) |ff| {
-            for (ff.stack[0..ff.sp]) |*v| remapValuePtr(v, forwarding);
-            for (ff.locals) |*v| remapValuePtr(v, forwarding);
-        }
-    }
+    };
+    for (sched.nested.items) |fib| for (fib.call_stack.items) |ff| {
+        for (ff.stack[0..ff.sp]) |*v| remapValuePtr(v, forwarding);
+        for (ff.locals) |*v| remapValuePtr(v, forwarding);
+    };
     for (f.loader.statics.items) |st| for (st) |*v| remapValuePtr(v, forwarding);
 }
 fn remapObject(obj: *HeapObj, forwarding: []const u32) void {
@@ -407,16 +409,12 @@ fn remapObject(obj: *HeapObj, forwarding: []const u32) void {
 /// `new` safepoint. This is the reference-rewriting machinery LXR/Immix require.
 fn collectMajor(f: *Frame) void {
     const heap = f.heap orelse return;
-    // 1. Mark reachable objects from all roots.
+    // 1. Mark reachable objects from all roots. Every live frame belongs to exactly
+    // one fiber's call_stack -- a scheduled fiber (all) or an in-flight native
+    // re-entry (nested exec) -- so iterating those covers all frame roots. This is
+    // kept SYMMETRIC with remapRoots below: marking a frame that remap won't rewrite
+    // (or vice versa) would leave stale ids after compaction.
     for (heap.marked.items) |*m| m.* = false;
-    var fr: ?*Frame = f;
-    while (fr) |ff| {
-        for (ff.stack[0..ff.sp]) |v| markValue(heap, v);
-        for (ff.locals) |v| markValue(heap, v);
-        fr = ff.parent;
-    }
-    // All scheduler fibers are roots (parked fibers' frames aren't on the parent
-    // chain). Marking is idempotent, so double-covering the running fiber is fine.
     for (f.loader.scheduler.all.items) |fib| {
         for (fib.call_stack.items) |ff| {
             for (ff.stack[0..ff.sp]) |v| markValue(heap, v);
@@ -424,6 +422,10 @@ fn collectMajor(f: *Frame) void {
         }
         if (fib.waiting_on) |id| markObject(heap, id);
     }
+    for (f.loader.scheduler.nested.items) |fib| for (fib.call_stack.items) |ff| {
+        for (ff.stack[0..ff.sp]) |v| markValue(heap, v);
+        for (ff.locals) |v| markValue(heap, v);
+    };
     for (f.loader.statics.items) |st| for (st) |v| markValue(heap, v);
     if (f.budget.pending) |eid| markObject(heap, eid);
     {
@@ -517,12 +519,6 @@ fn markYoungObject(heap: *Heap, id: u32) void {
 fn collectMinor(f: *Frame) void {
     const heap = f.heap orelse return;
     for (heap.marked.items) |*m| m.* = false;
-    var fr: ?*Frame = f;
-    while (fr) |ff| {
-        for (ff.stack[0..ff.sp]) |v| markYoungValue(heap, v);
-        for (ff.locals) |v| markYoungValue(heap, v);
-        fr = ff.parent;
-    }
     for (f.loader.scheduler.all.items) |fib| {
         for (fib.call_stack.items) |ff| {
             for (ff.stack[0..ff.sp]) |v| markYoungValue(heap, v);
@@ -530,6 +526,10 @@ fn collectMinor(f: *Frame) void {
         }
         if (fib.waiting_on) |id| markYoungObject(heap, id);
     }
+    for (f.loader.scheduler.nested.items) |fib| for (fib.call_stack.items) |ff| {
+        for (ff.stack[0..ff.sp]) |v| markYoungValue(heap, v);
+        for (ff.locals) |v| markYoungValue(heap, v);
+    };
     for (f.loader.statics.items) |st| for (st) |v| markYoungValue(heap, v);
     if (f.budget.pending) |eid| markYoungObject(heap, eid);
     {
@@ -610,23 +610,36 @@ fn writeBarrier(heap: *Heap, target_id: u32, v: Value) void {
     }
 }
 
+fn collectNow(f: *Frame, heap: *Heap, sched: *Scheduler) void {
+    heap.allocs_since_gc = 0;
+    heap.minor_count += 1;
+    // Stop-the-world: park all other carriers, collect, release.
+    sched.requestSafepoint();
+    defer sched.releaseSafepoint();
+    if (heap.minors_per_major != 0 and heap.minor_count % heap.minors_per_major == 0) {
+        collectMajor(f);
+    } else {
+        collectMinor(f);
+    }
+}
+
 fn maybeCollect(f: *Frame) void {
     const heap = f.heap orelse return;
-    heap.allocs_since_gc += 1;
-    if (heap.allocs_since_gc >= heap.gc_interval) {
-        heap.allocs_since_gc = 0;
-        heap.minor_count += 1;
-        // Stop-the-world: park all other carriers, collect, release. One carrier
-        // => no others to wait for, so this runs the collection immediately.
-        const sched = &f.loader.scheduler;
-        sched.requestSafepoint();
-        defer sched.releaseSafepoint();
-        if (heap.minors_per_major != 0 and heap.minor_count % heap.minors_per_major == 0) {
-            collectMajor(f);
-        } else {
-            collectMinor(f);
-        }
+    heap.allocs_since_gc += 1; // benign heuristic; a lost increment only delays GC
+    if (heap.allocs_since_gc < heap.gc_interval) return;
+    const sched = &f.loader.scheduler;
+    if (sched.carriers_total <= 1) {
+        collectNow(f, heap, sched); // one carrier: no others to coordinate with
+        return;
     }
+    // Multi-carrier: exactly ONE carrier collects. Two carriers both calling
+    // requestSafepoint would each wait for the other to park -> deadlock, so the
+    // gc_lock winner collects and the rest just return; they park at their next
+    // safepoint poll (step()/join spin/idle) while the winner holds the world.
+    if (!sched.gc_lock.tryLock()) return;
+    defer sched.gc_lock.unlock();
+    if (heap.allocs_since_gc < heap.gc_interval) return; // another carrier just collected
+    collectNow(f, heap, sched);
 }
 
 fn opAt(code: []const u8, pc: usize) RunError!Op {
@@ -756,6 +769,10 @@ pub const Loader = struct {
     /// Serializes java.util.concurrent.atomic read-modify-write ops so they are
     /// lost-update-free across carriers (Stage 4). Uncontended with one carrier.
     atomics_lock: SpinLock = .{},
+    /// Optional GC trigger override (allocations between collections) applied to
+    /// the heap runInLoader creates; null keeps the heap default. Set from
+    /// JEBENA_GC_INTERVAL so stress tests can force frequent (concurrent) GC.
+    gc_interval: ?usize = null,
     /// Classpath directories searched (in order) to lazily load a class by name
     /// on first resolution. Empty under unit tests and eager-file runs.
     classpath: std.ArrayList([]const u8) = .empty,
@@ -1525,6 +1542,7 @@ fn layoutArgs(m: *const Class.Method, args: []const Value, out: []Value) RunErro
 /// registered classes first (eager; lazy init is future work).
 pub fn runInLoader(loader: *Loader, class: *const Class, name: []const u8, desc: []const u8, args: []const Value, budget: *Budget) RunError!?Value {
     var heap = Heap{ .gpa = loader.gpa };
+    if (loader.gc_interval) |gi| heap.gc_interval = gi;
     defer heap.deinit();
     return runInLoaderWithHeap(loader, class, name, desc, args, budget, &heap);
 }
@@ -4096,6 +4114,13 @@ const Scheduler = struct {
     /// Bitmask of carrier ids that ran >=1 fiber; used to verify real parallelism.
     carriers_ran: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
     trace_carriers: bool = false,
+    /// Serializes GC initiation across carriers: exactly one carrier requests the
+    /// safepoint and collects; the rest park via their normal safepoint polls.
+    gc_lock: SpinLock = .{},
+    /// In-flight native re-entry fibers (exec): frames run here that aren't in any
+    /// `all` fiber's call_stack, so GC must root them too. Registered/unregistered
+    /// under `lock`; read by GC only at a safepoint (no concurrent mutation then).
+    nested: std.ArrayList(*Fiber) = .empty,
     /// Guards the shared ready-queue + all-registry + next_id (Stage 4d). Taken
     /// only for the brief queue mutations, never across driveFiber. Uncontended
     /// with one carrier.
@@ -4108,6 +4133,7 @@ const Scheduler = struct {
         }
         self.all.deinit(self.gpa);
         self.ready.deinit(self.gpa);
+        self.nested.deinit(self.gpa); // entries are stack-owned Fibers; free only the list
     }
 
     /// Free all fibers and clear the queues (end of a top-level run).
@@ -4120,6 +4146,7 @@ const Scheduler = struct {
         self.ready.clearRetainingCapacity();
         self.carrier.current = null;
         self.outstanding.store(0, .release);
+        self.nested.clearRetainingCapacity();
         self.shutdown.store(false, .release);
         self.carriers_ran.store(0, .release);
     }
@@ -4257,6 +4284,21 @@ const Scheduler = struct {
 
     fn releaseSafepoint(self: *Scheduler) void {
         self.safepoint_requested.store(false, .release);
+    }
+
+    fn registerNested(self: *Scheduler, fib: *Fiber) void {
+        self.lock.lock();
+        defer self.lock.unlock();
+        self.nested.append(self.gpa, fib) catch {}; // best-effort; GC roots it if present
+    }
+
+    fn unregisterNested(self: *Scheduler, fib: *Fiber) void {
+        self.lock.lock();
+        defer self.lock.unlock();
+        for (self.nested.items, 0..) |x, i| if (x == fib) {
+            _ = self.nested.swapRemove(i);
+            return;
+        };
     }
 
     fn fiberById(self: *Scheduler, id: u64) ?*Fiber {
@@ -4415,6 +4457,10 @@ fn exec(alloc: std.mem.Allocator, class: ?*const Class, heap: ?*Heap, loader: *L
         freeChildFrame(alloc, base);
         return error.OutOfMemory;
     };
+    // This re-entry's frames aren't in any scheduled fiber's call_stack; make them
+    // GC roots (essential once other carriers can trigger a collection concurrently).
+    loader.scheduler.registerNested(&fiber);
+    defer loader.scheduler.unregisterNested(&fiber);
     while (true) {
         switch (try driveFiber(&fiber, budget)) {
             .completed => return fiber.result,

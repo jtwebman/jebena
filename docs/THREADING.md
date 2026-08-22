@@ -198,6 +198,39 @@ locked ready-queue; they allocate nothing in the hot loop (so no GC fires) and
 load no classes (all linked during single-threaded startup). So the moving GC
 and lazy class-loading paths are simply not exercised concurrently.
 
+### Hardening update (2026-08-21): concurrent GC coordination fixed; concurrent ALLOCATION is the remaining blocker
+
+Three real GC bugs found and fixed while building an allocating stress test:
+- **Double-request deadlock:** two carriers both hitting `maybeCollect` each called
+  `requestSafepoint` and waited for the other to park. Fixed with a `gc_lock`:
+  exactly one carrier collects; the rest park via their normal safepoint polls.
+- **Nested re-entry fibers weren't GC roots:** lambda bodies / native re-entry run
+  on a local `exec` fiber not in `scheduler.all`. At one carrier the collector's
+  parent-chain walk covered it; across carriers, *other* carriers' exec fibers were
+  invisible → their live objects were freed. Fixed by registering every `exec`
+  fiber in `scheduler.nested` and rooting `all + nested`.
+- **Mark/remap asymmetry:** marking walked the parent chain *and* the fiber lists
+  while remap used only the lists, so a frame covered one way but not the other left
+  stale ids. Fixed by making both iterate exactly `all + nested` (every live frame
+  belongs to exactly one fiber's call_stack — a scheduled fiber or a nested exec).
+
+With these, **single-carrier moving GC under heavy allocation is solid**
+(`scripts/alloc-gc-stress.sh`: 8 fibers × 2000 allocs, GC forced every 200–2000
+allocs, exact match to real java, in the gate).
+
+**BUT concurrent allocation at `JEBENA_CARRIERS>1` is still unsafe — this is the
+top blocker, GC aside.** `heap.get(id)` reads `heap.objects.items` locklessly on
+the hot path, while `put()` grows that ArrayList under `alloc_lock`; when a `put`
+reallocs the backing array, a concurrent `get` reads a freed/torn slice →
+segfault. So the current opt-in parallelism is only safe for **non-allocating**
+parallel hot paths (e.g. the atomics in `thread-stress.sh`); any program that
+allocates on multiple carriers can crash. Fix (next): a concurrent-safe object
+table — reserve stable storage so the backing array never moves (paged/segmented
+table, or reserved capacity) so committed ids can be read locklessly, then revisit
+concurrent GC (the coordination above is ready and correct once allocation is safe).
+Per-carrier `budget.pending` is also not rooted/remapped across carriers (only the
+collector's); harmless today because the stress paths throw no exceptions.
+
 **Known limitations (opt-in path only; default single carrier unaffected) —
 harden next:**
 - `Object.wait/notify` under `carriers_total>1` is NOT yet correct: the native
