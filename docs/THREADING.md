@@ -242,16 +242,20 @@ exceptions); plus the items in the list below.
 
 **Known limitations (opt-in path only; default single carrier unaffected) —
 harden next:**
-- `Object.wait/notify` under `carriers_total>1`: the native finds the calling
-  fiber via `self.carrier.current`, which is null on worker carriers, so `wait()`
-  returns immediately (a no-op). For the correct Java idiom `while (!cond)
-  obj.wait();` this degrades to a busy-wait until another carrier sets `cond` --
-  functionally correct (like a permanent spurious wakeup), just not efficient.
-  Efficient *blocking* wait needs real monitors (`synchronized`), which jebena
-  does not have yet (monitorenter/exit are null-checks only); without a monitor,
-  check-then-wait has an inherent lost-wakeup race that no fiber-lookup fix can
-  close. So proper wait/notify is deferred to a dedicated monitors feature. The
-  existing wait/notify smoke runs at the default 1 carrier and stays green.
+- Real monitors + `wait/notify`: DONE (iter 74). `monitorenter/monitorexit` are
+  now reentrant per-object locks -- inline `mon_owner` (owning *thread* id via
+  `owningThreadId`: the top-level scheduled fiber, stable across nested `exec` and
+  carrier migration) + `mon_count` on `Instance`, so lock state travels with the
+  object through GC compaction. Contention yields cooperatively at one carrier and
+  spins polling the safepoint at N>1; the objref is left on the operand stack so GC
+  can move the object mid-wait. `Object.wait()` sets `waiting_on` BEFORE releasing
+  the monitor (closes the lost-wakeup window), blocks (pump at 1 carrier / spin at
+  N>1), then reacquires using the GC-remapped id from `waiting_on`; notify/notifyAll
+  scan `all`+`nested` under `scheduler.lock`. Proven: `sync-stress.sh` (8 fibers
+  x1000 `synchronized count++` = 8000) and `waitnotify-stress.sh` (8 workers
+  notifyAll + main wait/reacquire), both @carriers 1 & 4 (+GC). NOTE: synchronized
+  *methods* (ACC_SYNCHRONIZED) and monitors on non-instance objects are not yet
+  covered -- synchronized *blocks* on instances are.
 - Concurrent **lazy class loading / `getMirror` / string interning**: FIXED
   (iter 71). A reentrant, safepoint-polling `Loader.load_lock` serializes
   `resolveClass` (find-or-load-and-register), `getMirror`, `internLiteral`, and

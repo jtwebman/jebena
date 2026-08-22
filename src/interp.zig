@@ -208,7 +208,15 @@ const Frame = struct {
     }
 };
 
-pub const Instance = struct { class: *const Class, fields: []Value };
+pub const Instance = struct {
+    class: *const Class,
+    fields: []Value,
+    /// Reentrant monitor (synchronized). owner = owning fiber id + 1 (0 = unheld);
+    /// count = reentrancy depth. Inline so the monitor state travels with the
+    /// object through GC compaction (no separate id-keyed map to remap).
+    mon_owner: u64 = 0,
+    mon_count: u32 = 0,
+};
 pub const Array = struct { elem: Kind, data: []Value };
 pub const StringObj = struct { class: *const Class, chars: []i32 }; // UTF-16 code units
 pub const LambdaObj = struct {
@@ -457,6 +465,36 @@ fn remapValuePtr(v: *Value, forwarding: []const u32) void {
         else => {},
     }
 }
+/// Identity of the LOGICAL THREAD executing frame f: the id of the top-level
+/// scheduled fiber (in `all`) whose call chain reached f. Stable across nested
+/// `exec` re-entry (lambda/native calls make new local fibers with id 0), across
+/// yields, and across carrier migration -- so it is the correct monitor owner.
+/// Walk f.parent to the outermost frame, then find the scheduled fiber holding it.
+fn owningThreadId(sched: *Scheduler, f: *Frame) u64 {
+    var root: *Frame = f;
+    while (root.parent) |pp| root = pp;
+    // Lock: `all` is mutated by concurrent spawn; the scan is short and takes no
+    // safepoint, so it can't deadlock the collector.
+    sched.lock.lock();
+    defer sched.lock.unlock();
+    for (sched.all.items) |fib| for (fib.call_stack.items) |ff| if (ff == root) return fib.id;
+    return 0;
+}
+
+/// The fiber whose call_stack directly contains frame f -- a scheduled fiber (all)
+/// or an in-flight native re-entry (nested exec). This is the execution context
+/// that blocks in Object.wait() (its notified/waiting_on flags are the wait state);
+/// distinct from owningThreadId, which is the logical thread for monitor ownership.
+fn fiberOwningFrame(sched: *Scheduler, f: *Frame) ?*Fiber {
+    // Lock: `nested` is mutated by concurrent exec enter/exit (and `all` by spawn);
+    // short scan, no safepoint taken -> cannot deadlock the collector.
+    sched.lock.lock();
+    defer sched.lock.unlock();
+    for (sched.all.items) |fib| for (fib.call_stack.items) |ff| if (ff == f) return fib;
+    for (sched.nested.items) |fib| for (fib.call_stack.items) |ff| if (ff == f) return fib;
+    return null;
+}
+
 fn remapRoots(f: *Frame, forwarding: []const u32) void {
     const sched = &f.loader.scheduler;
     // Every live frame belongs to exactly one fiber's call_stack -- a scheduled
@@ -504,10 +542,13 @@ fn collectMajor(f: *Frame) void {
         }
         if (fib.waiting_on) |id| markObject(heap, id);
     }
-    for (f.loader.scheduler.nested.items) |fib| for (fib.call_stack.items) |ff| {
-        for (ff.stack[0..ff.sp]) |v| markValue(heap, v);
-        for (ff.locals) |v| markValue(heap, v);
-    };
+    for (f.loader.scheduler.nested.items) |fib| {
+        for (fib.call_stack.items) |ff| {
+            for (ff.stack[0..ff.sp]) |v| markValue(heap, v);
+            for (ff.locals) |v| markValue(heap, v);
+        }
+        if (fib.waiting_on) |id| markObject(heap, id);
+    }
     for (f.loader.statics.items) |st| for (st) |v| markValue(heap, v);
     if (f.budget.pending) |eid| markObject(heap, eid);
     for (f.loader.scheduler.carriers) |*c| if (c.budget.pending) |eid| markObject(heap, eid);
@@ -564,6 +605,9 @@ fn collectMajor(f: *Frame) void {
     for (f.loader.scheduler.all.items) |fib| if (fib.waiting_on) |id| {
         fib.waiting_on = forwarding[id];
     };
+    for (f.loader.scheduler.nested.items) |fib| if (fib.waiting_on) |id| {
+        fib.waiting_on = forwarding[id];
+    };
 
     // 4. Move live objects (and their generation/remembered bits) to new slots.
     for (0..heap.objects.count()) |oid| {
@@ -617,10 +661,13 @@ fn collectMinor(f: *Frame) void {
         }
         if (fib.waiting_on) |id| markYoungObject(heap, id);
     }
-    for (f.loader.scheduler.nested.items) |fib| for (fib.call_stack.items) |ff| {
-        for (ff.stack[0..ff.sp]) |v| markYoungValue(heap, v);
-        for (ff.locals) |v| markYoungValue(heap, v);
-    };
+    for (f.loader.scheduler.nested.items) |fib| {
+        for (fib.call_stack.items) |ff| {
+            for (ff.stack[0..ff.sp]) |v| markYoungValue(heap, v);
+            for (ff.locals) |v| markYoungValue(heap, v);
+        }
+        if (fib.waiting_on) |id| markYoungObject(heap, id);
+    }
     for (f.loader.statics.items) |st| for (st) |v| markYoungValue(heap, v);
     if (f.budget.pending) |eid| markYoungObject(heap, eid);
     for (f.loader.scheduler.carriers) |*c| if (c.budget.pending) |eid| markYoungObject(heap, eid);
@@ -3519,16 +3566,69 @@ fn nativeInvoke(f: *Frame, owner: *const Class, method: *const Class.Method, slo
             return f.pushInt(if (r) |id| @bitCast(id) else 0);
         }
         if (eq2(mn, md, "wait", "()V") or eq2(mn, md, "wait", "(J)V")) {
+            const heap = f.heap orelse return error.UnsupportedOpcode;
             const recv = switch (slots[0]) {
                 .reference => |r| r orelse return error.NullPointer,
                 else => return error.TypeMismatch,
             };
-            const fib = f.loader.scheduler.carrier.current orelse return; // no scheduler: no-op
+            const sched = &f.loader.scheduler;
+            const fib = fiberOwningFrame(sched, f) orelse return; // no scheduler fiber: no-op
+            const myown = owningThreadId(sched, f) + 1;
+            // Announce the wait BEFORE releasing the monitor so a notifier that
+            // acquires it next always sees us (closes the lost-wakeup window).
             fib.waiting_on = recv;
-            fib.notified = false;
-            try f.loader.scheduler.waitPump(fib, f.budget);
+            @atomicStore(bool, &fib.notified, false, .release);
+            var saved: u32 = 0;
+            switch (heap.get(recv).*) {
+                .instance => |*inst| {
+                    if (@atomicLoad(u64, &inst.mon_owner, .acquire) != myown) {
+                        fib.waiting_on = null; // not the owner (real java: IllegalMonitorStateException)
+                        return;
+                    }
+                    saved = inst.mon_count;
+                    inst.mon_count = 0;
+                    @atomicStore(u64, &inst.mon_owner, 0, .release);
+                },
+                else => {
+                    fib.waiting_on = null;
+                    return;
+                },
+            }
+            // Phase 1: block until notified (spin at >1 carrier, cooperatively pump at 1).
+            if (sched.carriers_total > 1) {
+                while (!@atomicLoad(bool, &fib.notified, .acquire)) {
+                    if (sched.safepoint_requested.load(.acquire)) sched.waitForSafepointRelease();
+                    std.atomic.spinLoopHint();
+                }
+            } else {
+                while (!fib.notified) {
+                    if (!sched.pumpStep(f.budget)) break; // nothing runnable -> spurious wakeup
+                }
+            }
+            // Phase 2: reacquire the monitor. Its id may have moved under a GC, so
+            // read the GC-remapped id from waiting_on each iteration.
+            while (true) {
+                const oid = fib.waiting_on orelse break;
+                var got = false;
+                switch (heap.get(oid).*) {
+                    .instance => |*inst| {
+                        if (@cmpxchgStrong(u64, &inst.mon_owner, 0, myown, .acq_rel, .acquire) == null) {
+                            inst.mon_count = saved;
+                            got = true;
+                        }
+                    },
+                    else => got = true,
+                }
+                if (got) break;
+                if (sched.carriers_total > 1) {
+                    if (sched.safepoint_requested.load(.acquire)) sched.waitForSafepointRelease();
+                    std.atomic.spinLoopHint();
+                } else {
+                    if (!sched.pumpStep(f.budget)) break;
+                }
+            }
             fib.waiting_on = null;
-            fib.notified = false;
+            @atomicStore(bool, &fib.notified, false, .release);
             return;
         }
         if (eq2(mn, md, "notify", "()V")) {
@@ -3536,12 +3636,23 @@ fn nativeInvoke(f: *Frame, owner: *const Class, method: *const Class.Method, slo
                 .reference => |r| r orelse return error.NullPointer,
                 else => return error.TypeMismatch,
             };
-            for (f.loader.scheduler.all.items) |w| {
+            const sc = &f.loader.scheduler;
+            sc.lock.lock();
+            defer sc.lock.unlock();
+            var woke = false;
+            for (sc.all.items) |w| {
                 if (!w.notified and w.waiting_on == recv) {
-                    w.notified = true;
+                    @atomicStore(bool, &w.notified, true, .release);
+                    woke = true;
                     break;
                 }
             }
+            if (!woke) for (sc.nested.items) |w| {
+                if (!w.notified and w.waiting_on == recv) {
+                    @atomicStore(bool, &w.notified, true, .release);
+                    break;
+                }
+            };
             return;
         }
         if (eq2(mn, md, "notifyAll", "()V")) {
@@ -3549,8 +3660,14 @@ fn nativeInvoke(f: *Frame, owner: *const Class, method: *const Class.Method, slo
                 .reference => |r| r orelse return error.NullPointer,
                 else => return error.TypeMismatch,
             };
-            for (f.loader.scheduler.all.items) |w| {
-                if (w.waiting_on == recv) w.notified = true;
+            const sc = &f.loader.scheduler;
+            sc.lock.lock();
+            defer sc.lock.unlock();
+            for (sc.all.items) |w| {
+                if (w.waiting_on == recv) @atomicStore(bool, &w.notified, true, .release);
+            }
+            for (sc.nested.items) |w| {
+                if (w.waiting_on == recv) @atomicStore(bool, &w.notified, true, .release);
             }
             return;
         }
@@ -4431,6 +4548,36 @@ const Scheduler = struct {
     /// Run ready fibers until the given waiter has been notified (or nothing is
     /// runnable — a spurious return, which Java code tolerates via a while-loop
     /// re-check). Backs Object.wait() on the cooperative single carrier.
+    /// Run one ready fiber (cooperative single-carrier helper for blocking natives
+    /// that must let others make progress -- monitor reacquire, wait-for-notify).
+    /// Returns false if nothing was runnable.
+    fn pumpStep(self: *Scheduler, budget: *Budget) bool {
+        const fib = self.popReady() orelse return false;
+        const saved = self.carrier.current;
+        defer self.carrier.current = saved;
+        for (fib.call_stack.items) |fr| fr.budget = budget;
+        self.carrier.current = fib;
+        fib.status = .running;
+        const outcome = driveFiber(fib, budget) catch |e| {
+            fib.err = e;
+            fib.status = .done;
+            _ = self.outstanding.fetchSub(1, .acq_rel);
+            return true;
+        };
+        switch (outcome) {
+            .yielded => {
+                budget.reductions = budget.reduction_quantum;
+                fib.status = .ready;
+                self.pushReady(fib) catch {};
+            },
+            .completed => {
+                fib.status = .done;
+                _ = self.outstanding.fetchSub(1, .acq_rel);
+            },
+        }
+        return true;
+    }
+
     fn waitPump(self: *Scheduler, waiter: *Fiber, budget: *Budget) RunError!void {
         const saved = self.carrier.current;
         defer self.carrier.current = saved;
@@ -5481,8 +5628,60 @@ fn runFrame(f: *Frame) RunError!FrameResult {
             f.pc += 3;
             continue :sw try step(f);
         },
-        .monitorenter, .monitorexit => {
-            _ = (try f.popRef()) orelse return error.NullPointer; // single-threaded: null-check only
+        .monitorenter => {
+            const heap = f.heap orelse return error.UnsupportedOpcode;
+            // Peek (don't pop) so the objectref stays a GC root on our operand
+            // stack: a major GC on another carrier can move the object AND remap
+            // its id, so we re-read the id and re-fetch the instance each spin.
+            if (f.sp == 0) return error.StackOverflow;
+            _ = (switch (f.stack[f.sp - 1]) {
+                .reference => |r| r,
+                else => return error.TypeMismatch,
+            }) orelse return error.NullPointer;
+            const sched = &f.loader.scheduler;
+            const myown: u64 = owningThreadId(sched, f) + 1;
+            while (true) {
+                const cur = f.stack[f.sp - 1].reference orelse return error.NullPointer;
+                var acquired = false;
+                switch (heap.get(cur).*) {
+                    .instance => |*inst| {
+                        const owner = @atomicLoad(u64, &inst.mon_owner, .acquire);
+                        if (owner == 0) {
+                            if (@cmpxchgStrong(u64, &inst.mon_owner, 0, myown, .acq_rel, .acquire) == null) {
+                                inst.mon_count = 1;
+                                acquired = true;
+                            }
+                        } else if (owner == myown) {
+                            inst.mon_count += 1; // reentrant
+                            acquired = true;
+                        }
+                    },
+                    else => acquired = true, // non-instance monitor: null-check only (rare)
+                }
+                if (acquired) break;
+                // Contended. One carrier: yield cooperatively so the owner can run
+                // and release (retry at this same pc). Multiple carriers: spin,
+                // polling the safepoint so GC can still stop the world.
+                if (sched.carriers_total <= 1) return error.Yield;
+                if (sched.safepoint_requested.load(.acquire)) sched.waitForSafepointRelease();
+                std.atomic.spinLoopHint();
+            }
+            _ = try f.popRef(); // consume the objectref now that we hold the monitor
+            f.pc += 1;
+            continue :sw try step(f);
+        },
+        .monitorexit => {
+            const heap = f.heap orelse return error.UnsupportedOpcode;
+            const cur = (try f.popRef()) orelse return error.NullPointer;
+            switch (heap.get(cur).*) {
+                .instance => |*inst| {
+                    if (inst.mon_count > 0) {
+                        inst.mon_count -= 1;
+                        if (inst.mon_count == 0) @atomicStore(u64, &inst.mon_owner, 0, .release);
+                    }
+                },
+                else => {},
+            }
             f.pc += 1;
             continue :sw try step(f);
         },
