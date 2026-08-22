@@ -615,7 +615,7 @@ fn step(f: *Frame) RunError!Op {
     f.budget.reductions -= 1;
     // Safepoint poll: a carrier parks here when the world must stop (GC). One
     // carrier today -> the flag is never set, so this is a predictable no-op.
-    if (f.loader.scheduler.safepoint_requested) f.loader.scheduler.waitForSafepointRelease();
+    if (f.loader.scheduler.safepoint_requested.load(.acquire)) f.loader.scheduler.waitForSafepointRelease();
     return opAt(f.code, f.pc);
 }
 fn s8(code: []const u8, off: usize) RunError!i32 {
@@ -3913,9 +3913,10 @@ const Scheduler = struct {
     all: std.ArrayList(*Fiber) = .empty,
     current: ?*Fiber = null,
     next_id: u64 = 0,
-    /// Stop-the-world request flag (Stage 4d makes it atomic). See
-    /// waitForSafepointRelease / pollSafepoint.
-    safepoint_requested: bool = false,
+    /// Stop-the-world request flag: a carrier sets it, all carriers park at their
+    /// next safepoint poll, GC runs, then it clears. Atomic for cross-carrier
+    /// visibility. Never set with one carrier (poll is a no-op fast path).
+    safepoint_requested: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
 
     fn deinit(self: *Scheduler) void {
         for (self.all.items) |fib| {
@@ -3983,9 +3984,11 @@ const Scheduler = struct {
     /// today, so it is never set (poll is a no-op fast path); Stage 4d makes this
     /// atomic and adds the actual carrier parking.
     fn waitForSafepointRelease(self: *Scheduler) void {
-        // Stage 4d: block this carrier until the collecting carrier clears
-        // safepoint_requested. With one carrier the flag is never set.
-        while (self.safepoint_requested) {}
+        // Block this carrier until the collecting carrier clears the request.
+        // With one carrier the flag is never set, so this never spins.
+        while (self.safepoint_requested.load(.acquire)) {
+            std.atomic.spinLoopHint();
+        }
     }
 
     fn fiberById(self: *Scheduler, id: u64) ?*Fiber {

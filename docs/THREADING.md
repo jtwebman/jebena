@@ -157,3 +157,11 @@ under a coarse lock**, which keeps the moving GC exactly as simple as it is toda
 
 Correctness over speed at every step. If in doubt, serialize behind the
 safepoint or a mutex first, optimize later.
+
+### Toolchain note for 4d (Zig 0.16 concurrency)
+
+This Zig build has NO `std.Thread.Mutex` — sync primitives live under `std.Io`
+(the Io-based concurrency model; `std.Io.Mutex` etc.) and `std.atomic`.
+`std.Thread.spawn` exists (already used for the big-stack run thread). So 4d
+locking = `std.atomic` (spinlocks / `std.atomic.Value`) or `std.Io.Mutex` via the
+loader's `io` handle. `Scheduler.safepoint_requested` is a `std.atomic.Value(bool)`.
