@@ -247,14 +247,17 @@ harden next:**
   run on their own carrier structs. Not exercised by the gate at N>1 (the
   wait/notify smoke runs at the default 1 carrier). Needs a frame→fiber lookup +
   a spin-on-notified path mirroring `join0`.
-- Concurrent **lazy class loading / `getMirror` / string interning** are not yet
-  serialized (step (d)). The stress workload does all of these single-threaded
-  before the parallel phase, so they're safe there, but a program that first-
-  loads a class or interns from a worker under N>1 could race. Fix: a coarse
-  loader lock around load+register+getMirror+intern, released across `<clinit>`.
-- **Concurrent GC** at a safepoint is wired (all carriers poll `safepoint_requested`
-  in `carrierLoop`, the join spin, and `step()`), but not yet stress-tested under
-  real allocation pressure across carriers (the stress loop doesn't allocate).
+- Concurrent **lazy class loading / `getMirror` / string interning**: FIXED
+  (iter 71). A reentrant, safepoint-polling `Loader.load_lock` serializes
+  `resolveClass` (find-or-load-and-register), `getMirror`, `internLiteral`, and
+  `ensureInit`/`<clinit>` across carriers. Reentrant because loading recurses on
+  the same carrier (superclass, `<clinit>`-triggered loads); the spin polls the
+  safepoint because the lock is held across allocation/`<clinit>` that can trigger
+  GC (a non-polling waiter would deadlock the collector). Proven by
+  `scripts/load-stress.sh`: 8 fibers concurrently first-load 12 classpath-dir
+  classes + intern distinct literals at carriers 1 & 4 (+ forced GC), exact vs
+  real java.
+- **Concurrent GC**: FIXED (iter 70, paged table) -- see "SOLVED" above.
 - Pre-existing: ~18 `DebugAllocator` leaks on the StressMain workload (in
   `primitiveClass`'s `gpa.dupe` and friends) — present at HEAD before this change,
   identical count at 1 and 4 carriers, so not a parallelism regression. Fix

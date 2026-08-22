@@ -255,6 +255,38 @@ const SpinLock = struct {
     }
 };
 
+/// Reentrant lock for lazy loader mutations (class load/register, getMirror,
+/// interning, <clinit>). Reentrant because loading recurses on the SAME carrier
+/// (superclass load, <clinit>-triggered loads). Its spin polls the GC safepoint:
+/// the lock is held across allocation/<clinit>, which can request a stop-the-world
+/// GC, so a waiter that didn't poll would never park -> deadlock with the holder.
+const ReentrantLock = struct {
+    inner: SpinLock = .{},
+    owner: std.atomic.Value(usize) = std.atomic.Value(usize).init(0), // 0 = unheld
+    depth: usize = 0,
+
+    fn lock(self: *ReentrantLock, sched: *Scheduler) void {
+        const tid: usize = @intCast(std.Thread.getCurrentId());
+        if (self.owner.load(.acquire) == tid) {
+            self.depth += 1;
+            return;
+        }
+        while (self.inner.state.swap(true, .acquire)) {
+            if (sched.safepoint_requested.load(.acquire)) sched.waitForSafepointRelease();
+            std.atomic.spinLoopHint();
+        }
+        self.owner.store(tid, .release);
+        self.depth = 1;
+    }
+    fn unlock(self: *ReentrantLock) void {
+        self.depth -= 1;
+        if (self.depth == 0) {
+            self.owner.store(0, .release);
+            self.inner.state.store(false, .release);
+        }
+    }
+};
+
 /// Paged object-table storage: a fixed-capacity directory of fixed-size pages.
 /// Page pointers never move once allocated, so get(id) for any committed id is a
 /// lockless read with no torn-realloc race -- the key to concurrent allocation
@@ -819,6 +851,9 @@ pub const Loader = struct {
     /// Serializes java.util.concurrent.atomic read-modify-write ops so they are
     /// lost-update-free across carriers (Stage 4). Uncontended with one carrier.
     atomics_lock: SpinLock = .{},
+    /// Serializes lazy class loading/registration, getMirror, string interning,
+    /// and <clinit> across carriers (Stage 4d H1). Reentrant + safepoint-polling.
+    load_lock: ReentrantLock = .{},
     /// Optional GC trigger override (allocations between collections) applied to
     /// the heap runInLoader creates; null keeps the heap default. Set from
     /// JEBENA_GC_INTERVAL so stress tests can force frequent (concurrent) GC.
@@ -940,6 +975,11 @@ pub const Loader = struct {
     }
     /// Run <clinit> once for `class` (and register it if unseen).
     fn ensureInit(self: *Loader, class: *const Class, heap: *Heap, budget: *Budget) RunError!void {
+        // Serialize init across carriers: concurrent first-init of a class would
+        // race initialized[i] and double-run <clinit>. Reentrant (a <clinit> that
+        // triggers more init recurses on the same carrier).
+        self.load_lock.lock(&self.scheduler);
+        defer self.load_lock.unlock();
         const i = self.indexOf(class) orelse return error.LinkError;
         if (self.initialized.items[i]) return;
         self.initialized.items[i] = true;
@@ -1575,6 +1615,10 @@ fn fieldRef(cls: *const Class, cp_index: u16) RunError!FieldRefInfo {
 
 fn resolveClass(f: *Frame, current: *const Class, name: []const u8) RunError!*const Class {
     if (std.mem.eql(u8, name, current.name)) return current;
+    // Serialize the find-or-load-and-register path so concurrent carriers don't
+    // race on loader.classes/statics/initialized/mirrors (append + duplicate load).
+    f.loader.load_lock.lock(&f.loader.scheduler);
+    defer f.loader.load_lock.unlock();
     if (f.loader.find(name)) |c| return c;
     return (try f.loader.loadFromClasspath(name)) orelse error.LinkError;
 }
@@ -2057,6 +2101,8 @@ fn createString(f: *Frame, mutf8_bytes: []const u8) RunError!void {
 }
 fn internLiteral(f: *Frame, chars: []const i32) RunError!u32 {
     const heap = f.heap orelse return error.UnsupportedOpcode;
+    f.loader.load_lock.lock(&f.loader.scheduler); // heap.interned StringHashMap put
+    defer f.loader.load_lock.unlock();
     const key = heap.gpa.alloc(u8, chars.len * 2) catch return error.OutOfMemory;
     for (chars, 0..) |c, i| {
         const u: u16 = @truncate(@as(u32, @bitCast(c)));
@@ -2869,6 +2915,8 @@ fn classOf(heap: *Heap, id: u32) ?*const Class {
 fn getMirror(f: *Frame, cls: *const Class) RunError!u32 {
     const heap = f.heap orelse return error.UnsupportedOpcode;
     const idx = f.loader.indexOf(cls) orelse return error.LinkError;
+    f.loader.load_lock.lock(&f.loader.scheduler); // writes loader.mirrors + allocs
+    defer f.loader.load_lock.unlock();
     if (f.loader.mirrors.items[idx]) |id| return id;
     const class_class = f.loader.find("java/lang/Class") orelse (try f.loader.loadFromClasspath("java/lang/Class")) orelse return error.LinkError;
     const mid = try heap.allocInstance(class_class);
