@@ -34,6 +34,7 @@ Each iteration is one small, verified, committed step. Never leave the tree red.
    - `bash scripts/breadth-diff.sh` — java.* breadth differential (java.time LocalDate/LocalTime/Duration arithmetic, TreeMap/LinkedHashMap ordered iteration, Collections + Arrays helpers, java.util.regex Pattern/Matcher, java.util.stream pipeline + Collectors) checked byte-for-byte vs real java, exercising clean-room jbase bytecode via EAGER classpath
    - `bash scripts/mainrun-smoke.sh` — real-program entry point: `jebena run <Main> main <cp>... -- <args>` invokes public static void main(String[]) with argv marshalled into a real String[]; full stdout byte-identical to real java
    - `bash scripts/exit-smoke.sh` — program termination semantics: clean exit (status 0), System.exit(n) (status n), and an uncaught exception (java-style "Exception in thread main" stderr first line + status 1), all matching real java
+   - `bash scripts/jar-smoke.sh` — `jebena -jar <app.jar> <jbase-dir> -- <args>` reads Main-Class from META-INF/MANIFEST.MF and runs a multi-class app whose classes load lazily from the jar; stdout byte-identical to real `java -jar`
    - `bash scripts/portability-check.sh` — VM cross-compiles for macOS/Linux (aarch64/x86_64)
    - `zig fmt --check src/ build.zig` — formatted
    If anything fails: fix it, or revert the change. Do not commit red.

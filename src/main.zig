@@ -39,6 +39,17 @@ pub fn main(init: std.process.Init) !void {
         else
             null;
         try cmdRun(gpa, io, &args, carriers, trace, gc_interval);
+    } else if (std.mem.eql(u8, cmd, "-jar")) {
+        const carriers: u32 = if (init.environ_map.get("JEBENA_CARRIERS")) |v|
+            (std.fmt.parseInt(u32, v, 10) catch 1)
+        else
+            1;
+        const trace = init.environ_map.get("JEBENA_CARRIER_TRACE") != null;
+        const gc_interval: ?usize = if (init.environ_map.get("JEBENA_GC_INTERVAL")) |v|
+            (std.fmt.parseInt(usize, v, 10) catch null)
+        else
+            null;
+        try cmdJar(gpa, io, &args, carriers, trace, gc_interval);
     } else {
         return usage();
     }
@@ -51,6 +62,7 @@ fn usage() void {
         \\  jebena disasm <file.class>
         \\  jebena run    <MainClass> <method> <file.class|dir>...
         \\  jebena run    <MainClass> main <classpath>... -- <program args>...
+        \\  jebena -jar   <app.jar> [classpath]... -- <program args>...
         \\  jebena                 (no args: self-demo)
         \\
     , .{});
@@ -139,62 +151,7 @@ fn cmdRun(gpa: std.mem.Allocator, io: std.Io, it: *std.process.Args.Iterator, ca
         };
         try cfs.append(gpa, cf);
     }
-    const provided = struct {
-        fn has(list: []const *jebena.ClassFile, name: []const u8) bool {
-            for (list) |cf| {
-                const n = cf.constant_pool.classNameOf(cf.this_class) catch continue;
-                if (std.mem.eql(u8, n, name)) return true;
-            }
-            return false;
-        }
-    }.has;
-
-    // Core java.lang stub hierarchy (skipped for any class provided as real bytecode).
-    inline for (.{
-        .{ "java/lang/Object", @as(?[]const u8, null) },
-        .{ "java/lang/String", @as(?[]const u8, "java/lang/Object") },
-        .{ "java/lang/Runnable", @as(?[]const u8, "java/lang/Object") },
-        .{ "java/lang/StringBuilder", @as(?[]const u8, "java/lang/Object") },
-        .{ "java/lang/StringBuffer", @as(?[]const u8, "java/lang/Object") },
-        .{ "java/lang/CharSequence", @as(?[]const u8, "java/lang/Object") },
-        .{ "java/util/Comparator", @as(?[]const u8, "java/lang/Object") },
-        .{ "java/lang/Number", @as(?[]const u8, "java/lang/Object") },
-        .{ "java/lang/Integer", @as(?[]const u8, "java/lang/Number") },
-        .{ "java/lang/Long", @as(?[]const u8, "java/lang/Number") },
-        .{ "java/lang/Short", @as(?[]const u8, "java/lang/Number") },
-        .{ "java/lang/Byte", @as(?[]const u8, "java/lang/Number") },
-        .{ "java/lang/Double", @as(?[]const u8, "java/lang/Number") },
-        .{ "java/lang/Float", @as(?[]const u8, "java/lang/Number") },
-        .{ "java/lang/Boolean", @as(?[]const u8, "java/lang/Object") },
-        .{ "java/lang/Character", @as(?[]const u8, "java/lang/Object") },
-
-        .{ "java/lang/Throwable", @as(?[]const u8, "java/lang/Object") },
-        .{ "java/lang/Error", @as(?[]const u8, "java/lang/Throwable") },
-        .{ "java/lang/Exception", @as(?[]const u8, "java/lang/Throwable") },
-        .{ "java/lang/RuntimeException", @as(?[]const u8, "java/lang/Exception") },
-        .{ "java/lang/ArithmeticException", @as(?[]const u8, "java/lang/RuntimeException") },
-        .{ "java/lang/NullPointerException", @as(?[]const u8, "java/lang/RuntimeException") },
-        .{ "java/lang/IllegalArgumentException", @as(?[]const u8, "java/lang/RuntimeException") },
-        .{ "java/lang/IllegalStateException", @as(?[]const u8, "java/lang/RuntimeException") },
-        .{ "java/lang/ClassCastException", @as(?[]const u8, "java/lang/RuntimeException") },
-        .{ "java/lang/NegativeArraySizeException", @as(?[]const u8, "java/lang/RuntimeException") },
-        .{ "java/lang/IndexOutOfBoundsException", @as(?[]const u8, "java/lang/RuntimeException") },
-        .{ "java/lang/ArrayIndexOutOfBoundsException", @as(?[]const u8, "java/lang/IndexOutOfBoundsException") },
-    }) |pair| {
-        if (!provided(cfs.items, pair[0])) { // skip if real bytecode supplied for this class
-            // Prefer the real clean-room class from the classpath over a stub when
-            // one is available (e.g. jbase/out on the classpath) — the stub is only
-            // a fallback for pure-app runs that don't ship java.base.
-            const existing = loader.find(pair[0]);
-            const real = if (existing == null) (try loader.loadFromClasspath(pair[0])) else existing;
-            if (real == null) {
-                const super = if (pair[1]) |sn| loader.find(sn) else null;
-                const c = try a.create(IC.Class);
-                c.* = try IC.makeStub(gpa, a, pair[0], pair[1], super);
-                try loader.register(c);
-            }
-        }
-    }
+    try installCoreStubs(gpa, a, &loader, cfs.items);
 
     // Build Class metadata, resolving supers before subclasses (iterate to a fixpoint).
     var pending: std.ArrayList(*jebena.ClassFile) = .empty;
@@ -285,6 +242,131 @@ fn cmdRun(gpa: std.mem.Allocator, io: std.Io, it: *std.process.Args.Iterator, ca
         .double => |x| std.debug.print("{s}.{s}() = {d}d\n", .{ main_class, method, x }),
         else => std.debug.print("{s}.{s}() returned a reference\n", .{ main_class, method }),
     } else std.debug.print("{s}.{s}() returned void\n", .{ main_class, method });
+}
+
+/// Install the core java.lang stub hierarchy on `loader`, skipping any class
+/// supplied as real bytecode (in `cfs_items`) and preferring a real clean-room
+/// class from the classpath (e.g. jbase/out) over a stub when available. Shared
+/// by cmdRun and cmdJar.
+fn installCoreStubs(gpa: std.mem.Allocator, a: std.mem.Allocator, loader: *IC.Loader, cfs_items: []const *jebena.ClassFile) !void {
+    const provided = struct {
+        fn has(list: []const *jebena.ClassFile, name: []const u8) bool {
+            for (list) |cf| {
+                const n = cf.constant_pool.classNameOf(cf.this_class) catch continue;
+                if (std.mem.eql(u8, n, name)) return true;
+            }
+            return false;
+        }
+    }.has;
+
+    inline for (.{
+        .{ "java/lang/Object", @as(?[]const u8, null) },
+        .{ "java/lang/String", @as(?[]const u8, "java/lang/Object") },
+        .{ "java/lang/Runnable", @as(?[]const u8, "java/lang/Object") },
+        .{ "java/lang/StringBuilder", @as(?[]const u8, "java/lang/Object") },
+        .{ "java/lang/StringBuffer", @as(?[]const u8, "java/lang/Object") },
+        .{ "java/lang/CharSequence", @as(?[]const u8, "java/lang/Object") },
+        .{ "java/util/Comparator", @as(?[]const u8, "java/lang/Object") },
+        .{ "java/lang/Number", @as(?[]const u8, "java/lang/Object") },
+        .{ "java/lang/Integer", @as(?[]const u8, "java/lang/Number") },
+        .{ "java/lang/Long", @as(?[]const u8, "java/lang/Number") },
+        .{ "java/lang/Short", @as(?[]const u8, "java/lang/Number") },
+        .{ "java/lang/Byte", @as(?[]const u8, "java/lang/Number") },
+        .{ "java/lang/Double", @as(?[]const u8, "java/lang/Number") },
+        .{ "java/lang/Float", @as(?[]const u8, "java/lang/Number") },
+        .{ "java/lang/Boolean", @as(?[]const u8, "java/lang/Object") },
+        .{ "java/lang/Character", @as(?[]const u8, "java/lang/Object") },
+
+        .{ "java/lang/Throwable", @as(?[]const u8, "java/lang/Object") },
+        .{ "java/lang/Error", @as(?[]const u8, "java/lang/Throwable") },
+        .{ "java/lang/Exception", @as(?[]const u8, "java/lang/Throwable") },
+        .{ "java/lang/RuntimeException", @as(?[]const u8, "java/lang/Exception") },
+        .{ "java/lang/ArithmeticException", @as(?[]const u8, "java/lang/RuntimeException") },
+        .{ "java/lang/NullPointerException", @as(?[]const u8, "java/lang/RuntimeException") },
+        .{ "java/lang/IllegalArgumentException", @as(?[]const u8, "java/lang/RuntimeException") },
+        .{ "java/lang/IllegalStateException", @as(?[]const u8, "java/lang/RuntimeException") },
+        .{ "java/lang/ClassCastException", @as(?[]const u8, "java/lang/RuntimeException") },
+        .{ "java/lang/NegativeArraySizeException", @as(?[]const u8, "java/lang/RuntimeException") },
+        .{ "java/lang/IndexOutOfBoundsException", @as(?[]const u8, "java/lang/RuntimeException") },
+        .{ "java/lang/ArrayIndexOutOfBoundsException", @as(?[]const u8, "java/lang/IndexOutOfBoundsException") },
+    }) |pair| {
+        if (!provided(cfs_items, pair[0])) { // skip if real bytecode supplied for this class
+            const existing = loader.find(pair[0]);
+            const real = if (existing == null) (try loader.loadFromClasspath(pair[0])) else existing;
+            if (real == null) {
+                const super = if (pair[1]) |sn| loader.find(sn) else null;
+                const c = try a.create(IC.Class);
+                c.* = try IC.makeStub(gpa, a, pair[0], pair[1], super);
+                try loader.register(c);
+            }
+        }
+    }
+}
+
+/// `jebena -jar <app.jar> [extra-classpath]... [-- program args...]`: read
+/// Main-Class from the jar's manifest and run it. The jar and any extra
+/// classpath entries (e.g. a jbase/out directory providing java.base) are placed
+/// on the classpath; classes load lazily from the jar.
+fn cmdJar(gpa: std.mem.Allocator, io: std.Io, it: *std.process.Args.Iterator, carriers: u32, trace: bool, gc_interval: ?usize) !void {
+    const jar_path = it.next() orelse return usage();
+    var cpdirs: std.ArrayList([]const u8) = .empty;
+    defer cpdirs.deinit(gpa);
+    var prog_args: std.ArrayList([]const u8) = .empty;
+    defer prog_args.deinit(gpa);
+    // The jar itself is the first classpath entry, so its classes load lazily.
+    try cpdirs.append(gpa, jar_path);
+    while (it.next()) |arg| {
+        if (std.mem.eql(u8, arg, "--")) {
+            while (it.next()) |a2| try prog_args.append(gpa, a2);
+            break;
+        }
+        try cpdirs.append(gpa, arg);
+    }
+
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var loader = IC.Loader.init(gpa);
+    loader.io = io;
+    loader.class_arena = a;
+    loader.scheduler.requested_carriers = if (carriers == 0) 1 else carriers;
+    loader.scheduler.trace_carriers = trace;
+    loader.gc_interval = gc_interval;
+    try loader.classpath.appendSlice(gpa, cpdirs.items);
+    defer loader.deinit();
+
+    const main_class = (try loader.jarMainClass(io, jar_path)) orelse {
+        std.debug.print("no Main-Class in {s} manifest\n", .{jar_path});
+        return error.MethodNotFound;
+    };
+
+    try installCoreStubs(gpa, a, &loader, &.{});
+
+    const cls = loader.find(main_class) orelse (try loader.loadFromClasspath(main_class)) orelse {
+        std.debug.print("class not found: {s}\n", .{main_class});
+        return error.ClassNotFound;
+    };
+    var has_main = false;
+    for (cls.methods) |m| {
+        if (std.mem.eql(u8, m.name, "main") and m.is_static and
+            std.mem.eql(u8, m.descriptor, "([Ljava/lang/String;)V"))
+        {
+            has_main = true;
+            break;
+        }
+    }
+    if (!has_main) {
+        std.debug.print("no main(String[]) in {s}\n", .{main_class});
+        return error.MethodNotFound;
+    }
+    var mresult = RunResult{};
+    const mt = try std.Thread.spawn(.{ .stack_size = 512 * 1024 * 1024 }, runMainEntry, .{ &loader, cls, prog_args.items, &mresult });
+    mt.join();
+    if (mresult.err) |e| {
+        if (e != error.JavaException) std.debug.print("execution error: {s}\n", .{@errorName(e)});
+        std.process.exit(1);
+    }
 }
 
 fn readFile(io: std.Io, gpa: std.mem.Allocator, path: []const u8) ![]u8 {

@@ -869,6 +869,12 @@ fn branch(pc: usize, offset: i32, code_len: usize) RunError!usize {
 fn zipReadEntryClass(gpa: std.mem.Allocator, zip: []const u8, want: []const u8) RunError!?[]u8 {
     const want_name = std.fmt.allocPrint(gpa, "{s}.class", .{want}) catch return error.OutOfMemory;
     defer gpa.free(want_name);
+    return zipReadEntry(gpa, zip, want_name);
+}
+
+/// Like zipReadEntryClass but for an exact archive entry path (e.g.
+/// "META-INF/MANIFEST.MF"). Caller owns the returned slice.
+fn zipReadEntry(gpa: std.mem.Allocator, zip: []const u8, want_name: []const u8) RunError!?[]u8 {
     if (zip.len < 22) return null;
 
     // Locate the End Of Central Directory record (sig 0x06054b50), scanning back
@@ -926,6 +932,37 @@ fn zipReadEntryClass(gpa: std.mem.Allocator, zip: []const u8, want: []const u8) 
 }
 
 const JarBytes = struct { path: []const u8, bytes: []u8 };
+
+/// Parse the `Main-Class:` value from a MANIFEST.MF, honoring the JAR spec's
+/// line folding (a continuation line begins with a single space) and CRLF. The
+/// returned value is caller-owned; null if there is no Main-Class header.
+fn parseManifestMainClass(gpa: std.mem.Allocator, mf: []const u8) RunError!?[]u8 {
+    // Unfold continuation lines into one logical line per header.
+    var unfolded: std.ArrayList(u8) = .empty;
+    defer unfolded.deinit(gpa);
+    var i: usize = 0;
+    while (i < mf.len) {
+        const nl = std.mem.indexOfScalarPos(u8, mf, i, '\n') orelse mf.len;
+        var line = mf[i..nl];
+        if (line.len > 0 and line[line.len - 1] == '\r') line = line[0 .. line.len - 1];
+        if (line.len > 0 and line[0] == ' ') {
+            unfolded.appendSlice(gpa, line[1..]) catch return error.OutOfMemory; // continuation
+        } else {
+            if (unfolded.items.len > 0) unfolded.append(gpa, '\n') catch return error.OutOfMemory;
+            unfolded.appendSlice(gpa, line) catch return error.OutOfMemory;
+        }
+        i = nl + 1;
+    }
+    var it = std.mem.splitScalar(u8, unfolded.items, '\n');
+    while (it.next()) |ln| {
+        if (std.mem.startsWith(u8, ln, "Main-Class:")) {
+            const v = std.mem.trim(u8, ln["Main-Class:".len..], " \t");
+            if (v.len == 0) return null;
+            return gpa.dupe(u8, v) catch error.OutOfMemory;
+        }
+    }
+    return null;
+}
 
 pub const Loader = struct {
     gpa: std.mem.Allocator,
@@ -1034,6 +1071,21 @@ pub const Loader = struct {
         c.* = Class.init(self.gpa, arena, cf, super) catch return error.LinkError;
         self.register(c) catch return error.OutOfMemory;
         return c;
+    }
+
+    /// Read META-INF/MANIFEST.MF from a .jar and return its Main-Class as an
+    /// internal (slash-separated) class name, or null if absent. The result is
+    /// owned by class_arena (lives for the run) so the caller need not free it.
+    pub fn jarMainClass(self: *Loader, io: std.Io, jar_path: []const u8) RunError!?[]const u8 {
+        const jar = (try self.jarBytes(io, jar_path)) orelse return null;
+        const mf = (try zipReadEntry(self.gpa, jar, "META-INF/MANIFEST.MF")) orelse return null;
+        defer self.gpa.free(mf);
+        const dotted = (try parseManifestMainClass(self.gpa, mf)) orelse return null;
+        defer self.gpa.free(dotted);
+        const arena = self.class_arena orelse self.gpa;
+        const out = arena.alloc(u8, dotted.len) catch return error.OutOfMemory;
+        for (dotted, 0..) |c, i| out[i] = if (c == '.') '/' else c;
+        return out;
     }
 
     /// Read (and cache) the full bytes of a .jar archive from the classpath.
