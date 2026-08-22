@@ -23,7 +23,8 @@ JEBENA="$ROOT/zig-out/bin/jebena"
 mapfile -t JBASE < <(find "$ROOT/jbase/out" -name '*.class')
 mapfile -t APP < <(ls "$OUT"/*.class | grep -v '/Driver.class')
 
-CASES="ldPlus ldMinus ldLeap ldDayOfYear ldPlusMonths durMinutes durCompare ltPlus \
+CASES="ldPlus ldMinus ldLeap ldDayOfYear ldPlusMonths periodDays periodNeg ldtCombine \
+durMinutes durCompare ltPlus \
 treeOrder treeNav lhmOrder collSort collMaxMin collReverse arrSortSearch arrCopyRange"
 
 pass=0; fail=0

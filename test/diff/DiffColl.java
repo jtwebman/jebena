@@ -1,6 +1,8 @@
 import java.time.LocalDate;
+import java.time.LocalDateTime;
 import java.time.LocalTime;
 import java.time.Duration;
+import java.time.Period;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -53,6 +55,24 @@ public class DiffColl {
         Duration a = Duration.ofSeconds(90);
         Duration b = Duration.ofMinutes(1);
         return a.compareTo(b) > 0 ? 1 : 0; // 90s > 60s -> 1
+    }
+
+    // ---- java.time.Period ----
+    static int periodDays() {
+        Period p = Period.between(LocalDate.of(2020, 1, 15), LocalDate.of(2021, 3, 20));
+        return p.getYears() * 10000 + p.getMonths() * 100 + p.getDays(); // 1y 2m 5d -> 10205
+    }
+
+    static int periodNeg() {
+        // end month-day earlier than start -> borrow: 2020-03-31 .. 2020-05-01
+        Period p = Period.between(LocalDate.of(2020, 3, 31), LocalDate.of(2020, 5, 1));
+        return p.getMonths() * 100 + p.getDays(); // 1m 1d -> 101
+    }
+
+    // ---- java.time.LocalDateTime (via LocalDate.atTime) ----
+    static int ldtCombine() {
+        LocalDateTime dt = LocalDate.of(2020, 6, 15).atTime(9, 45).plusHours(20); // -> next day 05:45
+        return dt.getDayOfMonth() * 10000 + dt.getHour() * 100 + dt.getMinute(); // 160545
     }
 
     // ---- java.time.LocalTime ----

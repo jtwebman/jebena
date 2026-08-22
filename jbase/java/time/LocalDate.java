@@ -183,6 +183,37 @@ public final class LocalDate implements Comparable<LocalDate> {
         return plusYears(-yearsToSubtract);
     }
 
+    private long getProlepticMonth() {
+        return year * 12L + (month - 1);
+    }
+
+    /** Combine this date with a time to create a LocalDateTime. */
+    public LocalDateTime atTime(LocalTime time) {
+        return LocalDateTime.of(this, time);
+    }
+
+    /** Combine this date with an hour and minute to create a LocalDateTime. */
+    public LocalDateTime atTime(int hour, int minute) {
+        return LocalDateTime.of(this, LocalTime.of(hour, minute));
+    }
+
+    /** Period from this date (inclusive) to the end date (exclusive). */
+    public Period until(LocalDate end) {
+        long totalMonths = end.getProlepticMonth() - this.getProlepticMonth();
+        int days = end.day - this.day;
+        if (totalMonths > 0 && days < 0) {
+            totalMonths--;
+            LocalDate calcDate = this.plusMonths(totalMonths);
+            days = (int) (end.toEpochDay() - calcDate.toEpochDay());
+        } else if (totalMonths < 0 && days > 0) {
+            totalMonths++;
+            days -= end.lengthOfMonth();
+        }
+        long years = totalMonths / 12;
+        int months = (int) (totalMonths % 12);
+        return Period.of((int) years, months, days);
+    }
+
     private static LocalDate resolvePreviousValid(int year, int month, int day) {
         int dom = lengthOfMonth(year, month);
         if (day > dom) {

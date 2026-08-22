@@ -36,6 +36,11 @@ public final class Period {
         return create(0, months, 0);
     }
 
+    /** Period between two dates (start inclusive, end exclusive). */
+    public static Period between(LocalDate startInclusive, LocalDate endExclusive) {
+        return startInclusive.until(endExclusive);
+    }
+
     public static Period ofDays(int days) {
         return create(0, 0, days);
     }
