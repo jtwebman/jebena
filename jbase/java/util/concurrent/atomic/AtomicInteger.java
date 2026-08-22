@@ -25,52 +25,21 @@ public class AtomicInteger extends Number {
         this.value = newValue;
     }
 
-    public final int getAndSet(int newValue) {
-        int old = value;
-        value = newValue;
-        return old;
-    }
+    public final native int getAndSet(int newValue);
 
-    public final int getAndIncrement() {
-        int old = value;
-        value = old + 1;
-        return old;
-    }
+    public final native int getAndIncrement();
 
-    public final int getAndDecrement() {
-        int old = value;
-        value = old - 1;
-        return old;
-    }
+    public final native int getAndDecrement();
 
-    public final int getAndAdd(int delta) {
-        int old = value;
-        value = old + delta;
-        return old;
-    }
+    public final native int getAndAdd(int delta);
 
-    public final int incrementAndGet() {
-        value = value + 1;
-        return value;
-    }
+    public final native int incrementAndGet();
 
-    public final int decrementAndGet() {
-        value = value - 1;
-        return value;
-    }
+    public final native int decrementAndGet();
 
-    public final int addAndGet(int delta) {
-        value = value + delta;
-        return value;
-    }
+    public final native int addAndGet(int delta);
 
-    public final boolean compareAndSet(int expect, int update) {
-        if (value == expect) {
-            value = update;
-            return true;
-        }
-        return false;
-    }
+    public final native boolean compareAndSet(int expect, int update);
 
     public int intValue() {
         return value;

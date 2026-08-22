@@ -753,6 +753,9 @@ pub const Loader = struct {
     io: ?std.Io = null,
     /// Cooperative green-thread scheduler (top-level runs go through it).
     scheduler: Scheduler,
+    /// Serializes java.util.concurrent.atomic read-modify-write ops so they are
+    /// lost-update-free across carriers (Stage 4). Uncontended with one carrier.
+    atomics_lock: SpinLock = .{},
     /// Classpath directories searched (in order) to lazily load a class by name
     /// on first resolution. Empty under unit tests and eager-file runs.
     classpath: std.ArrayList([]const u8) = .empty,
@@ -3252,6 +3255,64 @@ fn nativeInvoke(f: *Frame, owner: *const Class, method: *const Class.Method, slo
     const on = owner.name;
     const mn = method.name;
     const md = method.descriptor;
+    if (std.mem.eql(u8, on, "java/util/concurrent/atomic/AtomicInteger")) {
+        const heap = f.heap orelse return error.UnsupportedOpcode;
+        const recv = switch (slots[0]) {
+            .reference => |r| r orelse return error.NullPointer,
+            else => return error.TypeMismatch,
+        };
+        const inst = switch (heap.get(recv).*) {
+            .instance => |*x| x,
+            else => return error.LinkError,
+        };
+        const vidx = inst.class.findField("value") orelse return error.LinkError;
+        // Locked read-modify-write: atomic across carriers (safepoint keeps GC out
+        // during the native, so the fields pointer is stable here).
+        f.loader.atomics_lock.lock();
+        defer f.loader.atomics_lock.unlock();
+        const cur = inst.fields[vidx].int;
+        if (eq2(mn, md, "incrementAndGet", "()I")) {
+            inst.fields[vidx] = .{ .int = cur +% 1 };
+            return f.pushInt(cur +% 1);
+        }
+        if (eq2(mn, md, "getAndIncrement", "()I")) {
+            inst.fields[vidx] = .{ .int = cur +% 1 };
+            return f.pushInt(cur);
+        }
+        if (eq2(mn, md, "decrementAndGet", "()I")) {
+            inst.fields[vidx] = .{ .int = cur -% 1 };
+            return f.pushInt(cur -% 1);
+        }
+        if (eq2(mn, md, "getAndDecrement", "()I")) {
+            inst.fields[vidx] = .{ .int = cur -% 1 };
+            return f.pushInt(cur);
+        }
+        if (eq2(mn, md, "getAndAdd", "(I)I")) {
+            const d = slots[method.params[0].slot].int;
+            inst.fields[vidx] = .{ .int = cur +% d };
+            return f.pushInt(cur);
+        }
+        if (eq2(mn, md, "addAndGet", "(I)I")) {
+            const d = slots[method.params[0].slot].int;
+            inst.fields[vidx] = .{ .int = cur +% d };
+            return f.pushInt(cur +% d);
+        }
+        if (eq2(mn, md, "getAndSet", "(I)I")) {
+            const nv = slots[method.params[0].slot].int;
+            inst.fields[vidx] = .{ .int = nv };
+            return f.pushInt(cur);
+        }
+        if (eq2(mn, md, "compareAndSet", "(II)Z")) {
+            const expect = slots[method.params[0].slot].int;
+            const update = slots[method.params[1].slot].int;
+            if (cur == expect) {
+                inst.fields[vidx] = .{ .int = update };
+                return f.pushInt(1);
+            }
+            return f.pushInt(0);
+        }
+        return error.UnsupportedOpcode;
+    }
     if (std.mem.eql(u8, on, "java/lang/Object")) {
         if (eq2(mn, md, "getClass", "()Ljava/lang/Class;")) {
             const recv = switch (slots[0]) {
