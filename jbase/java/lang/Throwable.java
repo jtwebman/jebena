@@ -2,17 +2,24 @@ package java.lang;
 
 /**
  * Clean-room java.lang.Throwable for Jebena (SE25 spec, minimal). Holds the detail
- * message; stack-trace capture (fillInStackTrace) and cause chaining will arrive
- * once we have arrays/StackTraceElement. Constructors and getMessage are ordinary
- * bytecode operating on the detailMessage instance field.
+ * message and a captured stack trace. The stack trace is filled by the native
+ * fillInStackTrace(), invoked from the constructors like the real JDK. The static
+ * EMPTY initializer forces java.lang.StackTraceElement to load during <clinit>, so
+ * the native never triggers class loading (hence never a GC) mid-capture.
  */
 public class Throwable {
-    private String detailMessage;
+    private static final StackTraceElement[] EMPTY = new StackTraceElement[0];
 
-    public Throwable() {}
+    private String detailMessage;
+    private StackTraceElement[] stackTrace;
+
+    public Throwable() {
+        fillInStackTrace();
+    }
 
     public Throwable(String message) {
         this.detailMessage = message;
+        fillInStackTrace();
     }
 
     public String getMessage() {
@@ -21,6 +28,32 @@ public class Throwable {
 
     public String getLocalizedMessage() {
         return getMessage();
+    }
+
+    /** Capture the current call stack into this throwable (VM native). */
+    public native Throwable fillInStackTrace();
+
+    public StackTraceElement[] getStackTrace() {
+        StackTraceElement[] trace = stackTrace;
+        if (trace == null) {
+            return EMPTY;
+        }
+        StackTraceElement[] copy = new StackTraceElement[trace.length];
+        for (int i = 0; i < trace.length; i++) {
+            copy[i] = trace[i];
+        }
+        return copy;
+    }
+
+    public void printStackTrace() {
+        java.io.PrintStream s = System.err;
+        s.println(toString());
+        StackTraceElement[] trace = stackTrace;
+        if (trace != null) {
+            for (int i = 0; i < trace.length; i++) {
+                s.println("\tat " + trace[i]);
+            }
+        }
     }
 
     public String toString() {

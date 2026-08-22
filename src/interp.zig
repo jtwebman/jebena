@@ -1898,6 +1898,93 @@ fn lineForPc(method: *const Class.Method, pc: usize) i32 {
     return best;
 }
 
+/// True if `cls` is java.lang.Throwable or a subclass of it.
+fn isThrowableAssignable(cls: *const Class) bool {
+    var c: ?*const Class = cls;
+    while (c) |cc| : (c = cc.super) {
+        if (std.mem.eql(u8, cc.name, "java/lang/Throwable")) return true;
+    }
+    return false;
+}
+
+/// Build a java.lang.String from a binary class name with '/' rewritten to '.'.
+fn stringFromDotted(f: *Frame, binary_name: []const u8) RunError!u32 {
+    const heap = f.heap orelse return error.UnsupportedOpcode;
+    const buf = heap.gpa.alloc(u8, binary_name.len) catch return error.OutOfMemory;
+    defer heap.gpa.free(buf);
+    for (binary_name, 0..) |c, i| buf[i] = if (c == '/') '.' else c;
+    return stringFromBytes(f, buf);
+}
+
+/// Throwable.fillInStackTrace() native: capture the live call stack into the
+/// receiver's `stackTrace` field and return the receiver. `f` is the Throwable
+/// constructor frame; walk it and its parents, skipping the leading <init> frames
+/// of Throwable and its subclasses (as the JDK does), then record one entry per
+/// remaining frame. No class loading happens here (Throwable.<clinit> already
+/// loaded StackTraceElement), and heap allocation never triggers GC, so object ids
+/// stay valid throughout.
+fn throwableFillInStackTrace(f: *Frame, slots: []const Value) RunError!void {
+    const heap = f.heap orelse return error.UnsupportedOpcode;
+    const this_id = switch (slots[0]) {
+        .reference => |r| r orelse return error.NullPointer,
+        else => return error.TypeMismatch,
+    };
+    const ste_class = f.loader.find("java/lang/StackTraceElement") orelse {
+        return f.push(.{ .reference = this_id }); // not loaded: leave stackTrace null
+    };
+
+    // 1) Walk the frame chain into a Zig list (stable metadata slices; no heap alloc).
+    const Info = struct { cls: []const u8, method: []const u8, file: ?[]const u8, line: i32 };
+    var infos: std.ArrayList(Info) = .empty;
+    defer infos.deinit(heap.gpa);
+    var cur: ?*Frame = f;
+    var skipping = true;
+    while (cur) |fr| : (cur = fr.parent) {
+        const cls = fr.class orelse continue;
+        const m = frameMethod(cls, fr.code) orelse continue;
+        if (skipping) {
+            if (std.mem.eql(u8, m.name, "<init>") and isThrowableAssignable(cls)) continue;
+            skipping = false;
+        }
+        infos.append(heap.gpa, .{ .cls = cls.name, .method = m.name, .file = cls.source_file, .line = lineForPc(m, fr.pc) }) catch return error.OutOfMemory;
+    }
+
+    // 2) Build the heap StackTraceElement[] (allocation never GCs mid-native).
+    const fi_decl = ste_class.findField("declaringClass") orelse return error.LinkError;
+    const fi_meth = ste_class.findField("methodName") orelse return error.LinkError;
+    const fi_file = ste_class.findField("fileName") orelse return error.LinkError;
+    const fi_line = ste_class.findField("lineNumber") orelse return error.LinkError;
+    const arr_id = try heap.allocArray(.reference, infos.items.len);
+    for (infos.items, 0..) |info, i| {
+        const decl_sid = try stringFromDotted(f, info.cls);
+        const meth_sid = try stringFromBytes(f, info.method);
+        const file_sid: ?u32 = if (info.file) |ff| try stringFromBytes(f, ff) else null;
+        const ste_id = try heap.allocInstance(ste_class);
+        switch (heap.get(ste_id).*) {
+            .instance => |*inst| {
+                inst.fields[fi_decl] = .{ .reference = decl_sid };
+                inst.fields[fi_meth] = .{ .reference = meth_sid };
+                inst.fields[fi_file] = .{ .reference = file_sid };
+                inst.fields[fi_line] = .{ .int = info.line };
+            },
+            else => return error.LinkError,
+        }
+        switch (heap.get(arr_id).*) {
+            .array => |*a| a.data[i] = .{ .reference = ste_id },
+            else => return error.LinkError,
+        }
+    }
+
+    // 3) Store into this.stackTrace and return this.
+    const tcls = classOf(heap, this_id) orelse return error.LinkError;
+    const st_fi = tcls.findField("stackTrace") orelse return error.LinkError;
+    switch (heap.get(this_id).*) {
+        .instance => |*inst| inst.fields[st_fi] = .{ .reference = arr_id },
+        else => return error.LinkError,
+    }
+    return f.push(.{ .reference = this_id });
+}
+
 /// Print an uncaught exception the way `java` does its first line:
 /// `Exception in thread "main" <binary.class.Name>[: <message>]`. A full stack
 /// trace needs StackTraceElement (not built yet); the type+message line matches.
@@ -1937,7 +2024,80 @@ fn reportUncaught(loader: *Loader, heap: *Heap, eid: u32) void {
         }
     }
     buf.append(heap.gpa, '\n') catch return;
+    // Stack-trace frames: `\tat <Class>.<method>(<File>:<line>)`, one per element
+    // of the captured stackTrace array (declaringClass is already dotted).
+    if (classOf(heap, eid)) |cls| {
+        if (cls.findField("stackTrace")) |sti| {
+            const arr_ref = switch (heap.get(eid).*) {
+                .instance => |inst| inst.fields[sti],
+                else => Value{ .reference = null },
+            };
+            if (arr_ref == .reference) if (arr_ref.reference) |aid| {
+                const elems: []const Value = switch (heap.get(aid).*) {
+                    .array => |a| a.data,
+                    else => &.{},
+                };
+                for (elems) |ev| {
+                    const ste_id = switch (ev) {
+                        .reference => |r| r orelse continue,
+                        else => continue,
+                    };
+                    const ecls = classOf(heap, ste_id) orelse continue;
+                    buf.appendSlice(heap.gpa, "\tat ") catch return;
+                    appendInstStringField(&buf, heap, ecls, ste_id, "declaringClass");
+                    buf.append(heap.gpa, '.') catch return;
+                    appendInstStringField(&buf, heap, ecls, ste_id, "methodName");
+                    buf.append(heap.gpa, '(') catch return;
+                    const has_file = appendInstStringFieldReported(&buf, heap, ecls, ste_id, "fileName");
+                    const line: i32 = if (ecls.findField("lineNumber")) |li| switch (heap.get(ste_id).*) {
+                        .instance => |inst| inst.fields[li].int,
+                        else => -1,
+                    } else -1;
+                    if (has_file) {
+                        if (line >= 0) {
+                            buf.append(heap.gpa, ':') catch return;
+                            var nb: [12]u8 = undefined;
+                            const ns = std.fmt.bufPrint(&nb, "{d}", .{line}) catch "";
+                            buf.appendSlice(heap.gpa, ns) catch return;
+                        }
+                    } else {
+                        buf.appendSlice(heap.gpa, "Unknown Source") catch return;
+                    }
+                    buf.append(heap.gpa, ')') catch return;
+                    buf.append(heap.gpa, '\n') catch return;
+                }
+            };
+        }
+    }
     stderr.writeStreamingAll(io, buf.items) catch {};
+}
+
+/// Append a String instance-field's UTF-8 to `buf` (nothing if null/absent).
+fn appendInstStringField(buf: *std.ArrayList(u8), heap: *Heap, cls: *const Class, id: u32, field: []const u8) void {
+    _ = appendInstStringFieldReported(buf, heap, cls, id, field);
+}
+
+/// Like appendInstStringField, returning true if a non-null string was appended.
+fn appendInstStringFieldReported(buf: *std.ArrayList(u8), heap: *Heap, cls: *const Class, id: u32, field: []const u8) bool {
+    const fi = cls.findField(field) orelse return false;
+    const sref = switch (heap.get(id).*) {
+        .instance => |inst| inst.fields[fi],
+        else => return false,
+    };
+    const sid = switch (sref) {
+        .reference => |r| r orelse return false,
+        else => return false,
+    };
+    var chars: std.ArrayList(i32) = .empty;
+    defer chars.deinit(heap.gpa);
+    appendStringObj(&chars, heap, sid) catch return false;
+    var ebuf: [4]u8 = undefined;
+    for (chars.items) |ci| {
+        const cp: u21 = @intCast(@as(u32, @bitCast(ci)) & 0xFFFF);
+        const n = std.unicode.utf8Encode(cp, &ebuf) catch continue;
+        buf.appendSlice(heap.gpa, ebuf[0..n]) catch return true;
+    }
+    return true;
 }
 
 /// Run a program's `public static void main(String[])`, building a real
@@ -3963,6 +4123,11 @@ fn nativeInvoke(f: *Frame, owner: *const Class, method: *const Class.Method, slo
     const md = method.descriptor;
     if (std.mem.eql(u8, on, "java/net/Socket") or std.mem.eql(u8, on, "java/net/ServerSocket")) {
         return netNative(f, mn, md, slots, method);
+    }
+    if (std.mem.eql(u8, on, "java/lang/Throwable") and
+        eq2(mn, md, "fillInStackTrace", "()Ljava/lang/Throwable;"))
+    {
+        return throwableFillInStackTrace(f, slots);
     }
     if (std.mem.eql(u8, on, "java/util/concurrent/atomic/AtomicLong")) {
         const heap = f.heap orelse return error.UnsupportedOpcode;
