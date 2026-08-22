@@ -104,3 +104,56 @@ Stage 1 already shipped as a strict subset: iteration 42's single-threaded model
 Invariant every stage: `zig build test` + differential.sh + jbase-smoke.sh +
 output-smoke.sh + classpath-smoke.sh + portability-check.sh + `zig fmt --check`
 all green before commit. Never commit red.
+
+## Stage 4 design: M:N carriers over CPUs (in progress)
+
+Stages 1–3 are done: one carrier, cooperative, deterministic. Stage 4 adds real
+multicore parallelism — a pool of OS **carrier** threads (one per CPU) each
+running a scheduler loop over green fibers. This is the only stage with genuine
+concurrent mutators, so it is built slowly with green intermediates + stress
+tests, and it must never regress the single-carrier gate.
+
+### Shared mutable state audit (what Stage 4 must protect)
+
+- **Heap** (`objects`, `marked`, `old`, `remembered`, `free_list`, `interned`,
+  allocation counters): the big one. Object *allocation* mutates `objects`;
+  *GC* rewrites everything and (major) moves objects. Strategy: per-carrier
+  **nurseries/TLABs** for lock-free fast-path allocation; the shared old gen +
+  the whole GC run only at a **safepoint** (all carriers parked), so GC needs no
+  fine-grained locking. `interned` is written on string interning — do behind a
+  short mutex or at a safepoint.
+- **Loader** (`classes`, `statics`, `initialized`, `mirrors`): class loading and
+  `<clinit>` mutate these. Class loading is rare; guard with a mutex (or perform
+  at a safepoint). `statics` array *contents* are ordinary shared fields (Java
+  static fields) — races there are the program's concern (Java memory model), not
+  ours, except the backing arrays must not be reallocated concurrently (they are
+  allocated once at register time, so reads are safe; a class first-loaded
+  concurrently must be serialized).
+- **Scheduler** (`ready`, `all`, `current`, `wait_sets`/`waiting_on`): becomes
+  per-carrier `ready` queues + work-stealing; `all` (the GC root registry) and
+  fiber wake/notify need synchronization (mutex or lock-free deque).
+- **Budget.reductions / current fiber**: must move to **per-carrier** state (a
+  `Carrier` struct), not shared.
+
+### The safepoint is the key simplification
+
+Because we control the interpreter loop, "stop the world" = each carrier polls a
+global `safepoint_requested` flag at its **yield boundary** (the reduction check
+in `step()`), and parks when set. GC (and anything needing exclusive heap access)
+requests a safepoint, waits for all carriers to park, runs stop-the-world, then
+releases. So only **allocation** needs to be concurrent (via per-carrier TLABs);
+**everything else that touches the shared heap/loader runs at a safepoint or
+under a coarse lock**, which keeps the moving GC exactly as simple as it is today.
+
+### Sub-steps (each gated green; single-carrier stays behaviorally identical)
+
+- **4a** (this): the audit above + a `Carrier` decomposition plan.
+- **4b**: safepoint scaffolding — a global flag + `pollSafepoint()` at the yield
+  boundary; no-op fast path with one carrier.
+- **4c**: per-carrier nurseries/TLABs over the shared old gen (existing write
+  barrier + remembered set); single-carrier correct.
+- **4d**: real `std.Thread` carriers (one per CPU) + per-carrier ready-queues +
+  work-stealing + safepoint-coordinated GC; heavy multi-fiber stress tests.
+
+Correctness over speed at every step. If in doubt, serialize behind the
+safepoint or a mutex first, optimize later.
