@@ -1721,11 +1721,23 @@ fn fieldRef(cls: *const Class, cp_index: u16) RunError!FieldRefInfo {
 
 fn resolveClass(f: *Frame, current: *const Class, name: []const u8) RunError!*const Class {
     if (std.mem.eql(u8, name, current.name)) return current;
-    // Serialize the find-or-load-and-register path so concurrent carriers don't
-    // race on loader.classes/statics/initialized/mirrors (append + duplicate load).
+    // Fast path: already-loaded classes resolve LOCK-FREE via the stable-page
+    // registry (find() is realloc-free + publish-last safe). Crucially this avoids
+    // load_lock, whose contended spin SAFEPOINT-POLLS -- taking it here let a GC run
+    // mid-resolveClass while the caller (invokeInstance) held the receiver id in a
+    // Zig local, leaving it stale after the moving GC remapped the frame (the
+    // throw-stress @c4+GC hang: a stale receiver -> array -> LinkError -> carrier
+    // exit -> safepoint deadlock). The common invoke case never loads, so it never
+    // polls, so the receiver can't go stale under it.
+    if (f.loader.find(name)) |c| return c;
+    // Miss: serialize the load-and-register path (append to loader.classes/statics/
+    // initialized/mirrors) so concurrent carriers don't race or double-load. A GC
+    // during this rare path is still safe here -- resolveClass returns a *Class
+    // (arena-stable), and callers that hold heap ids across a first-load are the
+    // ones that must re-fetch; the hot already-loaded path above never gets here.
     f.loader.load_lock.lock(&f.loader.scheduler);
     defer f.loader.load_lock.unlock();
-    if (f.loader.find(name)) |c| return c;
+    if (f.loader.find(name)) |c| return c; // re-check under the lock
     return (try f.loader.loadFromClasspath(name)) orelse error.LinkError;
 }
 
