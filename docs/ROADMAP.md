@@ -56,7 +56,7 @@ Steps (each a loop iteration or few):
 ## Phase 2 — reflection & dynamic
 - [ ] Class.forName, getName, getDeclaredMethods/Fields/Constructors
 - [x] reflection: java.lang.reflect.Method.invoke, Field.get/set, Constructor.newInstance + Class.getDeclared{Methods,Fields,Constructors} (mirrors backed by VM Class metadata, arg/return box-unbox). [ ] getMethod-by-signature, virtual dispatch, annotations
-- [~] annotations: RuntimeVisibleAnnotations decode (class-level) + Class.isAnnotationPresent + X.class ldc. [ ] getAnnotation element values (needs Proxy), method/field annotations
+- [x] annotations: RuntimeVisibleAnnotations decode + Class.isAnnotationPresent + getAnnotation element VALUES (via Proxy over the annotation interface) + X.class ldc. [ ] method/field-level annotations, annotation defaults
 - [ ] MethodHandles / dynamic proxies (Proxy.newProxyInstance)
 
 ## Phase 3 — runtime services

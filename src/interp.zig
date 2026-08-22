@@ -665,6 +665,17 @@ pub const Loader = struct {
     }
 };
 
+pub const AnnoVal = union(enum) {
+    none,
+    int: i32,
+    long: i64,
+    float: f32,
+    double: f64,
+    string: []const u8,
+};
+pub const AnnoElement = struct { name: []const u8, value: AnnoVal };
+pub const AnnotationInfo = struct { name: []const u8, elements: []const AnnoElement };
+
 fn annoReadU16(info: []const u8, cur: *usize) u16 {
     if (cur.* + 2 > info.len) {
         cur.* = info.len;
@@ -674,52 +685,100 @@ fn annoReadU16(info: []const u8, cur: *usize) u16 {
     cur.* += 2;
     return v;
 }
-fn annoSkipElementValue(info: []const u8, cur: *usize) void {
-    if (cur.* >= info.len) return;
+fn annoDecodeElementValue(arena: std.mem.Allocator, cp: anytype, info: []const u8, cur: *usize) AnnoVal {
+    if (cur.* >= info.len) return .none;
     const tag = info[cur.*];
     cur.* += 1;
     switch (tag) {
-        'B', 'C', 'D', 'F', 'I', 'J', 'S', 'Z', 's', 'c' => _ = annoReadU16(info, cur),
+        'B', 'C', 'S', 'Z', 'I' => {
+            const ci = annoReadU16(info, cur);
+            const ent = cp.get(ci) catch return .none;
+            return switch (ent.*) {
+                .integer => |v| .{ .int = v },
+                else => .none,
+            };
+        },
+        'J' => {
+            const ci = annoReadU16(info, cur);
+            const ent = cp.get(ci) catch return .none;
+            return switch (ent.*) {
+                .long => |v| .{ .long = v },
+                else => .none,
+            };
+        },
+        'F' => {
+            const ci = annoReadU16(info, cur);
+            const ent = cp.get(ci) catch return .none;
+            return switch (ent.*) {
+                .float => |v| .{ .float = v },
+                else => .none,
+            };
+        },
+        'D' => {
+            const ci = annoReadU16(info, cur);
+            const ent = cp.get(ci) catch return .none;
+            return switch (ent.*) {
+                .double => |v| .{ .double = v },
+                else => .none,
+            };
+        },
+        's' => {
+            const ci = annoReadU16(info, cur);
+            const b = cp.utf8(ci) catch "";
+            return .{ .string = arena.dupe(u8, b) catch "" };
+        },
         'e' => {
             _ = annoReadU16(info, cur);
             _ = annoReadU16(info, cur);
+            return .none;
+        },
+        'c' => {
+            _ = annoReadU16(info, cur);
+            return .none;
         },
         '@' => {
-            _ = annoReadU16(info, cur); // type index
+            _ = annoReadU16(info, cur);
             const np = annoReadU16(info, cur);
             var i: usize = 0;
             while (i < np) : (i += 1) {
-                _ = annoReadU16(info, cur); // element name
-                annoSkipElementValue(info, cur);
+                _ = annoReadU16(info, cur);
+                _ = annoDecodeElementValue(arena, cp, info, cur);
             }
+            return .none;
         },
         '[' => {
             const n = annoReadU16(info, cur);
             var i: usize = 0;
-            while (i < n) : (i += 1) annoSkipElementValue(info, cur);
+            while (i < n) : (i += 1) _ = annoDecodeElementValue(arena, cp, info, cur);
+            return .none;
         },
-        else => {},
+        else => return .none,
     }
 }
-fn decodeAnnotationTypeNames(arena: std.mem.Allocator, cp: anytype, info: []const u8) ![]const []const u8 {
-    var names: std.ArrayListUnmanaged([]const u8) = .empty;
+fn decodeAnnotations(arena: std.mem.Allocator, cp: anytype, info: []const u8) ![]const AnnotationInfo {
+    var out: std.ArrayListUnmanaged(AnnotationInfo) = .empty;
     var cur: usize = 0;
     const num = annoReadU16(info, &cur);
     var a: usize = 0;
     while (a < num) : (a += 1) {
         const type_index = annoReadU16(info, &cur);
         const desc = cp.utf8(type_index) catch "";
+        var type_name: []const u8 = "";
         if (desc.len >= 2 and desc[0] == 'L' and desc[desc.len - 1] == ';') {
-            try names.append(arena, desc[1 .. desc.len - 1]);
+            type_name = desc[1 .. desc.len - 1];
         }
         const num_pairs = annoReadU16(info, &cur);
-        var p: usize = 0;
-        while (p < num_pairs) : (p += 1) {
-            _ = annoReadU16(info, &cur); // element_name_index
-            annoSkipElementValue(info, &cur);
+        var els: std.ArrayListUnmanaged(AnnoElement) = .empty;
+        var pi: usize = 0;
+        while (pi < num_pairs) : (pi += 1) {
+            const name_index = annoReadU16(info, &cur);
+            const ename = cp.utf8(name_index) catch "";
+            const val = annoDecodeElementValue(arena, cp, info, &cur);
+            try els.append(arena, .{ .name = ename, .value = val });
         }
+        try out.append(arena, .{ .name = type_name, .elements = try els.toOwnedSlice(arena) });
     }
-    return names.toOwnedSlice(arena);
+    return out.toOwnedSlice(arena);
 }
 pub const Class = struct {
     gpa: std.mem.Allocator,
@@ -733,8 +792,8 @@ pub const Class = struct {
     static_fields: []Field,
     bootstrap_methods: []const attribute_decode.BootstrapMethod,
     is_stub: bool = false,
-    /// Internal names of the class's RuntimeVisibleAnnotations (e.g. "jebena/MyAnno").
-    annotations: []const []const u8 = &.{},
+    /// Decoded class-level RuntimeVisibleAnnotations (type name + element values).
+    annotations: []const AnnotationInfo = &.{},
     /// True for a runtime-built java.lang.reflect.Proxy class (dispatch to handler).
     is_proxy: bool = false,
 
@@ -827,11 +886,11 @@ pub const Class = struct {
                 .is_native = is_native,
             };
         }
-        var class_annos: []const []const u8 = &.{};
+        var class_annos: []const AnnotationInfo = &.{};
         for (cf.attributes) |ai| {
             const an = cf.constant_pool.utf8(ai.name_index) catch continue;
             if (std.mem.eql(u8, an, "RuntimeVisibleAnnotations")) {
-                class_annos = decodeAnnotationTypeNames(arena, cf.constant_pool, ai.info) catch &.{};
+                class_annos = decodeAnnotations(arena, cf.constant_pool, ai.info) catch &.{};
                 break;
             }
         }
@@ -2567,6 +2626,59 @@ fn boxValueForDesc(f: *Frame, rc: u8, value: Value) RunError!u32 {
     }
     return id;
 }
+fn boxAnnoVal(f: *Frame, v: AnnoVal) RunError!Value {
+    return switch (v) {
+        .none => .{ .reference = null },
+        .int => |x| .{ .reference = try boxValueForDesc(f, 'I', .{ .int = x }) },
+        .long => |x| .{ .reference = try boxValueForDesc(f, 'J', .{ .long = x }) },
+        .float => |x| .{ .reference = try boxValueForDesc(f, 'F', .{ .float = x }) },
+        .double => |x| .{ .reference = try boxValueForDesc(f, 'D', .{ .double = x }) },
+        .string => |b| .{ .reference = try stringFromBytes(f, b) },
+    };
+}
+fn reflectGetAnnotation(f: *Frame, class_mirror: u32, anno_mirror: u32) RunError!void {
+    const heap = f.heap orelse return error.UnsupportedOpcode;
+    const cls = try mirrorClass(f, class_mirror);
+    const anno_cls = try mirrorClass(f, anno_mirror);
+    var found: ?AnnotationInfo = null;
+    for (cls.annotations) |ai| {
+        if (std.mem.eql(u8, ai.name, anno_cls.name)) {
+            found = ai;
+            break;
+        }
+    }
+    const ai = found orelse return f.push(.{ .reference = null });
+    // pairs Object[] = [name0, val0, name1, val1, ...]
+    const n = ai.elements.len;
+    const pairs_id = try heap.allocArray(.reference, 2 * n);
+    const vals = f.loader.gpa.alloc(Value, 2 * n) catch return error.OutOfMemory;
+    defer f.loader.gpa.free(vals);
+    for (ai.elements, 0..) |el, i| {
+        vals[2 * i] = .{ .reference = try stringFromBytes(f, el.name) };
+        vals[2 * i + 1] = try boxAnnoVal(f, el.value);
+    }
+    const pa = try arrayOf(f, pairs_id);
+    for (vals, 0..) |v, i| pa.data[i] = v;
+    // handler = AnnotationInvocationHandler(pairs)
+    const hc = f.loader.find("java/lang/reflect/AnnotationInvocationHandler") orelse return error.LinkError;
+    const hid = try heap.allocInstance(hc);
+    const pfi = hc.findField("pairs") orelse return error.LinkError;
+    switch (heap.get(hid).*) {
+        .instance => |*inst| inst.fields[pfi] = .{ .reference = pairs_id },
+        else => return error.LinkError,
+    }
+    // proxy over [anno interface]
+    const ifn = f.loader.gpa.alloc([]const u8, 1) catch return error.OutOfMemory;
+    ifn[0] = anno_cls.name;
+    const pc = try makeProxyClass(f, ifn);
+    const proxy_id = try heap.allocInstance(pc);
+    const hfi = pc.findField("h") orelse return error.LinkError;
+    switch (heap.get(proxy_id).*) {
+        .instance => |*inst| inst.fields[hfi] = .{ .reference = hid },
+        else => return error.LinkError,
+    }
+    return f.push(.{ .reference = proxy_id });
+}
 fn reflectGetMembers(f: *Frame, class_mirror: u32, comptime kind: enum { methods, fields, ctors }) RunError!void {
     const heap = f.heap orelse return error.UnsupportedOpcode;
     const cls = try mirrorClass(f, class_mirror);
@@ -2956,6 +3068,13 @@ fn nativeInvoke(f: *Frame, owner: *const Class, method: *const Class.Method, slo
         if (eq2(mn, md, "getDeclaredFields", "()[Ljava/lang/reflect/Field;")) return reflectGetMembers(f, recv, .fields);
         if (eq2(mn, md, "getDeclaredConstructors", "()[Ljava/lang/reflect/Constructor;")) return reflectGetMembers(f, recv, .ctors);
         if (eq2(mn, md, "getClassLoader", "()Ljava/lang/ClassLoader;")) return f.push(.{ .reference = null });
+        if (eq2(mn, md, "getAnnotation", "(Ljava/lang/Class;)Ljava/lang/annotation/Annotation;")) {
+            const arg = switch (slots[method.params[0].slot]) {
+                .reference => |r| r orelse return error.NullPointer,
+                else => return error.TypeMismatch,
+            };
+            return reflectGetAnnotation(f, recv, arg);
+        }
         if (eq2(mn, md, "isAnnotationPresent", "(Ljava/lang/Class;)Z")) {
             const arg = switch (slots[method.params[0].slot]) {
                 .reference => |r| r orelse return error.NullPointer,
@@ -2963,7 +3082,7 @@ fn nativeInvoke(f: *Frame, owner: *const Class, method: *const Class.Method, slo
             };
             const anno_cls = try mirrorClass(f, arg);
             for (rc.annotations) |an| {
-                if (std.mem.eql(u8, an, anno_cls.name)) return f.pushInt(1);
+                if (std.mem.eql(u8, an.name, anno_cls.name)) return f.pushInt(1);
             }
             return f.pushInt(0);
         }

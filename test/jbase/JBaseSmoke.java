@@ -429,6 +429,10 @@ public class JBaseSmoke {
         Class<?> ac = anx.getClass();
         if (ac.isAnnotationPresent(MyAnno.class)) r += 1000;
         if (!ac.isAnnotationPresent(OtherAnno.class)) r += 2000;
+        MyAnno ma = (MyAnno) ac.getAnnotation(MyAnno.class);
+        if (ma.value().equals("hello")) r += 3000;
+        r += ma.num();                    // 42
+        if (ac.getAnnotation(OtherAnno.class) == null) r += 4000;
 
         // === Reflection: getClass -> methods/fields/ctors, invoke/get/set/newInstance ===
         ReflectTarget rt0 = new ReflectTarget(5, "hi");

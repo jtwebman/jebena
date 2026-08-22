@@ -24,6 +24,8 @@ public final class Class {
 
     public native ClassLoader getClassLoader();
 
+    public native java.lang.annotation.Annotation getAnnotation(Class annotationClass);
+
     public String toString() {
         return "class " + getName();
     }

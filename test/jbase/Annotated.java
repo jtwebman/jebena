@@ -1,6 +1,6 @@
 package jebena;
 
-@MyAnno("hello")
+@MyAnno(value = "hello", num = 42)
 public class Annotated {
     public int v = 7;
 }
