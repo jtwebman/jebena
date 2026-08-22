@@ -236,6 +236,21 @@ fn defaultValue(k: Kind) Value {
     };
 }
 
+/// A tiny test-and-set spinlock over std.atomic.Value (this Zig has no
+/// std.Thread.Mutex). Uncontended with one carrier. Non-reentrant — never take
+/// it recursively. Used to serialize the shared object-table allocation so
+/// multiple carriers (Stage 4d) can allocate concurrently; GC needs no lock
+/// (it runs stop-the-world at a safepoint with every carrier parked).
+const SpinLock = struct {
+    state: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    fn lock(self: *SpinLock) void {
+        while (self.state.swap(true, .acquire)) std.atomic.spinLoopHint();
+    }
+    fn unlock(self: *SpinLock) void {
+        self.state.store(false, .release);
+    }
+};
+
 pub const Heap = struct {
     gpa: std.mem.Allocator,
     /// Object table; a null slot is free (reused via free_list). Object ids are
@@ -253,6 +268,9 @@ pub const Heap = struct {
     interned: std.StringHashMapUnmanaged(u32) = .empty,
     allocs_since_gc: usize = 0,
     minor_count: usize = 0,
+    /// Serializes object-table allocation across carriers (Stage 4d). Uncontended
+    /// with one carrier. NOT held during GC (GC is stop-the-world at a safepoint).
+    alloc_lock: SpinLock = .{},
     /// Minor collection after this many allocations. Default is effectively off.
     gc_interval: usize = 1 << 20,
     /// A major (compacting) collection every this many minors.
@@ -277,6 +295,8 @@ pub const Heap = struct {
         self.interned.deinit(self.gpa);
     }
     fn put(self: *Heap, obj: HeapObj) !u32 {
+        self.alloc_lock.lock();
+        defer self.alloc_lock.unlock();
         if (self.free_list.items.len > 0) {
             const id = self.free_list.items[self.free_list.items.len - 1];
             self.free_list.items.len -= 1;
