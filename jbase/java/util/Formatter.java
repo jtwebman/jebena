@@ -60,6 +60,8 @@ public final class Formatter {
             boolean flagZero = false;
             boolean flagPlus = false;
             boolean flagSpace = false;
+            boolean flagComma = false;
+            boolean flagAlt = false;
             while (i < len) {
                 char f = format.charAt(i);
                 if (f == '-') {
@@ -70,7 +72,11 @@ public final class Formatter {
                     flagPlus = true;
                 } else if (f == ' ') {
                     flagSpace = true;
-                } else if (f == '#' || f == ',' || f == '(') {
+                } else if (f == ',') {
+                    flagComma = true;
+                } else if (f == '#') {
+                    flagAlt = true;
+                } else if (f == '(') {
                     // accepted but not acted upon
                 } else {
                     break;
@@ -168,7 +174,7 @@ public final class Formatter {
                 } else if (flagSpace) {
                     sign = " ";
                 }
-                body = digits;
+                body = flagComma ? group(digits) : digits;
             } else if (conv == 'x' || conv == 'X') {
                 numeric = true;
                 boolean isLong = arg instanceof Long;
@@ -177,11 +183,17 @@ public final class Formatter {
                 if (conv == 'X') {
                     body = body.toUpperCase();
                 }
+                if (flagAlt) {
+                    sign = (conv == 'X') ? "0X" : "0x"; // prefix stays left of zero-padding
+                }
             } else if (conv == 'o') {
                 numeric = true;
                 boolean isLong = arg instanceof Long;
                 long v = longValueOf(arg);
                 body = toRadixPow2(v, 3, isLong);
+                if (flagAlt && !body.startsWith("0")) {
+                    sign = "0";
+                }
             } else if (conv == 'f') {
                 numeric = true;
                 double d = doubleValueOf(arg);
@@ -264,6 +276,29 @@ public final class Formatter {
             v = v / 10;
         }
         return rev.reverse().toString();
+    }
+
+    /** Insert ',' thousands separators into a run of decimal digits. */
+    private static String group(String digits) {
+        int n = digits.length();
+        if (n <= 3) {
+            return digits;
+        }
+        StringBuilder sb = new StringBuilder();
+        int rem = n % 3;
+        int idx = 0;
+        if (rem > 0) {
+            sb.append(digits.substring(0, rem));
+            idx = rem;
+        }
+        while (idx < n) {
+            if (sb.length() > 0) {
+                sb.append(',');
+            }
+            sb.append(digits.substring(idx, idx + 3));
+            idx += 3;
+        }
+        return sb.toString();
     }
 
     /** Unsigned power-of-two radix rendering (shift: 4 hex, 3 octal, 1 binary). */
