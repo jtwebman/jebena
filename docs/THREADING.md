@@ -165,3 +165,12 @@ This Zig build has NO `std.Thread.Mutex` — sync primitives live under `std.Io`
 `std.Thread.spawn` exists (already used for the big-stack run thread). So 4d
 locking = `std.atomic` (spinlocks / `std.atomic.Value`) or `std.Io.Mutex` via the
 loader's `io` handle. `Scheduler.safepoint_requested` is a `std.atomic.Value(bool)`.
+
+## Policy (2026-08-21, from the user): thread-safety is now non-negotiable
+
+Every feature added from here on MUST:
+1. be **thread-safe** (correct under the M:N carrier model — guard shared state
+   or keep it per-fiber/per-carrier; no going back to thread-unsafe shortcuts),
+2. keep the **full gate green** (never red), and
+3. ship with a **threaded test** exercising it under concurrency (extend
+   scripts/thread-stress.sh or add a threaded case; run at carriers 1 & 4).
