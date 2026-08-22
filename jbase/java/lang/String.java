@@ -230,6 +230,84 @@ public final class String implements CharSequence, Comparable<String> {
         return new String(r);
     }
 
+    public boolean contains(CharSequence s) {
+        return indexOf(s.toString()) >= 0;
+    }
+
+    public String repeat(int count) {
+        if (count < 0) {
+            throw new IllegalArgumentException("count is negative: " + count);
+        }
+        if (count == 0 || value.length == 0) {
+            return "";
+        }
+        if (count == 1) {
+            return this;
+        }
+        char[] r = new char[value.length * count];
+        int pos = 0;
+        for (int i = 0; i < count; i++) {
+            for (int j = 0; j < value.length; j++) {
+                r[pos++] = value[j];
+            }
+        }
+        return new String(r);
+    }
+
+    // java.lang.Character.isWhitespace for the ASCII range (space, the \t..\r
+    // controls, and the file/group/record/unit separators) — what strip/isBlank use.
+    private static boolean isWs(char c) {
+        return c == ' ' || (c >= '\t' && c <= '\r') || (c >= 0x1C && c <= 0x1F);
+    }
+
+    public boolean isBlank() {
+        for (int i = 0; i < value.length; i++) {
+            if (!isWs(value[i])) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    public String strip() {
+        int start = 0;
+        int end = value.length;
+        while (start < end && isWs(value[start])) {
+            start++;
+        }
+        while (end > start && isWs(value[end - 1])) {
+            end--;
+        }
+        return (start == 0 && end == value.length) ? this : substring(start, end);
+    }
+
+    public String stripLeading() {
+        int start = 0;
+        while (start < value.length && isWs(value[start])) {
+            start++;
+        }
+        return start == 0 ? this : substring(start);
+    }
+
+    public String stripTrailing() {
+        int end = value.length;
+        while (end > 0 && isWs(value[end - 1])) {
+            end--;
+        }
+        return end == value.length ? this : substring(0, end);
+    }
+
+    public static String join(CharSequence delimiter, CharSequence... elements) {
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < elements.length; i++) {
+            if (i > 0) {
+                sb.append(delimiter);
+            }
+            sb.append(elements[i]);
+        }
+        return sb.toString();
+    }
+
     public static String valueOf(char c) {
         char[] r = { c };
         return new String(r);
