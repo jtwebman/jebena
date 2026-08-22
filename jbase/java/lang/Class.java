@@ -26,6 +26,18 @@ public final class Class {
 
     public native java.lang.annotation.Annotation getAnnotation(Class annotationClass);
 
+    public native boolean isInterface();
+
+    public native Class getSuperclass();
+
+    public native Class[] getInterfaces();
+
+    public native java.lang.reflect.Field getDeclaredField(String name) throws NoSuchFieldException;
+
+    public native java.lang.reflect.Method getDeclaredMethod(String name, Class[] parameterTypes) throws NoSuchMethodException;
+
+    public static native Class forName(String className) throws ClassNotFoundException;
+
     public String toString() {
         return "class " + getName();
     }

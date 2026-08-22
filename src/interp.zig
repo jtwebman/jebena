@@ -805,6 +805,7 @@ pub const Class = struct {
     annotations: []const AnnotationInfo = &.{},
     /// True for a runtime-built java.lang.reflect.Proxy class (dispatch to handler).
     is_proxy: bool = false,
+    is_interface: bool = false,
 
     pub const Field = struct { name: []const u8, kind: Kind, annotations: []const AnnotationInfo = &.{} };
     pub const Param = struct { kind: Kind, slot: u16 };
@@ -912,7 +913,7 @@ pub const Class = struct {
                 bootstrap = (try attribute_decode.decode(arena, cf.constant_pool, ai)).bootstrap_methods;
             }
         }
-        return .{ .gpa = gpa, .cp = cf.constant_pool, .name = cls_name, .super = super, .super_name = super_name, .interfaces = interfaces, .methods = methods, .instance_fields = instance_fields, .static_fields = static_fields, .bootstrap_methods = bootstrap, .annotations = class_annos };
+        return .{ .gpa = gpa, .cp = cf.constant_pool, .name = cls_name, .super = super, .super_name = super_name, .interfaces = interfaces, .methods = methods, .instance_fields = instance_fields, .static_fields = static_fields, .bootstrap_methods = bootstrap, .annotations = class_annos, .is_interface = cf.access_flags.isInterface() };
     }
 
     fn findField(self: *const Class, name: []const u8) ?usize {
@@ -3094,6 +3095,21 @@ fn nativeInvoke(f: *Frame, owner: *const Class, method: *const Class.Method, slo
         }
     }
     if (std.mem.eql(u8, on, "java/lang/Class")) {
+        if (eq2(mn, md, "forName", "(Ljava/lang/String;)Ljava/lang/Class;")) {
+            const heap = f.heap orelse return error.UnsupportedOpcode;
+            const sref = switch (slots[method.params[0].slot]) {
+                .reference => |r| r orelse return error.NullPointer,
+                else => return error.TypeMismatch,
+            };
+            var chars: std.ArrayList(i32) = .empty;
+            defer chars.deinit(heap.gpa);
+            try appendStringObj(&chars, heap, sref);
+            var name = heap.gpa.alloc(u8, chars.items.len) catch return error.OutOfMemory;
+            defer heap.gpa.free(name);
+            for (chars.items, 0..) |c, i| name[i] = if (c == '.') '/' else @intCast(@as(u32, @bitCast(c)) & 0xFF);
+            const target = f.loader.find(name) orelse return pendingException(f, "java/lang/ClassNotFoundException");
+            return f.push(.{ .reference = try getMirror(f, target) });
+        }
         const recv = switch (slots[0]) {
             .reference => |r| r orelse return error.NullPointer,
             else => return error.TypeMismatch,
@@ -3101,6 +3117,72 @@ fn nativeInvoke(f: *Frame, owner: *const Class, method: *const Class.Method, slo
         const rc = try mirrorClass(f, recv);
         if (eq2(mn, md, "getName", "()Ljava/lang/String;")) return pushDottedName(f, rc.name, false);
         if (eq2(mn, md, "getSimpleName", "()Ljava/lang/String;")) return pushDottedName(f, rc.name, true);
+        if (eq2(mn, md, "isInterface", "()Z")) return f.pushInt(if (rc.is_interface) 1 else 0);
+        if (eq2(mn, md, "getSuperclass", "()Ljava/lang/Class;")) {
+            if (rc.super) |sup| return f.push(.{ .reference = try getMirror(f, sup) });
+            return f.push(.{ .reference = null });
+        }
+        if (eq2(mn, md, "getInterfaces", "()[Ljava/lang/Class;")) {
+            const heap = f.heap orelse return error.UnsupportedOpcode;
+            var mirrors: std.ArrayList(u32) = .empty;
+            defer mirrors.deinit(heap.gpa);
+            for (rc.interfaces) |ifn| {
+                if (f.loader.find(ifn)) |ic| mirrors.append(heap.gpa, try getMirror(f, ic)) catch return error.OutOfMemory;
+            }
+            const aid = try heap.allocArray(.reference, mirrors.items.len);
+            const arr = try arrayOf(f, aid);
+            for (mirrors.items, 0..) |mid, i| arr.data[i] = .{ .reference = mid };
+            return f.push(.{ .reference = aid });
+        }
+        if (eq2(mn, md, "getDeclaredField", "(Ljava/lang/String;)Ljava/lang/reflect/Field;")) {
+            const heap = f.heap orelse return error.UnsupportedOpcode;
+            const sref = switch (slots[method.params[0].slot]) {
+                .reference => |r| r orelse return error.NullPointer,
+                else => return error.TypeMismatch,
+            };
+            var chars: std.ArrayList(i32) = .empty;
+            defer chars.deinit(heap.gpa);
+            try appendStringObj(&chars, heap, sref);
+            const class_idx = f.loader.indexOf(rc) orelse return error.LinkError;
+            for (rc.instance_fields, 0..) |fld, i| {
+                if (fld.name.len == chars.items.len) {
+                    var match = true;
+                    for (fld.name, 0..) |ch, j| if (@as(i32, ch) != chars.items[j]) {
+                        match = false;
+                        break;
+                    };
+                    if (match) return f.push(.{ .reference = try memberMirror(f, "java/lang/reflect/Field", class_idx, i) });
+                }
+            }
+            return pendingException(f, "java/lang/NoSuchFieldException");
+        }
+        if (eq2(mn, md, "getDeclaredMethod", "(Ljava/lang/String;[Ljava/lang/Class;)Ljava/lang/reflect/Method;")) {
+            const heap = f.heap orelse return error.UnsupportedOpcode;
+            const sref = switch (slots[method.params[0].slot]) {
+                .reference => |r| r orelse return error.NullPointer,
+                else => return error.TypeMismatch,
+            };
+            const ptypes = switch (slots[method.params[1].slot]) {
+                .reference => |r| r,
+                else => null,
+            };
+            const pcount: usize = if (ptypes) |pid| (arrayOf(f, pid) catch return error.LinkError).data.len else 0;
+            var chars: std.ArrayList(i32) = .empty;
+            defer chars.deinit(heap.gpa);
+            try appendStringObj(&chars, heap, sref);
+            const class_idx = f.loader.indexOf(rc) orelse return error.LinkError;
+            for (rc.methods, 0..) |mm, i| {
+                if (mm.params.len == pcount and mm.name.len == chars.items.len) {
+                    var match = true;
+                    for (mm.name, 0..) |ch, j| if (@as(i32, ch) != chars.items[j]) {
+                        match = false;
+                        break;
+                    };
+                    if (match) return f.push(.{ .reference = try memberMirror(f, "java/lang/reflect/Method", class_idx, i) });
+                }
+            }
+            return pendingException(f, "java/lang/NoSuchMethodException");
+        }
         if (eq2(mn, md, "getDeclaredMethods", "()[Ljava/lang/reflect/Method;")) return reflectGetMembers(f, recv, .methods);
         if (eq2(mn, md, "getDeclaredFields", "()[Ljava/lang/reflect/Field;")) return reflectGetMembers(f, recv, .fields);
         if (eq2(mn, md, "getDeclaredConstructors", "()[Ljava/lang/reflect/Constructor;")) return reflectGetMembers(f, recv, .ctors);

@@ -401,6 +401,42 @@ public class JBaseSmoke {
         }
         r += tssum;
 
+        // === Reflection completeness: forName/getSuperclass/getInterfaces/getDeclaredMethod/Field ===
+        Class<?> fc = Class.forName("jebena.ReflectTarget");
+        r += fc.getName().length();          // "jebena.ReflectTarget" = 20
+        if (!fc.isInterface()) r += 5;
+        if (Class.forName("jebena.Calculator").isInterface()) r += 6;
+        r += fc.getSuperclass().getName().length();  // "java.lang.Object" = 16
+        r += fc.getInterfaces().length;      // 0
+        ReflectTarget rtx = new ReflectTarget(3, "z");
+        java.lang.reflect.Method dm = fc.getDeclaredMethod("describe", new Class[] {});
+        r += ((String) dm.invoke(rtx, new Object[] {})).length();  // "z:3" = 3
+        java.lang.reflect.Field xf = fc.getDeclaredField("x");
+        r += (Integer) xf.get(rtx);          // 3
+
+        // === java.io in-memory streams ===
+        java.io.StringWriter sw = new java.io.StringWriter();
+        java.io.PrintWriter pw = new java.io.PrintWriter(sw);
+        pw.print("x=");
+        pw.printf("%d;", 42);
+        pw.println("done");
+        r += sw.toString().length();         // x=42;done + newline -> len 10
+        java.io.BufferedReader br = new java.io.BufferedReader(new java.io.StringReader("alpha\nbeta\ngamma"));
+        int lines = 0;
+        int chsum = 0;
+        String line;
+        while ((line = br.readLine()) != null) {
+            lines++;
+            chsum += line.length();
+        }
+        r += lines * 100 + chsum;            // 3 lines, 5+4+5=14 -> 314
+        java.io.ByteArrayOutputStream bo = new java.io.ByteArrayOutputStream();
+        bo.write(65);
+        bo.write(66);
+        bo.write(67);
+        r += bo.toString().length();         // "ABC" = 3
+        r += bo.toByteArray().length;        // 3
+
         // === Dynamic proxy: InvocationHandler routes interface calls ===
         java.lang.reflect.InvocationHandler handler = (proxy, method, args) -> {
             if (method.getName().equals("add")) {
