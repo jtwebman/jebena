@@ -50,5 +50,9 @@ for interval in 0 1000 300; do
     [ "${RAN:-0}" -ge 2 ] || { echo "alloc-gc-stress: FAIL c=4 interval=$interval rep=$rep not parallel (ran=${RAN:-0})"; fail=1; }
   done
 done
+# Leak assertion: the Debug build's DebugAllocator reports leaks on exit; a clean
+# allocation-heavy run must report none (guards the primitiveClass arena fix).
+LEAKS=$(timeout 40 bash -c "JEBENA_GC_INTERVAL=1000 JEBENA_CARRIERS=4 '$JEBENA' run st/AllocStress demo $APP $JBASE" 2>&1 | grep -c 'leaked' || true)
+[ "$LEAKS" = 0 ] || { echo "alloc-gc-stress: FAIL — $LEAKS leaked allocation(s) reported"; fail=1; }
 [ "$fail" = 0 ] || exit 1
-echo "alloc-gc-stress: OK — 8 fibers x2000 allocs = $EXP; single-carrier moving GC + 4 REAL carriers concurrent alloc & concurrent moving GC, matches real java"
+echo "alloc-gc-stress: OK — 8 fibers x2000 allocs = $EXP; single-carrier moving GC + 4 REAL carriers concurrent alloc & concurrent moving GC, no leaks, matches real java"

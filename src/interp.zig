@@ -3245,7 +3245,12 @@ fn boxArg(f: *Frame, val: Value, kind: Kind) RunError!Value {
 }
 fn primitiveClass(f: *Frame, name: []const u8) RunError!*const Class {
     if (f.loader.find(name)) |c| return c;
-    const gpa = f.loader.gpa;
+    // Lazily-built primitive Class (int, long, ..., void): allocate from the
+    // class arena when present so it's freed with every other lazily-built Class
+    // at run end (the gpa path leaked -- these classes live for the whole run and
+    // were never freed). Falls back to gpa only when there is no arena (unit-test
+    // paths, which don't reach here).
+    const gpa = f.loader.class_arena orelse f.loader.gpa;
     const nm = gpa.dupe(u8, name) catch return error.OutOfMemory;
     const pc = gpa.create(Class) catch return error.OutOfMemory;
     pc.* = Class{

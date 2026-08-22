@@ -242,11 +242,16 @@ exceptions); plus the items in the list below.
 
 **Known limitations (opt-in path only; default single carrier unaffected) —
 harden next:**
-- `Object.wait/notify` under `carriers_total>1` is NOT yet correct: the native
-  finds the calling fiber via `self.carrier.current`, which is null when workers
-  run on their own carrier structs. Not exercised by the gate at N>1 (the
-  wait/notify smoke runs at the default 1 carrier). Needs a frame→fiber lookup +
-  a spin-on-notified path mirroring `join0`.
+- `Object.wait/notify` under `carriers_total>1`: the native finds the calling
+  fiber via `self.carrier.current`, which is null on worker carriers, so `wait()`
+  returns immediately (a no-op). For the correct Java idiom `while (!cond)
+  obj.wait();` this degrades to a busy-wait until another carrier sets `cond` --
+  functionally correct (like a permanent spurious wakeup), just not efficient.
+  Efficient *blocking* wait needs real monitors (`synchronized`), which jebena
+  does not have yet (monitorenter/exit are null-checks only); without a monitor,
+  check-then-wait has an inherent lost-wakeup race that no fiber-lookup fix can
+  close. So proper wait/notify is deferred to a dedicated monitors feature. The
+  existing wait/notify smoke runs at the default 1 carrier and stays green.
 - Concurrent **lazy class loading / `getMirror` / string interning**: FIXED
   (iter 71). A reentrant, safepoint-polling `Loader.load_lock` serializes
   `resolveClass` (find-or-load-and-register), `getMirror`, `internLiteral`, and
@@ -258,10 +263,11 @@ harden next:**
   classes + intern distinct literals at carriers 1 & 4 (+ forced GC), exact vs
   real java.
 - **Concurrent GC**: FIXED (iter 70, paged table) -- see "SOLVED" above.
-- Pre-existing: ~18 `DebugAllocator` leaks on the StressMain workload (in
-  `primitiveClass`'s `gpa.dupe` and friends) — present at HEAD before this change,
-  identical count at 1 and 4 carriers, so not a parallelism regression. Fix
-  separately.
+- `DebugAllocator` leaks: FIXED (iter 73). The ~18 leaks were `primitiveClass`
+  building the primitive `Class` (int/long/.../void) + its name via `gpa` and
+  never freeing them; now allocated from the class arena (freed at run end) like
+  every other lazily-built class. `alloc-gc-stress.sh` asserts a clean run reports
+  0 leaks.
 
 ## Policy (2026-08-21, from the user): thread-safety is now non-negotiable
 
