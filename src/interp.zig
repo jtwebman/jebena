@@ -358,6 +358,15 @@ fn remapRoots(f: *Frame, forwarding: []const u32) void {
         for (ff.locals) |*v| remapValuePtr(v, forwarding);
         fr = ff.parent;
     }
+    // Parked scheduler fibers (NOT the running one — the parent chain already
+    // covered it, and remapping is not idempotent).
+    for (f.loader.scheduler.all.items) |fib| {
+        if (fib == f.loader.scheduler.current) continue;
+        for (fib.call_stack.items) |ff| {
+            for (ff.stack[0..ff.sp]) |*v| remapValuePtr(v, forwarding);
+            for (ff.locals) |*v| remapValuePtr(v, forwarding);
+        }
+    }
     for (f.loader.statics.items) |st| for (st) |*v| remapValuePtr(v, forwarding);
 }
 fn remapObject(obj: *HeapObj, forwarding: []const u32) void {
@@ -385,6 +394,14 @@ fn collectMajor(f: *Frame) void {
         for (ff.stack[0..ff.sp]) |v| markValue(heap, v);
         for (ff.locals) |v| markValue(heap, v);
         fr = ff.parent;
+    }
+    // All scheduler fibers are roots (parked fibers' frames aren't on the parent
+    // chain). Marking is idempotent, so double-covering the running fiber is fine.
+    for (f.loader.scheduler.all.items) |fib| {
+        for (fib.call_stack.items) |ff| {
+            for (ff.stack[0..ff.sp]) |v| markValue(heap, v);
+            for (ff.locals) |v| markValue(heap, v);
+        }
     }
     for (f.loader.statics.items) |st| for (st) |v| markValue(heap, v);
     if (f.budget.pending) |eid| markObject(heap, eid);
@@ -481,6 +498,12 @@ fn collectMinor(f: *Frame) void {
         for (ff.stack[0..ff.sp]) |v| markYoungValue(heap, v);
         for (ff.locals) |v| markYoungValue(heap, v);
         fr = ff.parent;
+    }
+    for (f.loader.scheduler.all.items) |fib| {
+        for (fib.call_stack.items) |ff| {
+            for (ff.stack[0..ff.sp]) |v| markYoungValue(heap, v);
+            for (ff.locals) |v| markYoungValue(heap, v);
+        }
     }
     for (f.loader.statics.items) |st| for (st) |v| markYoungValue(heap, v);
     if (f.budget.pending) |eid| markYoungObject(heap, eid);
