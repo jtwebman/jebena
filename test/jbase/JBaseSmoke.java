@@ -749,8 +749,33 @@ public class JBaseSmoke {
                 break;
         }
 
+
+        // java.lang.Thread — single-threaded model: start() runs run() synchronously.
+        Runnable thrTask = () -> { threadCounter += 100; };
+        Thread thr = new Thread(thrTask, "worker");
+        if (thr.getName().equals("worker")) r += 6;
+        thr.start();
+        thr.join();
+        r += threadCounter;                                     // 100
+        if (!thr.isAlive()) r += 6;
+        if (Thread.currentThread().getName().equals("main")) r += 40;
+        Object mlock = new Object();
+        synchronized (mlock) {
+            r += 9;
+        }
+
+        // java.lang.ThreadLocal — withInitial / get / set / remove re-init.
+        ThreadLocal<Integer> tloc = ThreadLocal.withInitial(() -> 42);
+        r += tloc.get();                                        // 42
+        tloc.set(7);
+        r += tloc.get();                                        // 7
+        tloc.remove();
+        r += tloc.get();                                        // 42 again
+
         return r;
     }
+
+    static int threadCounter = 0;
 
     enum SmokeColor { RED, GREEN, BLUE }
 }

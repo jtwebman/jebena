@@ -151,10 +151,17 @@ fn cmdRun(gpa: std.mem.Allocator, io: std.Io, it: *std.process.Args.Iterator) !v
         .{ "java/lang/ArrayIndexOutOfBoundsException", @as(?[]const u8, "java/lang/IndexOutOfBoundsException") },
     }) |pair| {
         if (!provided(cfs.items, pair[0])) { // skip if real bytecode supplied for this class
-            const super = if (pair[1]) |sn| loader.find(sn) else null;
-            const c = try a.create(IC.Class);
-            c.* = try IC.makeStub(gpa, a, pair[0], pair[1], super);
-            try loader.register(c);
+            // Prefer the real clean-room class from the classpath over a stub when
+            // one is available (e.g. jbase/out on the classpath) — the stub is only
+            // a fallback for pure-app runs that don't ship java.base.
+            const existing = loader.find(pair[0]);
+            const real = if (existing == null) (try loader.loadFromClasspath(pair[0])) else existing;
+            if (real == null) {
+                const super = if (pair[1]) |sn| loader.find(sn) else null;
+                const c = try a.create(IC.Class);
+                c.* = try IC.makeStub(gpa, a, pair[0], pair[1], super);
+                try loader.register(c);
+            }
         }
     }
 
