@@ -3778,20 +3778,14 @@ fn nativeInvoke(f: *Frame, owner: *const Class, method: *const Class.Method, slo
             };
             if (fid_val.long < 0) return;
             const sched = &f.loader.scheduler;
-            const fib = sched.fiberById(@intCast(fid_val.long)) orelse return;
-            if (fib.status == .done) return;
-            if (sched.carriers_total > 1) {
-                // Real carriers: spin-wait (polling the safepoint) while OTHER
-                // carriers run the joinee. A native can't suspend the interpreter,
-                // so the joining carrier busy-waits; parking is a later optimization.
-                while (fib.status != .done) {
-                    if (sched.safepoint_requested.load(.acquire)) sched.waitForSafepointRelease();
-                    std.atomic.spinLoopHint();
-                }
-            } else {
-                try sched.pump(fib, f.budget); // single carrier: inline-pump the run-queue
-            }
-            return;
+            const joinee = sched.fiberById(@intCast(fid_val.long)) orelse return;
+            if (joinee.status == .done) return; // fast path
+            // Park: suspend this fiber (the driver returns .parked and the carrier
+            // runs others); retire() re-readies us when the joinee completes, then
+            // join0 re-runs and sees it done. Works with more joiners than carriers.
+            const me = owningThreadFiber(sched, f) orelse return; // no scheduler fiber: no-op
+            me.park_join = @intCast(fid_val.long);
+            return error.Park;
         }
         if (eq2(mn, md, "isAlive", "()Z")) {
             const fid_val = switch (heap.get(tid).*) {
@@ -4367,6 +4361,8 @@ const Fiber = struct {
     waiting_on: ?u32 = null,
     /// Set by notify()/notifyAll() to wake this waiting fiber.
     notified: bool = false,
+    /// Joinee fiber id this fiber is parked on in Thread.join (null = not joining).
+    park_join: ?u64 = null,
 
     fn deinit(self: *Fiber) void {
         for (self.call_stack.items) |cf| freeChildFrame(self.alloc, cf);
@@ -4459,6 +4455,47 @@ const Scheduler = struct {
 
     /// Create a fiber around an already-built base frame and enqueue it ready.
     /// On error the base frame is NOT consumed (caller frees it).
+    /// Retire a finished/failed fiber: mark done, wake fibers parked joining it,
+    /// decrement the live count. Wakes only FULLY-parked joiners (status==.parked)
+    /// so a joiner still unwinding to .parked is never double-run; parkCommit's
+    /// double-check (below) covers the case where the joinee finished first.
+    fn retire(self: *Scheduler, fib: *Fiber) void {
+        self.lock.lock();
+        defer self.lock.unlock();
+        fib.status = .done;
+        for (self.all.items) |w| {
+            if (w.status == .parked and w.park_join == fib.id) {
+                w.park_join = null;
+                w.status = .ready;
+                self.ready.append(self.gpa, w) catch {};
+            }
+        }
+        _ = self.outstanding.fetchSub(1, .acq_rel);
+    }
+
+    /// Commit a fiber that raised error.Park: under the lock, re-check its wait
+    /// condition (joinee already done?) and either re-ready it immediately or mark
+    /// it parked. Doing the check here (not in the native) closes the lost-wakeup
+    /// race with retire() -- both serialize on scheduler.lock.
+    fn parkCommit(self: *Scheduler, fib: *Fiber) void {
+        self.lock.lock();
+        defer self.lock.unlock();
+        if (fib.park_join) |jid| {
+            var satisfied = true; // joinee missing => treat as done (don't block forever)
+            for (self.all.items) |w| if (w.id == jid) {
+                satisfied = (w.status == .done);
+                break;
+            };
+            if (satisfied) {
+                fib.park_join = null;
+                fib.status = .ready;
+                self.ready.append(self.gpa, fib) catch {};
+                return;
+            }
+        }
+        fib.status = .parked;
+    }
+
     fn popReady(self: *Scheduler) ?*Fiber {
         self.lock.lock();
         defer self.lock.unlock();
@@ -4549,9 +4586,8 @@ const Scheduler = struct {
             fib.status = .running;
             const outcome = driveFiber(fib, cb) catch |e| {
                 fib.err = e;
-                fib.status = .done;
                 carrier.current = null;
-                _ = self.outstanding.fetchSub(1, .acq_rel);
+                self.retire(fib);
                 return e;
             };
             carrier.current = null;
@@ -4561,11 +4597,8 @@ const Scheduler = struct {
                     fib.status = .ready;
                     try self.pushReady(fib);
                 },
-                .completed => {
-                    fib.status = .done;
-                    _ = self.outstanding.fetchSub(1, .acq_rel);
-                },
-                .parked => fib.status = .parked, // off the ready queue until a waker re-readies it
+                .completed => self.retire(fib),
+                .parked => self.parkCommit(fib),
             }
             if (carrier.id < 32) _ = self.carriers_ran.fetchOr(@as(u32, 1) << @intCast(carrier.id), .acq_rel);
         }
@@ -4632,8 +4665,7 @@ const Scheduler = struct {
         fib.status = .running;
         const outcome = driveFiber(fib, budget) catch |e| {
             fib.err = e;
-            fib.status = .done;
-            _ = self.outstanding.fetchSub(1, .acq_rel);
+            self.retire(fib);
             return true;
         };
         switch (outcome) {
@@ -4642,11 +4674,8 @@ const Scheduler = struct {
                 fib.status = .ready;
                 self.pushReady(fib) catch {};
             },
-            .completed => {
-                fib.status = .done;
-                _ = self.outstanding.fetchSub(1, .acq_rel);
-            },
-            .parked => fib.status = .parked,
+            .completed => self.retire(fib),
+            .parked => self.parkCommit(fib),
         }
         return true;
     }
@@ -4661,8 +4690,7 @@ const Scheduler = struct {
             fib.status = .running;
             const outcome = driveFiber(fib, budget) catch |e| {
                 fib.err = e;
-                fib.status = .done;
-                _ = self.outstanding.fetchSub(1, .acq_rel);
+                self.retire(fib);
                 continue;
             };
             switch (outcome) {
@@ -4671,11 +4699,8 @@ const Scheduler = struct {
                     fib.status = .ready;
                     try self.pushReady(fib);
                 },
-                .completed => {
-                    fib.status = .done;
-                    _ = self.outstanding.fetchSub(1, .acq_rel);
-                },
-                .parked => fib.status = .parked,
+                .completed => self.retire(fib),
+                .parked => self.parkCommit(fib),
             }
         }
     }
@@ -4694,8 +4719,7 @@ const Scheduler = struct {
             fib.status = .running;
             const outcome = driveFiber(fib, budget) catch |e| {
                 fib.err = e;
-                fib.status = .done;
-                _ = self.outstanding.fetchSub(1, .acq_rel);
+                self.retire(fib);
                 continue; // spawned-fiber error is isolated (does not kill the pumper)
             };
             switch (outcome) {
@@ -4704,11 +4728,8 @@ const Scheduler = struct {
                     fib.status = .ready;
                     try self.pushReady(fib);
                 },
-                .completed => {
-                    fib.status = .done;
-                    _ = self.outstanding.fetchSub(1, .acq_rel);
-                },
-                .parked => fib.status = .parked,
+                .completed => self.retire(fib),
+                .parked => self.parkCommit(fib),
             }
         }
     }
@@ -5648,7 +5669,12 @@ fn runFrame(f: *Frame) RunError!FrameResult {
         .invokespecial => {
             const cls = f.class orelse return error.UnsupportedOpcode;
             var pending: ?PendingCall = null;
+            const sp0 = f.sp;
             invokeInstance(f, cls, code, true, &pending) catch |e| {
+                if (e == error.Park) {
+                    f.sp = sp0; // un-pop args: resume re-runs the invoke
+                    return error.Park;
+                }
                 if (e == error.JavaException) {
                     if (try handleException(f, f.class, f.exceptions, f.budget.pending.?)) {
                         f.budget.pending = null;
@@ -5673,7 +5699,12 @@ fn runFrame(f: *Frame) RunError!FrameResult {
         .invokevirtual => {
             const cls = f.class orelse return error.UnsupportedOpcode;
             var pending: ?PendingCall = null;
+            const sp0 = f.sp;
             invokeInstance(f, cls, code, false, &pending) catch |e| {
+                if (e == error.Park) {
+                    f.sp = sp0; // un-pop args: resume re-runs the invoke
+                    return error.Park;
+                }
                 if (e == error.JavaException) {
                     if (try handleException(f, f.class, f.exceptions, f.budget.pending.?)) {
                         f.budget.pending = null;
@@ -5698,7 +5729,12 @@ fn runFrame(f: *Frame) RunError!FrameResult {
         .invokeinterface => {
             const cls = f.class orelse return error.UnsupportedOpcode;
             var pending: ?PendingCall = null;
+            const sp0 = f.sp;
             invokeInstance(f, cls, code, false, &pending) catch |e| {
+                if (e == error.Park) {
+                    f.sp = sp0; // un-pop args: resume re-runs the invoke
+                    return error.Park;
+                }
                 if (e == error.JavaException) {
                     if (try handleException(f, f.class, f.exceptions, f.budget.pending.?)) {
                         f.budget.pending = null;
@@ -5855,7 +5891,12 @@ fn runFrame(f: *Frame) RunError!FrameResult {
         .invokestatic => {
             const cls = f.class orelse return error.UnsupportedOpcode;
             var pending: ?PendingCall = null;
+            const sp0 = f.sp;
             invokeStatic(f, cls, code, &pending) catch |e| {
+                if (e == error.Park) {
+                    f.sp = sp0; // un-pop args: resume re-runs the invoke
+                    return error.Park;
+                }
                 if (e == error.JavaException) {
                     if (try handleException(f, f.class, f.exceptions, f.budget.pending.?)) {
                         f.budget.pending = null;

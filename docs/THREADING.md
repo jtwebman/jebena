@@ -266,18 +266,25 @@ parked fiber back to the ready queue. This is the next major concurrency feature
 it unblocks `CyclicBarrier`, `Executors`/thread-pools, and blocking queues. Until
 then, keep concurrent library code to patterns where blocked < carriers.
 
-### Parking step (b) attempt (iter 82): join0->park reverted (jbase-smoke regression)
+### Parking step (b): Thread.join0 -> real parking — LANDED (iter 83)
 
-Converted Thread.join0 to real parking (park_join fiber field; retire() wakes
-joiners on completion; parkCommit() double-checks under scheduler.lock; invoke
-handlers restore operand-stack sp on error.Park so resume re-runs the invoke
-cleanly). Isolated join patterns pass (StressMain 8-join, alloc-child+join,
-wait/notify+join all exact @1&4), but jbase-smoke regressed to a LinkError with the
-full sequence -- root cause not yet pinpointed (initial nested-Thread-subclass
-repros turned out to fail at iter81 too, i.e. invalid red herrings). Reverted to
-the iter81 spin/pump join to keep the gate green; the WIP is saved for a proper
-next-iteration debug that bisects WITHIN jbase-smoke (not synthetic tests). The
-inert parking plumbing (iter80) and lambdas-on-explicit-stack (iter81) remain.
+Thread.join0 now PARKS instead of spinning/pumping. A joining fiber records the
+joinee id in Fiber.park_join and raises error.Park; the invoke handlers restore
+the operand-stack sp on error.Park so the resumed invoke re-pops cleanly;
+driveFiber returns .parked and the carrier runs other fibers. Scheduler.retire()
+wakes fibers parked on a fiber that just completed (only fully-.parked ones, so a
+joiner still unwinding is never double-run); Scheduler.parkCommit() re-checks the
+join condition under scheduler.lock before committing to parked, closing the
+lost-wakeup race with retire. owningThreadFiber() identifies the joining fiber.
+
+(The iter-82 revert was premature -- a stale-binary/path artifact in a manual test
+made it look like a jbase-smoke regression; the sp-restore was the actual fix and
+the full gate is green.) Proven by scripts/join-stress.sh: 16 joiners park on one
+worker (16 blocked >> 4 carriers, which would deadlock under spin) = 1016 at
+carriers 1 & 4 and with GC forced. All 14 prior gate scripts stay green.
+
+Next: (c) monitorenter contention -> park + monitorexit wake; (d) Object.wait/notify
+-> park; (e) re-add CyclicBarrier; (f) Executors/thread-pool + blocking queues.
 
 **Known limitations (opt-in path only; default single carrier unaffected) —
 harden next:**
