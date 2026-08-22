@@ -240,6 +240,32 @@ Remaining N>1 gaps (smaller): per-carrier `budget.pending` isn't rooted/remapped
 across carriers (only the collector's) -- harmless today (stress paths throw no
 exceptions); plus the items in the list below.
 
+### BLOCKING MODEL LIMITATION (iter 79): blocking spins/pumps, it does not PARK
+
+The big remaining architectural gap. Blocking natives (`Thread.join`, `Object.wait`,
+monitor/`Condition` waits) do NOT yield the carrier -- at one carrier they nest an
+inline pump (`pumpStep`/`waitPump`), at N>1 they busy-spin holding the carrier.
+This works only when **fewer fibers are blocked at once than there are carriers**,
+which every current test satisfies (fibers contend briefly, then proceed).
+
+It breaks when many fibers block simultaneously -- e.g. `CyclicBarrier`, where all
+N parties `await()` together, or a thread pool whose idle workers all block on an
+empty queue:
+- **N>1:** a spinning blocked fiber holds its carrier, so with P parties needing to
+  be runnable at once and only C carriers (one already consumed by `main` spinning
+  in `join`), if P > C-1 the remaining party never gets a carrier -> deadlock.
+- **1 carrier:** the inline pump nests -- a woken fiber that immediately re-blocks
+  (cyclic wait) traps its pumper, which can't make its own progress -> deadlock.
+
+Attempted `CyclicBarrier` on iter 79 and hit exactly this (reverted to stay green).
+
+**The fix is real fiber PARKING:** a blocking op suspends the interpreter (unwinds
+to `driveFiber` with a "parked" outcome, recording what it waits on), the carrier
+returns to `carrierLoop` and runs other fibers, and completion/notify moves the
+parked fiber back to the ready queue. This is the next major concurrency feature;
+it unblocks `CyclicBarrier`, `Executors`/thread-pools, and blocking queues. Until
+then, keep concurrent library code to patterns where blocked < carriers.
+
 **Known limitations (opt-in path only; default single carrier unaffected) —
 harden next:**
 - Real monitors + `wait/notify`: DONE (iter 74). `monitorenter/monitorexit` are
