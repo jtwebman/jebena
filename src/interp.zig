@@ -695,6 +695,8 @@ pub const Loader = struct {
     /// Portable IO handle for OS-boundary natives (System.out write, clocks).
     /// Null under unit tests, which never call those natives.
     io: ?std.Io = null,
+    /// Cooperative green-thread scheduler (top-level runs go through it).
+    scheduler: Scheduler,
     /// Classpath directories searched (in order) to lazily load a class by name
     /// on first resolution. Empty under unit tests and eager-file runs.
     classpath: std.ArrayList([]const u8) = .empty,
@@ -709,9 +711,10 @@ pub const Loader = struct {
     jar_cache: std.ArrayList(JarBytes) = .empty,
 
     pub fn init(gpa: std.mem.Allocator) Loader {
-        return .{ .gpa = gpa };
+        return .{ .gpa = gpa, .scheduler = .{ .gpa = gpa } };
     }
     pub fn deinit(self: *Loader) void {
+        self.scheduler.deinit();
         for (self.statics.items) |st| self.gpa.free(st);
         self.statics.deinit(self.gpa);
         self.classes.deinit(self.gpa);
@@ -1469,7 +1472,7 @@ pub fn runInLoaderWithHeap(loader: *Loader, class: *const Class, name: []const u
     const slots = try loader.gpa.alloc(Value, m.arg_slots);
     defer loader.gpa.free(slots);
     const n = try layoutArgs(m, args, slots);
-    return exec(loader.gpa, rr.owner, heap, loader, budget, c.code, c.max_stack, c.max_locals, slots[0..n], c.exception_table, null);
+    return runFiber(loader, rr.owner, heap, budget, c.code, c.max_stack, c.max_locals, slots[0..n], c.exception_table);
 }
 
 fn eq2(a: []const u8, b: []const u8, x: []const u8, y: []const u8) bool {
@@ -3752,15 +3755,94 @@ fn makeBaseFrame(alloc: std.mem.Allocator, class: ?*const Class, heap: ?*Heap, l
 /// (stage 3) and can be marked as GC roots even while parked.
 const DriveOutcome = enum { completed, yielded };
 
+const FiberStatus = enum { ready, running, parked, done };
+
 const Fiber = struct {
     alloc: std.mem.Allocator,
     call_stack: std.ArrayList(*Frame) = .empty,
     /// Set when the fiber's base frame returns (its method result).
     result: ?Value = null,
+    id: u64 = 0,
+    status: FiberStatus = .ready,
+    err: ?RunError = null,
 
     fn deinit(self: *Fiber) void {
         for (self.call_stack.items) |cf| freeChildFrame(self.alloc, cf);
         self.call_stack.deinit(self.alloc);
+    }
+};
+
+/// Cooperative scheduler over green-thread fibers (single carrier for now).
+/// Owned by the Loader so natives (Thread.start etc.) can reach it. FIFO
+/// run-queue; run-to-completion between reduction yields keeps scheduling
+/// deterministic. Multi-fiber spawning + parking arrive in later 3b sub-steps;
+/// GC must then mark every fiber's frames (mark AND remap in the moving major).
+const Scheduler = struct {
+    gpa: std.mem.Allocator,
+    ready: std.ArrayList(*Fiber) = .empty,
+    all: std.ArrayList(*Fiber) = .empty,
+    current: ?*Fiber = null,
+    next_id: u64 = 0,
+
+    fn deinit(self: *Scheduler) void {
+        for (self.all.items) |fib| {
+            fib.deinit();
+            self.gpa.destroy(fib);
+        }
+        self.all.deinit(self.gpa);
+        self.ready.deinit(self.gpa);
+    }
+
+    /// Free all fibers and clear the queues (end of a top-level run).
+    fn reset(self: *Scheduler) void {
+        for (self.all.items) |fib| {
+            fib.deinit();
+            self.gpa.destroy(fib);
+        }
+        self.all.clearRetainingCapacity();
+        self.ready.clearRetainingCapacity();
+        self.current = null;
+    }
+
+    /// Create a fiber around an already-built base frame and enqueue it ready.
+    /// On error the base frame is NOT consumed (caller frees it).
+    fn spawn(self: *Scheduler, base: *Frame) RunError!*Fiber {
+        const fib = self.gpa.create(Fiber) catch return error.OutOfMemory;
+        fib.* = .{ .alloc = self.gpa, .id = self.next_id };
+        errdefer self.gpa.destroy(fib);
+        try self.all.append(self.gpa, fib);
+        errdefer _ = self.all.pop();
+        try self.ready.append(self.gpa, fib);
+        errdefer _ = self.ready.pop();
+        try fib.call_stack.append(self.gpa, base); // fib now owns base
+        self.next_id += 1;
+        return fib;
+    }
+
+    /// Run ready fibers to the empty queue. On a fiber error, record it and
+    /// propagate (single-fiber for now; spawned-fiber errors will be isolated
+    /// in a later sub-step).
+    fn run(self: *Scheduler, budget: *Budget) RunError!void {
+        while (self.ready.items.len > 0) {
+            const fib = self.ready.orderedRemove(0);
+            self.current = fib;
+            fib.status = .running;
+            const outcome = driveFiber(fib, budget) catch |e| {
+                fib.err = e;
+                fib.status = .done;
+                self.current = null;
+                return e;
+            };
+            self.current = null;
+            switch (outcome) {
+                .yielded => {
+                    budget.reductions = budget.reduction_quantum;
+                    fib.status = .ready;
+                    self.ready.append(self.gpa, fib) catch return error.OutOfMemory;
+                },
+                .completed => fib.status = .done,
+            }
+        }
     }
 };
 
@@ -3816,8 +3898,24 @@ fn driveFiber(fiber: *Fiber, budget: *Budget) RunError!DriveOutcome {
     return .completed;
 }
 
-/// Synchronous run of a compiled method to completion (native re-entry path and
-/// the top-level entry for now). Creates a fiber and drives it, refilling the
+/// Top-level entry: run a compiled method as the MAIN green-thread fiber via the
+/// loader's scheduler. Native re-entry keeps using exec (synchronous). Single
+/// fiber today => identical results; the scheduler will interleave spawned
+/// fibers (Thread.start) in later sub-steps.
+fn runFiber(loader: *Loader, class: ?*const Class, heap: ?*Heap, budget: *Budget, code: []const u8, max_stack: u16, max_locals: u16, arg_slots: []const Value, exceptions: []const attribute_decode.ExceptionTableEntry) RunError!?Value {
+    const alloc = loader.gpa;
+    const base = try makeBaseFrame(alloc, class, heap, loader, budget, code, max_stack, max_locals, arg_slots, exceptions, null);
+    const fib = loader.scheduler.spawn(base) catch |e| {
+        freeChildFrame(alloc, base);
+        return e;
+    };
+    defer loader.scheduler.reset();
+    try loader.scheduler.run(budget);
+    return fib.result;
+}
+
+/// Synchronous run of a compiled method to completion (native re-entry path).
+/// Creates a fiber and drives it, refilling the
 /// reduction quantum across yields. Stage 3b routes the main thread through a
 /// scheduler; native re-entry stays synchronous (a fiber can't yield mid-native).
 fn exec(alloc: std.mem.Allocator, class: ?*const Class, heap: ?*Heap, loader: *Loader, budget: *Budget, code: []const u8, max_stack: u16, max_locals: u16, arg_slots: []const Value, exceptions: []const attribute_decode.ExceptionTableEntry, parent: ?*Frame) RunError!?Value {
@@ -4808,7 +4906,7 @@ pub fn runIntBudgeted(a: std.mem.Allocator, code: []const u8, max_stack: u16, ma
     var buf: [64]Value = undefined;
     if (args.len > buf.len) return error.BadLocal;
     for (args, 0..) |x, i| buf[i] = .{ .int = x };
-    const r = try exec(a, null, null, &loader, &b, code, max_stack, max_locals, buf[0..args.len], &.{}, null);
+    const r = try runFiber(&loader, null, null, &b, code, max_stack, max_locals, buf[0..args.len], &.{});
     return if (r) |v| switch (v) {
         .int => |x| x,
         else => error.TypeMismatch,
