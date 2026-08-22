@@ -49,6 +49,7 @@ pub const RunError = error{
     JavaException,
     Truncated,
     Yield,
+    Park,
 } || bc.DecodeError || std.mem.Allocator.Error;
 
 pub const Budget = struct {
@@ -4308,7 +4309,7 @@ fn makeBaseFrame(alloc: std.mem.Allocator, class: ?*const Class, heap: ?*Heap, l
 /// A green-thread fiber: its own explicit Java call stack (frame 0 is the base).
 /// The whole stack is heap-owned so a fiber's state survives scheduler switches
 /// (stage 3) and can be marked as GC roots even while parked.
-const DriveOutcome = enum { completed, yielded };
+const DriveOutcome = enum { completed, yielded, parked };
 
 const FiberStatus = enum { ready, running, parked, done };
 
@@ -4524,6 +4525,7 @@ const Scheduler = struct {
                     fib.status = .done;
                     _ = self.outstanding.fetchSub(1, .acq_rel);
                 },
+                .parked => fib.status = .parked, // off the ready queue until a waker re-readies it
             }
             if (carrier.id < 32) _ = self.carriers_ran.fetchOr(@as(u32, 1) << @intCast(carrier.id), .acq_rel);
         }
@@ -4604,6 +4606,7 @@ const Scheduler = struct {
                 fib.status = .done;
                 _ = self.outstanding.fetchSub(1, .acq_rel);
             },
+            .parked => fib.status = .parked,
         }
         return true;
     }
@@ -4632,6 +4635,7 @@ const Scheduler = struct {
                     fib.status = .done;
                     _ = self.outstanding.fetchSub(1, .acq_rel);
                 },
+                .parked => fib.status = .parked,
             }
         }
     }
@@ -4664,6 +4668,7 @@ const Scheduler = struct {
                     fib.status = .done;
                     _ = self.outstanding.fetchSub(1, .acq_rel);
                 },
+                .parked => fib.status = .parked,
             }
         }
     }
@@ -4680,6 +4685,7 @@ fn driveFiber(fiber: *Fiber, budget: *Budget) RunError!DriveOutcome {
         const top = fiber.call_stack.items[fiber.call_stack.items.len - 1];
         const res = runFrame(top) catch |e| {
             if (e == error.Yield) return .yielded;
+            if (e == error.Park) return .parked; // fiber blocked -> carrier runs others
             return e;
         };
         switch (res) {
@@ -4768,6 +4774,10 @@ fn exec(alloc: std.mem.Allocator, class: ?*const Class, heap: ?*Heap, loader: *L
         switch (try driveFiber(&fiber, budget)) {
             .completed => return fiber.result,
             .yielded => budget.reductions = budget.reduction_quantum,
+            // A nested native re-entry cannot host a parked fiber (it runs
+            // synchronously within a carrier); propagate the park to the enclosing
+            // driver. Unreached today -- no op raises error.Park yet (scaffolding).
+            .parked => return error.Park,
         }
     }
 }
