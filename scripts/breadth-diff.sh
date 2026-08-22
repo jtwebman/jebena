@@ -16,7 +16,8 @@ rm -rf "$OUT"; mkdir -p "$OUT"
 
 [ -d "$ROOT/jbase/out" ] || bash "$ROOT/scripts/build-jbase.sh" >/dev/null 2>&1
 "$JAVAC" -d "$OUT" "$ROOT"/test/diff/DiffColl.java "$ROOT"/test/diff/DiffRegex.java \
-  "$ROOT"/test/diff/Driver.java || { echo "javac failed"; exit 1; }
+  "$ROOT"/test/diff/DiffStream.java "$ROOT"/test/diff/Driver.java \
+  || { echo "javac failed"; exit 1; }
 "$ZIG" build --build-file "$ROOT/build.zig" >/dev/null 2>&1
 JEBENA="$ROOT/zig-out/bin/jebena"
 
@@ -29,10 +30,13 @@ treeOrder treeNav lhmOrder collSort collMaxMin collReverse arrSortSearch arrCopy
 REGEX="matchLit matchDot matchDigit matchWord matchSpace matchAlt quantStar quantPlus \
 quantOpt braceExact braceRange classRange classNeg anchors nonCapturing altGroup \
 dotStarGreedy findCount groupCapture startEnd groupCountTest lookingAt wordCount sumLens"
+STREAM="mapFilterSum countDistinct sortedLimit intRange intRangeClosedSq mapToIntLen \
+reduceMax joiningLen groupingSize skipCount findFirstEven matchFlags boxedSum toListSize"
 
 CASES=""
 for m in $COLL; do CASES="$CASES DiffColl:$m"; done
 for m in $REGEX; do CASES="$CASES DiffRegex:$m"; done
+for m in $STREAM; do CASES="$CASES DiffStream:$m"; done
 
 pass=0; fail=0
 printf "%-24s %12s %12s   %s\n" CASE JAVA JEBENA RESULT
