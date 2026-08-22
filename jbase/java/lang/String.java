@@ -308,6 +308,102 @@ public final class String implements CharSequence, Comparable<String> {
         return sb.toString();
     }
 
+    public int indexOf(String str, int fromIndex) {
+        int n = str.value.length;
+        int len = value.length;
+        if (fromIndex < 0) {
+            fromIndex = 0;
+        }
+        if (n == 0) {
+            return fromIndex <= len ? fromIndex : len;
+        }
+        int last = len - n;
+        for (int i = fromIndex; i <= last; i++) {
+            int j = 0;
+            while (j < n && value[i + j] == str.value[j]) {
+                j++;
+            }
+            if (j == n) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    /** Literal (non-regex) replacement of every occurrence of target. */
+    public String replace(CharSequence target, CharSequence replacement) {
+        String t = target.toString();
+        String r = replacement.toString();
+        StringBuilder sb = new StringBuilder();
+        int tl = t.length();
+        if (tl == 0) {
+            sb.append(r);
+            for (int k = 0; k < value.length; k++) {
+                sb.append(value[k]);
+                sb.append(r);
+            }
+            return sb.toString();
+        }
+        int i = 0;
+        while (true) {
+            int j = indexOf(t, i);
+            if (j < 0) {
+                sb.append(substring(i));
+                break;
+            }
+            sb.append(substring(i, j));
+            sb.append(r);
+            i = j + tl;
+        }
+        return sb.toString();
+    }
+
+    public boolean matches(String regex) {
+        return java.util.regex.Pattern.matches(regex, this);
+    }
+
+    public String[] split(String regex) {
+        return split(regex, 0);
+    }
+
+    /** Split around matches of the given regex, mirroring java.util.regex.Pattern.split. */
+    public String[] split(String regex, int limit) {
+        java.util.regex.Pattern p = java.util.regex.Pattern.compile(regex);
+        java.util.regex.Matcher m = p.matcher(this);
+        java.util.ArrayList list = new java.util.ArrayList(); // jbase collections are raw
+        int index = 0;
+        boolean matchLimited = limit > 0;
+        while (m.find()) {
+            if (!matchLimited || list.size() < limit - 1) {
+                if (index == 0 && index == m.start() && m.start() == m.end()) {
+                    continue; // no leading empty for a zero-width match at the start
+                }
+                list.add(substring(index, m.start()));
+                index = m.end();
+            } else if (list.size() == limit - 1) {
+                list.add(substring(index, value.length));
+                index = m.end();
+            }
+        }
+        if (index == 0) {
+            return new String[] { this };
+        }
+        if (!matchLimited || list.size() < limit) {
+            list.add(substring(index, value.length));
+        }
+        int resultSize = list.size();
+        if (limit == 0) {
+            while (resultSize > 0 && ((String) list.get(resultSize - 1)).isEmpty()) {
+                resultSize--;
+            }
+        }
+        String[] result = new String[resultSize];
+        for (int i = 0; i < resultSize; i++) {
+            result[i] = (String) list.get(i);
+        }
+        return result;
+    }
+
     public static String valueOf(char c) {
         char[] r = { c };
         return new String(r);

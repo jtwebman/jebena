@@ -60,4 +60,50 @@ public class DiffString {
         return String.join(",").length() * 10 // no elements -> "" -> 0
                 + String.join("::", "solo").length(); // "solo" -> 4
     } // 4
+
+    static int splitComma() {
+        String[] parts = "a,bb,ccc,d".split(",");
+        int acc = 0;
+        for (String p : parts) {
+            acc = acc * 10 + p.length();
+        }
+        return acc * 10 + parts.length; // lengths 1,2,3,1 -> 1231, *10 + 4 = 12314
+    }
+
+    static int splitTrailingEmpty() {
+        // limit 0 drops trailing empty strings: "a,b,,," -> ["a","b"]
+        return "a,b,,,".split(",").length; // 2
+    }
+
+    static int splitLimit() {
+        // limit 2 -> ["a", "b,c,d"]
+        String[] parts = "a,b,c,d".split(",", 2);
+        return parts.length * 100 + parts[1].length(); // 2*100 + len("b,c,d")=5 -> 205
+    }
+
+    static int splitRegex() {
+        // split on runs of digits
+        String[] parts = "foo12bar345baz".split("\\d+");
+        int acc = 0;
+        for (String p : parts) {
+            acc += p.length();
+        }
+        return acc * 10 + parts.length; // "foo"(3)+"bar"(3)+"baz"(3)=9, *10 + 3 = 93
+    }
+
+    static int replaceSeq() {
+        String r = "one fish two fish".replace("fish", "cat"); // "one cat two cat"
+        return r.length(); // 15
+    }
+
+    static int replaceEmptyTarget() {
+        // literal replace with empty target inserts between every char and at ends
+        return "ab".replace("", "-").length(); // "-a-b-" -> 5
+    }
+
+    static int matches() {
+        return b("12345".matches("\\d+")) * 100
+                + b("12a45".matches("\\d+")) * 10
+                + b("hello".matches("[a-z]+")); // 101
+    }
 }

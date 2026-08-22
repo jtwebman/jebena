@@ -32,7 +32,8 @@ quantOpt braceExact braceRange classRange classNeg anchors nonCapturing altGroup
 dotStarGreedy findCount groupCapture startEnd groupCountTest lookingAt wordCount sumLens"
 STREAM="mapFilterSum countDistinct sortedLimit intRange intRangeClosedSq mapToIntLen \
 reduceMax joiningLen groupingSize skipCount findFirstEven matchFlags boxedSum toListSize"
-STRING="contains repeat repeatContent isBlank strip stripEmpty join joinEmpty"
+STRING="contains repeat repeatContent isBlank strip stripEmpty join joinEmpty \
+splitComma splitTrailingEmpty splitLimit splitRegex replaceSeq replaceEmptyTarget matches"
 
 CASES=""
 for m in $COLL; do CASES="$CASES DiffColl:$m"; done
