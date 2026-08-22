@@ -772,10 +772,39 @@ public class JBaseSmoke {
         tloc.remove();
         r += tloc.get();                                        // 42 again
 
+
+        // Thread subclass overriding run() (run() resolved on the ACTUAL class).
+        Thread wsub = new Worker();
+        wsub.start();
+        wsub.join();
+        r += threadSub;                                        // 7
+
+        // Allocating child fiber: two live fibers (main parked in join, child
+        // running + allocating) across GC — exercises all-fibers GC roots.
+        Runnable allocTask = () -> {
+            StringBuilder asb = new StringBuilder();
+            for (int i = 0; i < 50; i++) {
+                asb.append(i);
+            }
+            threadAlloc = asb.length();
+        };
+        Thread ath = new Thread(allocTask);
+        ath.start();
+        ath.join();
+        r += threadAlloc;                                      // len("0..49") = 90
+
         return r;
     }
 
     static int threadCounter = 0;
+    static int threadSub = 0;
+    static int threadAlloc = 0;
+
+    static class Worker extends Thread {
+        public void run() {
+            threadSub += 7;
+        }
+    }
 
     enum SmokeColor { RED, GREEN, BLUE }
 }

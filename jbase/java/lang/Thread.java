@@ -1,17 +1,17 @@
 package java.lang;
 
-// Clean-room java.lang.Thread — SINGLE-THREADED model. Jebena is currently a
-// single-threaded VM: Thread.start() runs the target's run() synchronously on
-// the calling thread, so program results are deterministic and differentially
-// testable. join()/sleep() are no-ops, isAlive() is true only during run().
-// Real preemptive OS-thread parallelism is a deliberate later iteration.
+// Clean-room java.lang.Thread — GREEN-THREAD model. Thread.start() spawns a
+// scheduler fiber (native start0) that runs run(); join() blocks the caller
+// until the fiber completes (native join0 pumps the cooperative scheduler).
+// currentThread() returns the main Thread for now (per-fiber Thread wiring is a
+// later refinement). Single carrier, cooperative — deterministic scheduling.
 public class Thread implements Runnable {
     private Runnable target;
     private String name;
     private boolean daemon;
     private int priority = 5;
     private boolean started;
-    private boolean alive;
+    private long fiberId = -1;
 
     private static int autoNumber = 0;
     private static Thread currentThread = new Thread("main");
@@ -48,27 +48,22 @@ public class Thread implements Runnable {
             throw new IllegalThreadStateException();
         }
         started = true;
-        alive = true;
-        Thread previous = currentThread;
-        currentThread = this;
-        try {
-            run();
-        } finally {
-            currentThread = previous;
-            alive = false;
-        }
+        start0();
     }
 
+    private native void start0();
+
     public final void join() {
-        // No-op: start() already ran to completion synchronously.
+        join0();
     }
 
     public final void join(long millis) {
+        join0();
     }
 
-    public final boolean isAlive() {
-        return alive;
-    }
+    private native void join0();
+
+    public final native boolean isAlive();
 
     public final void setName(String name) {
         this.name = name;
@@ -99,7 +94,7 @@ public class Thread implements Runnable {
     }
 
     public static void sleep(long millis) {
-        // Single-threaded model: returns immediately.
+        // Cooperative single carrier: deterministic no-op (real timers: stage 4).
     }
 
     public static void yield() {

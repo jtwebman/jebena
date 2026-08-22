@@ -840,9 +840,16 @@ pub const Loader = struct {
         const i = self.indexOf(class) orelse return error.LinkError;
         if (self.initialized.items[i]) return;
         self.initialized.items[i] = true;
-        if (class.find("<clinit>", "()V")) |ci| {
-            if (ci.code) |cc| {
-                _ = try exec(self.gpa, class, heap, self, budget, cc.code, cc.max_stack, cc.max_locals, &.{}, cc.exception_table, null);
+        // Initialize the superclass first (JVM order), then run THIS class's own
+        // <clinit> only — <clinit> is not inherited, and running a super's
+        // <clinit> with the wrong class/constant-pool would misresolve.
+        if (class.super) |sp| try self.ensureInit(sp, heap, budget);
+        for (class.methods) |*m| {
+            if (std.mem.eql(u8, m.name, "<clinit>") and std.mem.eql(u8, m.descriptor, "()V")) {
+                if (m.code) |cc| {
+                    _ = try exec(self.gpa, class, heap, self, budget, cc.code, cc.max_stack, cc.max_locals, &.{}, cc.exception_table, null);
+                }
+                break;
             }
         }
     }
@@ -3231,6 +3238,56 @@ fn nativeInvoke(f: *Frame, owner: *const Class, method: *const Class.Method, slo
             return f.pushInt(if (r) |id| @bitCast(id) else 0);
         }
     }
+    if (std.mem.eql(u8, on, "java/lang/Thread")) {
+        const heap = f.heap orelse return error.UnsupportedOpcode;
+        const tid = switch (slots[0]) {
+            .reference => |r| r orelse return error.NullPointer,
+            else => return error.TypeMismatch,
+        };
+        const tclass = switch (heap.get(tid).*) {
+            .instance => |x| x.class,
+            else => return error.LinkError,
+        };
+        const fidx = tclass.findField("fiberId") orelse return error.LinkError;
+        if (eq2(mn, md, "start0", "()V")) {
+            // Resolve run() on the receiver's ACTUAL class (fixes Thread subclasses
+            // incl. anonymous ones), spawn a fiber running it with `this` as local 0.
+            const rr = tclass.resolve("run", "()V") orelse (resolveInterfaceDefault(f, tclass, "run", "()V") orelse return error.MethodNotFound);
+            const cc = rr.method.code orelse return error.LinkError;
+            var argslots = [_]Value{.{ .reference = tid }};
+            const base = try makeBaseFrame(f.loader.gpa, rr.owner, f.heap, f.loader, f.budget, cc.code, cc.max_stack, cc.max_locals, argslots[0..1], cc.exception_table, null);
+            const fib = f.loader.scheduler.spawn(base) catch {
+                freeChildFrame(f.loader.gpa, base);
+                return error.OutOfMemory;
+            };
+            fib.thread_id = tid;
+            switch (heap.get(tid).*) {
+                .instance => |*x| x.fields[fidx] = .{ .long = @intCast(fib.id) },
+                else => {},
+            }
+            return;
+        }
+        if (eq2(mn, md, "join0", "()V")) {
+            const fid_val = switch (heap.get(tid).*) {
+                .instance => |x| x.fields[fidx],
+                else => return error.LinkError,
+            };
+            if (fid_val.long < 0) return;
+            const fib = f.loader.scheduler.fiberById(@intCast(fid_val.long)) orelse return;
+            if (fib.status == .done) return;
+            try f.loader.scheduler.pump(fib, f.budget);
+            return;
+        }
+        if (eq2(mn, md, "isAlive", "()Z")) {
+            const fid_val = switch (heap.get(tid).*) {
+                .instance => |x| x.fields[fidx],
+                else => return error.LinkError,
+            };
+            if (fid_val.long < 0) return f.pushInt(0);
+            const fib = f.loader.scheduler.fiberById(@intCast(fid_val.long)) orelse return f.pushInt(0);
+            return f.pushInt(if (fib.status == .done) 0 else 1);
+        }
+    }
     if (std.mem.eql(u8, on, "java/io/PrintStream")) {
         if (eq2(mn, md, "writeString", "(ILjava/lang/String;)V")) {
             const fd = slots[method.params[0].slot].int;
@@ -3788,6 +3845,8 @@ const Fiber = struct {
     id: u64 = 0,
     status: FiberStatus = .ready,
     err: ?RunError = null,
+    /// The java.lang.Thread object backing this fiber (heap id), if any.
+    thread_id: ?u32 = null,
 
     fn deinit(self: *Fiber) void {
         for (self.call_stack.items) |cf| freeChildFrame(self.alloc, cf);
@@ -3857,6 +3916,39 @@ const Scheduler = struct {
                 return e;
             };
             self.current = null;
+            switch (outcome) {
+                .yielded => {
+                    budget.reductions = budget.reduction_quantum;
+                    fib.status = .ready;
+                    self.ready.append(self.gpa, fib) catch return error.OutOfMemory;
+                },
+                .completed => fib.status = .done,
+            }
+        }
+    }
+
+    fn fiberById(self: *Scheduler, id: u64) ?*Fiber {
+        for (self.all.items) |fib| if (fib.id == id) return fib;
+        return null;
+    }
+
+    /// Run ready fibers (other than the caller, which is blocked in a native)
+    /// until `target` completes. Used by blocking natives like Thread.join on the
+    /// cooperative single carrier: a native can't suspend the interpreter, so it
+    /// pumps the rest of the run-queue inline until its await condition holds.
+    fn pump(self: *Scheduler, target: *Fiber, budget: *Budget) RunError!void {
+        const saved = self.current;
+        defer self.current = saved;
+        while (target.status != .done) {
+            if (self.ready.items.len == 0) break; // nothing runnable (avoid hang)
+            const fib = self.ready.orderedRemove(0);
+            self.current = fib;
+            fib.status = .running;
+            const outcome = driveFiber(fib, budget) catch |e| {
+                fib.err = e;
+                fib.status = .done;
+                continue; // spawned-fiber error is isolated (does not kill the pumper)
+            };
             switch (outcome) {
                 .yielded => {
                     budget.reductions = budget.reduction_quantum;
