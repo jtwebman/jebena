@@ -37,6 +37,7 @@ Each iteration is one small, verified, committed step. Never leave the tree red.
    - `bash scripts/jar-smoke.sh` — `jebena -jar <app.jar> <jbase-dir> -- <args>` reads Main-Class from META-INF/MANIFEST.MF and runs a multi-class app whose classes load lazily from the jar; stdout byte-identical to real `java -jar`
    - `bash scripts/trace-smoke.sh` — full uncaught-exception stack trace (`Exception in thread "main" <type>: <msg>` + `\tat Class.method(File:line)` frames across a multi-level call chain), byte-identical to real java; exercises Throwable.fillInStackTrace + StackTraceElement + LineNumberTable/SourceFile
    - `bash scripts/app-smoke.sh` — a bigger end-to-end program (WordFreq: String.split + HashMap + Collections.sort with a lambda Comparator + Collection.stream()/filter/map/sorted/findFirst + mapToInt/sum + recursion + a caught NumberFormatException); full stdout byte-identical to real java (builtin text + argv)
+   - `bash scripts/cch-stress.sh` — java.util.concurrent.ConcurrentHashMap.merge under concurrent mutation (8 fibers × 500 increments over 4 shared keys); atomic RMW under the map's monitor across carriers 1 & 4 (+GC) = 40010, matches real java
    - `bash scripts/portability-check.sh` — VM cross-compiles for macOS/Linux (aarch64/x86_64)
    - `zig fmt --check src/ build.zig` — formatted
    If anything fails: fix it, or revert the change. Do not commit red.

@@ -177,15 +177,15 @@ public class ConcurrentHashMap implements ConcurrentMap {
         return null;
     }
 
-    public int size() {
+    public synchronized int size() {
         return size;
     }
 
-    public boolean isEmpty() {
+    public synchronized boolean isEmpty() {
         return size == 0;
     }
 
-    public Object get(Object key) {
+    public synchronized Object get(Object key) {
         if (key == null) {
             throw new NullPointerException();
         }
@@ -193,14 +193,14 @@ public class ConcurrentHashMap implements ConcurrentMap {
         return (e == null) ? null : e.value;
     }
 
-    public boolean containsKey(Object key) {
+    public synchronized boolean containsKey(Object key) {
         if (key == null) {
             throw new NullPointerException();
         }
         return find(key, spread(key)) != null;
     }
 
-    public boolean containsValue(Object value) {
+    public synchronized boolean containsValue(Object value) {
         if (value == null) {
             throw new NullPointerException();
         }
@@ -231,15 +231,15 @@ public class ConcurrentHashMap implements ConcurrentMap {
         return null;
     }
 
-    public Object put(Object key, Object value) {
+    public synchronized Object put(Object key, Object value) {
         return putVal(key, value, false);
     }
 
-    public Object putIfAbsent(Object key, Object value) {
+    public synchronized Object putIfAbsent(Object key, Object value) {
         return putVal(key, value, true);
     }
 
-    public void putAll(Map m) {
+    public synchronized void putAll(Map m) {
         Iterator it = m.entrySet().iterator();
         while (it.hasNext()) {
             Map.Entry e = (Map.Entry) it.next();
@@ -247,14 +247,14 @@ public class ConcurrentHashMap implements ConcurrentMap {
         }
     }
 
-    public Object remove(Object key) {
+    public synchronized Object remove(Object key) {
         if (key == null) {
             throw new NullPointerException();
         }
         return removeNode(key, spread(key));
     }
 
-    public boolean remove(Object key, Object value) {
+    public synchronized boolean remove(Object key, Object value) {
         if (key == null) {
             throw new NullPointerException();
         }
@@ -270,7 +270,7 @@ public class ConcurrentHashMap implements ConcurrentMap {
         return false;
     }
 
-    public Object replace(Object key, Object value) {
+    public synchronized Object replace(Object key, Object value) {
         if (key == null || value == null) {
             throw new NullPointerException();
         }
@@ -283,7 +283,7 @@ public class ConcurrentHashMap implements ConcurrentMap {
         return null;
     }
 
-    public boolean replace(Object key, Object oldValue, Object newValue) {
+    public synchronized boolean replace(Object key, Object oldValue, Object newValue) {
         if (key == null || oldValue == null || newValue == null) {
             throw new NullPointerException();
         }
@@ -295,7 +295,7 @@ public class ConcurrentHashMap implements ConcurrentMap {
         return false;
     }
 
-    public Object getOrDefault(Object key, Object defaultValue) {
+    public synchronized Object getOrDefault(Object key, Object defaultValue) {
         if (key == null) {
             throw new NullPointerException();
         }
@@ -303,7 +303,7 @@ public class ConcurrentHashMap implements ConcurrentMap {
         return (e == null) ? defaultValue : e.value;
     }
 
-    public Object computeIfAbsent(Object key, Function mappingFunction) {
+    public synchronized Object computeIfAbsent(Object key, Function mappingFunction) {
         if (key == null || mappingFunction == null) {
             throw new NullPointerException();
         }
@@ -320,7 +320,7 @@ public class ConcurrentHashMap implements ConcurrentMap {
         return nv;
     }
 
-    public Object computeIfPresent(Object key, BiFunction remappingFunction) {
+    public synchronized Object computeIfPresent(Object key, BiFunction remappingFunction) {
         if (key == null || remappingFunction == null) {
             throw new NullPointerException();
         }
@@ -338,7 +338,7 @@ public class ConcurrentHashMap implements ConcurrentMap {
         return null;
     }
 
-    public Object compute(Object key, BiFunction remappingFunction) {
+    public synchronized Object compute(Object key, BiFunction remappingFunction) {
         if (key == null || remappingFunction == null) {
             throw new NullPointerException();
         }
@@ -360,7 +360,7 @@ public class ConcurrentHashMap implements ConcurrentMap {
         return nv;
     }
 
-    public Object merge(Object key, Object value, BiFunction remappingFunction) {
+    public synchronized Object merge(Object key, Object value, BiFunction remappingFunction) {
         if (key == null || value == null || remappingFunction == null) {
             throw new NullPointerException();
         }
@@ -379,7 +379,7 @@ public class ConcurrentHashMap implements ConcurrentMap {
         return nv;
     }
 
-    public void forEach(BiConsumer action) {
+    public synchronized void forEach(BiConsumer action) {
         if (action == null) {
             throw new NullPointerException();
         }
@@ -390,14 +390,14 @@ public class ConcurrentHashMap implements ConcurrentMap {
         }
     }
 
-    public void clear() {
+    public synchronized void clear() {
         for (int i = 0; i < table.length; i++) {
             table[i] = null;
         }
         size = 0;
     }
 
-    public Set keySet() {
+    public synchronized Set keySet() {
         HashSet s = new HashSet();
         for (int i = 0; i < table.length; i++) {
             for (Node e = table[i]; e != null; e = e.next) {
@@ -407,7 +407,7 @@ public class ConcurrentHashMap implements ConcurrentMap {
         return s;
     }
 
-    public Collection values() {
+    public synchronized Collection values() {
         ArrayList v = new ArrayList();
         for (int i = 0; i < table.length; i++) {
             for (Node e = table[i]; e != null; e = e.next) {
@@ -417,7 +417,7 @@ public class ConcurrentHashMap implements ConcurrentMap {
         return v;
     }
 
-    public Set entrySet() {
+    public synchronized Set entrySet() {
         HashSet s = new HashSet();
         for (int i = 0; i < table.length; i++) {
             for (Node e = table[i]; e != null; e = e.next) {
