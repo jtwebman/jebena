@@ -30,6 +30,7 @@ Each iteration is one small, verified, committed step. Never leave the tree red.
    - `bash scripts/rich-sql-stress.sh` — multi-row/multi-column PG result-set parse, carriers 2 & 4 +GC; also live Postgres generate_series when JEBENA_PGTEST is set
    - `bash scripts/router-stress.sh` — multi-endpoint HTTP service (/ping + PG-backed /db + 404), carriers 1 & 4 +GC; live /db when JEBENA_PGTEST is set
    - `bash scripts/executor-stress.sh` — java.util.concurrent thread pool (Executors/ThreadPoolExecutor/Future), 100 tasks summed via get(), carriers 1 & 4 +GC
+   - `bash scripts/inject-err-stress.sh` — fiber-error isolation: one worker's uncaught error terminates only that fiber (no carrier death / GC deadlock), total=35, carriers 1 & 4 +GC
    - `bash scripts/portability-check.sh` — VM cross-compiles for macOS/Linux (aarch64/x86_64)
    - `zig fmt --check src/ build.zig` — formatted
    If anything fails: fix it, or revert the change. Do not commit red.

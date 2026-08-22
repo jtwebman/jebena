@@ -4705,6 +4705,11 @@ const Scheduler = struct {
     /// Number of carriers in the pool (1 today) and how many are parked at the
     /// safepoint. The requester waits until parked == carriers_total-1 (all others).
     carriers_total: u32 = 1,
+    /// Carriers still executing (not yet returned from carrierLoop). requestSafepoint
+    /// waits on this, NOT carriers_total, so a carrier that exits can never leave the
+    /// collector waiting for a park count that will never be reached (deadlock). The
+    /// collector is always one of the alive, so this is >= 1 when it spins.
+    carriers_alive: std.atomic.Value(u32) = std.atomic.Value(u32).init(1),
     /// Live carriers for the current multi-carrier run (set by runMulti, cleared
     /// after). GC roots every carrier's budget.pending -- an in-flight exception on
     /// a worker must survive a collection triggered on another carrier. Empty at
@@ -4935,8 +4940,10 @@ const Scheduler = struct {
     fn runMulti(self: *Scheduler, budget: *Budget) RunError!void {
         const n = self.requested_carriers;
         self.carriers_total = n;
+        self.carriers_alive.store(n, .release);
         self.parked.store(0, .release);
         defer self.carriers_total = 1; // restore for reset / next top-level run
+        defer self.carriers_alive.store(1, .release);
         const carriers = self.gpa.alloc(Carrier, n) catch return error.OutOfMemory;
         defer self.gpa.free(carriers);
         for (carriers, 0..) |*c, i| c.* = .{ .id = @intCast(i), .budget = budget.* };
@@ -4950,6 +4957,7 @@ const Scheduler = struct {
             spawned += 1;
         }
         const main_err = self.carrierLoop(&carriers[0]);
+        _ = self.carriers_alive.fetchSub(1, .acq_rel); // carrier 0 is leaving
         self.shutdown.store(true, .release); // tell idle workers to exit
         for (threads[0..spawned]) |t| t.join();
         if (self.trace_carriers)
@@ -4960,6 +4968,7 @@ const Scheduler = struct {
     /// Worker-carrier thread entry: run the carrier loop; a fatal drive error is
     /// isolated (recorded in the fiber and left; the run's result is carrier 0's).
     fn carrierWorker(self: *Scheduler, carrier: *Carrier) void {
+        defer _ = self.carriers_alive.fetchSub(1, .acq_rel); // this worker is leaving
         self.carrierLoop(carrier) catch {};
     }
 
@@ -4980,10 +4989,16 @@ const Scheduler = struct {
             carrier.current = fib;
             fib.status = .running;
             const outcome = driveFiber(fib, cb) catch |e| {
+                // A fiber's uncaught error terminates ONLY that fiber (Java Thread
+                // semantics: an uncaught exception ends the thread, not the process),
+                // and MUST NOT kill the carrier -- a dead carrier can never park at a
+                // safepoint, which would deadlock a concurrent GC (requestSafepoint
+                // waits for all carriers). Record it, retire the fiber, keep looping.
+                // The main fiber's error is surfaced by runFiber via its fib.err.
                 fib.err = e;
                 carrier.current = null;
                 self.retire(fib);
-                return e;
+                continue;
             };
             carrier.current = null;
             switch (outcome) {
@@ -5016,7 +5031,10 @@ const Scheduler = struct {
     /// immediately and the caller has exclusive heap access.
     fn requestSafepoint(self: *Scheduler) void {
         self.safepoint_requested.store(true, .release);
-        while (self.parked.load(.acquire) < self.carriers_total - 1) std.atomic.spinLoopHint();
+        // Wait on carriers_alive (not carriers_total): the collector is one of the
+        // alive, and any carrier that exits decrements this, so the target always
+        // stays reachable even if a carrier leaves mid-run -- no deadlock.
+        while (self.parked.load(.acquire) < self.carriers_alive.load(.acquire) - 1) std.atomic.spinLoopHint();
     }
 
     fn releaseSafepoint(self: *Scheduler) void {
@@ -5226,6 +5244,10 @@ fn runFiber(loader: *Loader, class: ?*const Class, heap: ?*Heap, budget: *Budget
     } else {
         try sched.run(budget); // single carrier, or nested native re-entry
     }
+    // The MAIN fiber's uncaught error is the run's result (worker/spawned-fiber
+    // errors are isolated in their own fib.err and do not propagate -- Java Thread
+    // semantics). carrierLoop no longer propagates a fiber error, so read it here.
+    if (fib.err) |e| return e;
     return fib.result;
 }
 
