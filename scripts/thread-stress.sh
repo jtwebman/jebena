@@ -21,19 +21,19 @@ bash "$ROOT/scripts/build-jbase.sh" >/dev/null
 "$ZIG" build --build-file "$ROOT/build.zig" >/dev/null 2>&1
 JEBENA="$ROOT/zig-out/bin/jebena"
 EXP=$("$JAVA" -cp "$OUT" Driver st.StressMain demo 2>/dev/null)
-JBASE=$(find "$ROOT/jbase/out" -name '*.class' | tr '\n' ' ')
-APP=$(ls "$OUT"/st/*.class | tr '\n' ' ')
+mapfile -t JBASE < <(find "$ROOT/jbase/out" -name '*.class')
+mapfile -t APP < <(ls "$OUT"/st/*.class)
 fail=0
 # 1 carrier: cooperative deterministic path, 3 reps.
 for rep in 1 2 3; do
-  ALL=$(timeout 30 bash -c "JEBENA_CARRIERS=1 '$JEBENA' run st/StressMain demo $APP $JBASE" 2>&1)
+  ALL=$(timeout 30 env JEBENA_CARRIERS=1 "$JEBENA" run st/StressMain demo "${APP[@]}" "${JBASE[@]}" 2>&1)
   [ $? -eq 124 ] && { echo "thread-stress: FAIL carriers=1 rep=$rep HANG (timeout)"; fail=1; }
   GOT=$(printf '%s\n' "$ALL" | sed -n 's/.*demo() = \(-\?[0-9]*\).*/\1/p')
   [ "$GOT" = "$EXP" ] || { echo "thread-stress: FAIL carriers=1 rep=$rep jebena=$GOT java=$EXP"; fail=1; }
 done
 # 4 carriers: REAL parallel std.Thread carriers, 10 reps; total exact AND >=2 carriers ran.
 for rep in $(seq 1 10); do
-  ALL=$(timeout 30 bash -c "JEBENA_CARRIER_TRACE=1 JEBENA_CARRIERS=4 '$JEBENA' run st/StressMain demo $APP $JBASE" 2>&1)
+  ALL=$(timeout 30 env JEBENA_CARRIER_TRACE=1 JEBENA_CARRIERS=4 "$JEBENA" run st/StressMain demo "${APP[@]}" "${JBASE[@]}" 2>&1)
   rc=$?
   GOT=$(printf '%s\n' "$ALL" | sed -n 's/.*demo() = \(-\?[0-9]*\).*/\1/p')
   RAN=$(printf '%s\n' "$ALL" | sed -n 's/.*carriers-ran=\([0-9]*\).*/\1/p')
@@ -45,7 +45,7 @@ done
 CTEXP=$("$JAVA" -cp "$OUT" Driver st.CurThread demo 2>/dev/null)
 for cfg in "JEBENA_CARRIERS=1" "JEBENA_CARRIERS=4"; do
   for rep in 1 2 3; do
-    ALL=$(timeout 30 bash -c "$cfg '$JEBENA' run st/CurThread demo $APP $JBASE" 2>&1)
+    ALL=$(timeout 30 env $cfg "$JEBENA" run st/CurThread demo "${APP[@]}" "${JBASE[@]}" 2>&1)
     [ $? -eq 124 ] && { echo "thread-stress: FAIL CurThread $cfg rep=$rep HANG"; fail=1; }
     GOT=$(printf '%s\n' "$ALL" | sed -n 's/.*demo() = \(-\?[0-9]*\).*/\1/p')
     [ "$GOT" = "$CTEXP" ] || { echo "thread-stress: FAIL CurThread $cfg rep=$rep jebena=$GOT java=$CTEXP"; fail=1; }

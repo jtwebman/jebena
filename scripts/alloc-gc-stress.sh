@@ -23,13 +23,13 @@ bash "$ROOT/scripts/build-jbase.sh" >/dev/null
 "$ZIG" build --build-file "$ROOT/build.zig" >/dev/null 2>&1
 JEBENA="$ROOT/zig-out/bin/jebena"
 EXP=$("$JAVA" -cp "$OUT" Driver st.AllocStress demo 2>/dev/null)
-JBASE=$(find "$ROOT/jbase/out" -name '*.class' | tr '\n' ' ')
-APP=$(ls "$OUT"/st/*.class | tr '\n' ' ')
+mapfile -t JBASE < <(find "$ROOT/jbase/out" -name '*.class')
+mapfile -t APP < <(ls "$OUT"/st/*.class)
 fail=0
 # 1 carrier: moving GC forced at several intervals.
 for interval in 200 500 2000; do
   for rep in 1 2 3; do
-    ALL=$(timeout 40 bash -c "JEBENA_GC_INTERVAL=$interval JEBENA_CARRIERS=1 '$JEBENA' run st/AllocStress demo $APP $JBASE" 2>&1)
+    ALL=$(timeout 40 env JEBENA_GC_INTERVAL=$interval JEBENA_CARRIERS=1 "$JEBENA" run st/AllocStress demo "${APP[@]}" "${JBASE[@]}" 2>&1)
     [ $? -eq 124 ] && { echo "alloc-gc-stress: FAIL c=1 interval=$interval rep=$rep HANG (timeout)"; fail=1; }
     GOT=$(printf '%s\n' "$ALL" | sed -n 's/.*demo() = \(-\?[0-9]*\).*/\1/p')
     [ "$GOT" = "$EXP" ] || { echo "alloc-gc-stress: FAIL c=1 interval=$interval rep=$rep jebena=$GOT java=$EXP"; fail=1; }
@@ -42,7 +42,7 @@ done
 for interval in 0 1000 300; do
   env="JEBENA_CARRIERS=4"; [ "$interval" != 0 ] && env="JEBENA_GC_INTERVAL=$interval $env"
   for rep in $(seq 1 8); do
-    ALL=$(timeout 40 bash -c "JEBENA_CARRIER_TRACE=1 $env '$JEBENA' run st/AllocStress demo $APP $JBASE" 2>&1)
+    ALL=$(timeout 40 env JEBENA_CARRIER_TRACE=1 $env "$JEBENA" run st/AllocStress demo "${APP[@]}" "${JBASE[@]}" 2>&1)
     [ $? -eq 124 ] && { echo "alloc-gc-stress: FAIL c=4 interval=$interval rep=$rep HANG (timeout)"; fail=1; }
     GOT=$(printf '%s\n' "$ALL" | sed -n 's/.*demo() = \(-\?[0-9]*\).*/\1/p')
     RAN=$(printf '%s\n' "$ALL" | sed -n 's/.*carriers-ran=\([0-9]*\).*/\1/p')
@@ -52,7 +52,7 @@ for interval in 0 1000 300; do
 done
 # Leak assertion: the Debug build's DebugAllocator reports leaks on exit; a clean
 # allocation-heavy run must report none (guards the primitiveClass arena fix).
-LEAKS=$(timeout 40 bash -c "JEBENA_GC_INTERVAL=1000 JEBENA_CARRIERS=4 '$JEBENA' run st/AllocStress demo $APP $JBASE" 2>&1 | grep -c 'leaked' || true)
+LEAKS=$(timeout 40 env JEBENA_GC_INTERVAL=1000 JEBENA_CARRIERS=4 "$JEBENA" run st/AllocStress demo "${APP[@]}" "${JBASE[@]}" 2>&1 | grep -c 'leaked' || true)
 [ "$LEAKS" = 0 ] || { echo "alloc-gc-stress: FAIL — $LEAKS leaked allocation(s) reported"; fail=1; }
 [ "$fail" = 0 ] || exit 1
 echo "alloc-gc-stress: OK — 8 fibers x2000 allocs = $EXP; single-carrier moving GC + 4 REAL carriers concurrent alloc & concurrent moving GC, no leaks, matches real java"

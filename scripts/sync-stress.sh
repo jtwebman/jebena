@@ -17,12 +17,12 @@ bash "$ROOT/scripts/build-jbase.sh" >/dev/null
 "$JAVAC" -d "$OUT" "$ROOT"/test/stress/SyncCounter.java "$ROOT"/test/stress/SyncMethod.java "$ROOT"/test/stress/MonContend.java "$ROOT/test/diff/Driver.java"
 "$ZIG" build --build-file "$ROOT/build.zig" >/dev/null 2>&1
 JEBENA="$ROOT/zig-out/bin/jebena"
-JBASE=$(find "$ROOT/jbase/out" -name '*.class' | tr '\n' ' ')
-APP=$(ls "$OUT"/st/*.class | tr '\n' ' ')
+mapfile -t JBASE < <(find "$ROOT/jbase/out" -name '*.class')
+mapfile -t APP < <(ls "$OUT"/st/*.class)
 fail=0
 check() { # $1 main-class  $2 label  $3 env  $4 reps  $5 expected
   for rep in $(seq 1 "$4"); do
-    ALL=$(timeout 40 bash -c "$3 '$JEBENA' run st/$1 demo $APP $JBASE" 2>&1)
+    ALL=$(timeout 40 env $3 "$JEBENA" run st/$1 demo "${APP[@]}" "${JBASE[@]}" 2>&1)
     [ $? -eq 124 ] && { echo "sync-stress: FAIL $1 $2 rep=$rep HANG"; fail=1; }
     GOT=$(printf '%s\n' "$ALL" | sed -n 's/.*demo() = \(-\?[0-9]*\).*/\1/p')
     [ "$GOT" = "$5" ] || { echo "sync-stress: FAIL $1 $2 rep=$rep jebena=$GOT java=$5"; fail=1; }

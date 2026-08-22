@@ -15,18 +15,18 @@ bash "$ROOT/scripts/build-jbase.sh" >/dev/null
 "$JAVAC" -d "$OUT" "$ROOT"/test/stress/ArrayDequeStress.java "$ROOT"/test/stress/QueueStress.java "$ROOT/test/diff/Driver.java"
 "$ZIG" build --build-file "$ROOT/build.zig" >/dev/null 2>&1
 JEBENA="$ROOT/zig-out/bin/jebena"
-JBASE=$(find "$ROOT/jbase/out" -name '*.class' | tr '\n' ' ')
-APP=$(ls "$OUT"/st/*.class | tr '\n' ' ')
+mapfile -t JBASE < <(find "$ROOT/jbase/out" -name '*.class')
+mapfile -t APP < <(ls "$OUT"/st/*.class)
 fail=0
 # ArrayDeque growth/wrap (deterministic, single carrier is enough).
 for m in demo grow; do
   EXP=$("$JAVA" -cp "$OUT" Driver st.ArrayDequeStress "$m" 2>/dev/null)
-  GOT=$(timeout 20 bash -c "'$JEBENA' run st/ArrayDequeStress $m $APP $JBASE" 2>&1 | sed -n "s/.*$m() = \(-\?[0-9]*\).*/\1/p")
+  GOT=$(timeout 20 env "$JEBENA" run st/ArrayDequeStress $m "${APP[@]}" "${JBASE[@]}" 2>&1 | sed -n "s/.*$m() = \(-\?[0-9]*\).*/\1/p")
   [ "$GOT" = "$EXP" ] || { echo "queue-stress: FAIL ArrayDeque $m jebena=$GOT java=$EXP"; fail=1; }
 done
 # LinkedBlockingQueue producer/consumer (consumers park on empty).
 QEXP=$("$JAVA" -cp "$OUT" Driver st.QueueStress demo 2>/dev/null)
-qcheck() { for rep in $(seq 1 "$2"); do ALL=$(timeout 40 bash -c "$1 '$JEBENA' run st/QueueStress demo $APP $JBASE" 2>&1); [ $? -eq 124 ] && { echo "queue-stress: FAIL QueueStress $1 HANG"; fail=1; }; G=$(printf '%s\n' "$ALL"|sed -n 's/.*demo() = \(-\?[0-9]*\).*/\1/p'); [ "$G" = "$QEXP" ] || { echo "queue-stress: FAIL QueueStress $1 jebena=$G java=$QEXP"; fail=1; }; done; }
+qcheck() { for rep in $(seq 1 "$2"); do ALL=$(timeout 40 env $1 "$JEBENA" run st/QueueStress demo "${APP[@]}" "${JBASE[@]}" 2>&1); [ $? -eq 124 ] && { echo "queue-stress: FAIL QueueStress $1 HANG"; fail=1; }; G=$(printf '%s\n' "$ALL"|sed -n 's/.*demo() = \(-\?[0-9]*\).*/\1/p'); [ "$G" = "$QEXP" ] || { echo "queue-stress: FAIL QueueStress $1 jebena=$G java=$QEXP"; fail=1; }; done; }
 qcheck "JEBENA_CARRIERS=1" 3
 qcheck "JEBENA_CARRIERS=4" 10
 qcheck "JEBENA_GC_INTERVAL=400 JEBENA_CARRIERS=4" 5

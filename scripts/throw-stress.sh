@@ -18,12 +18,12 @@ bash "$ROOT/scripts/build-jbase.sh" >/dev/null
 "$ZIG" build --build-file "$ROOT/build.zig" >/dev/null 2>&1
 JEBENA="$ROOT/zig-out/bin/jebena"
 EXP=$("$JAVA" -cp "$OUT" Driver st.ThrowStress demo 2>/dev/null)
-JBASE=$(find "$ROOT/jbase/out" -name '*.class' | tr '\n' ' ')
-APP=$(ls "$OUT"/st/*.class | tr '\n' ' ')
+mapfile -t JBASE < <(find "$ROOT/jbase/out" -name '*.class')
+mapfile -t APP < <(ls "$OUT"/st/*.class)
 fail=0
 check() { # $1 label  $2 env  $3 reps
   for rep in $(seq 1 "$3"); do
-    ALL=$(timeout 40 bash -c "$2 '$JEBENA' run st/ThrowStress demo $APP $JBASE" 2>&1)
+    ALL=$(timeout 40 env $2 "$JEBENA" run st/ThrowStress demo "${APP[@]}" "${JBASE[@]}" 2>&1)
     [ $? -eq 124 ] && { echo "throw-stress: FAIL $1 rep=$rep HANG"; fail=1; }
     GOT=$(printf '%s\n' "$ALL" | sed -n 's/.*demo() = \(-\?[0-9]*\).*/\1/p')
     [ "$GOT" = "$EXP" ] || { echo "throw-stress: FAIL $1 rep=$rep jebena=$GOT java=$EXP"; fail=1; }

@@ -31,14 +31,14 @@ bash "$ROOT/scripts/build-jbase.sh" >/dev/null
 "$ZIG" build --build-file "$ROOT/build.zig" >/dev/null 2>&1
 JEBENA="$ROOT/zig-out/bin/jebena"
 EXP=$("$JAVA" -cp "$OUT" Driver st.LoadStress demo 2>/dev/null)
-JBASE=$(find "$ROOT/jbase/out" -name '*.class' | tr '\n' ' ')
+mapfile -t JBASE < <(find "$ROOT/jbase/out" -name '*.class')
 # LoadStress class file passed explicitly; the st/gen dir is a classpath entry so
 # C0..C11 load lazily on first use (concurrently, on the worker carriers).
 LS="$OUT/st/LoadStress.class"
 fail=0
 check() { # $1 label  $2 env
   for rep in 1 2 3 4; do
-    ALL=$(timeout 40 bash -c "JEBENA_CARRIER_TRACE=1 $2 '$JEBENA' run st/LoadStress demo $LS $OUT $JBASE" 2>&1)
+    ALL=$(timeout 40 env JEBENA_CARRIER_TRACE=1 $2 "$JEBENA" run st/LoadStress demo "$LS" "$OUT" "${JBASE[@]}" 2>&1)
     [ $? -eq 124 ] && { echo "load-stress: FAIL $1 rep=$rep HANG"; fail=1; }
     GOT=$(printf '%s\n' "$ALL" | sed -n 's/.*demo() = \(-\?[0-9]*\).*/\1/p')
     [ "$GOT" = "$EXP" ] || { echo "load-stress: FAIL $1 rep=$rep jebena=$GOT java=$EXP"; fail=1; }
