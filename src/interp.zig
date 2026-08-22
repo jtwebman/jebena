@@ -1158,6 +1158,7 @@ fn doNew(f: *Frame, cls: *const Class, code: []const u8) RunError!void {
     maybeCollect(f);
     const heap = f.heap orelse return error.UnsupportedOpcode;
     const tclass = try resolveClass(f, cls, try refClassName(cls, try u16At(code, f.pc + 1)));
+    try f.loader.ensureInit(tclass, heap, f.budget);
     if (tclass.is_stub and (std.mem.eql(u8, tclass.name, "java/lang/StringBuilder") or std.mem.eql(u8, tclass.name, "java/lang/StringBuffer"))) {
         // Stub path: the Zig builder intrinsic backs StringBuilder via a BuilderObj.
         // A real (jbase) StringBuilder is an ordinary instance with char[] fields.
@@ -1364,6 +1365,11 @@ fn invokeInstance(f: *Frame, cls: *const Class, code: []const u8, is_special: bo
     switch (heap.get(oid).*) {
         .lambda => |lam| return dispatchLambda(f, lam, slots, pl.params),
         .boxed => return boxedMethod(f, oid, slots, pl.params, mname, mdesc),
+        .array => {
+            // Arrays expose Object.clone() as a shallow copy (used by enum values()).
+            if (std.mem.eql(u8, mname, "clone")) return cloneArray(f, oid);
+            return error.LinkError;
+        },
         else => {},
     }
     slots[0] = .{ .reference = oid };
@@ -2273,6 +2279,17 @@ fn lessThanInt(_: void, a: Value, b: Value) bool {
 fn lessThanLong(_: void, a: Value, b: Value) bool {
     return a.long < b.long;
 }
+fn cloneArray(f: *Frame, oid: u32) RunError!void {
+    const heap = f.heap orelse return error.UnsupportedOpcode;
+    const src0 = try arrayOf(f, oid);
+    const elem = src0.elem;
+    const len = src0.data.len;
+    const new_id = heap.allocArray(elem, len) catch return error.OutOfMemory;
+    const src = try arrayOf(f, oid); // re-fetch: allocArray may have moved objects
+    const dst = try arrayOf(f, new_id);
+    @memcpy(dst.data, src.data);
+    try f.push(.{ .reference = new_id });
+}
 fn arrayOf(f: *Frame, id: u32) RunError!*Array {
     const heap = f.heap orelse return error.UnsupportedOpcode;
     return switch (heap.get(id).*) {
@@ -2692,7 +2709,7 @@ fn getMirror(f: *Frame, cls: *const Class) RunError!u32 {
     const heap = f.heap orelse return error.UnsupportedOpcode;
     const idx = f.loader.indexOf(cls) orelse return error.LinkError;
     if (f.loader.mirrors.items[idx]) |id| return id;
-    const class_class = f.loader.find("java/lang/Class") orelse return error.LinkError;
+    const class_class = f.loader.find("java/lang/Class") orelse (try f.loader.loadFromClasspath("java/lang/Class")) orelse return error.LinkError;
     const mid = try heap.allocInstance(class_class);
     const vi = class_class.findField("vmIndex") orelse return error.LinkError;
     switch (heap.get(mid).*) {
@@ -3302,6 +3319,19 @@ fn nativeInvoke(f: *Frame, owner: *const Class, method: *const Class.Method, slo
         if (eq2(mn, md, "getSimpleName", "()Ljava/lang/String;")) return pushDottedName(f, rc.name, true);
         if (eq2(mn, md, "isInterface", "()Z")) return f.pushInt(if (rc.is_interface) 1 else 0);
         if (eq2(mn, md, "isPrimitive", "()Z")) return f.pushInt(if (rc.is_primitive) 1 else 0);
+        if (eq2(mn, md, "getEnumConstants", "()[Ljava/lang/Object;")) {
+            const heap = f.heap orelse return error.UnsupportedOpcode;
+            const vdesc = std.fmt.allocPrint(f.loader.gpa, "()[L{s};", .{rc.name}) catch return error.OutOfMemory;
+            defer f.loader.gpa.free(vdesc);
+            const vr = rc.resolve("values", vdesc) orelse return f.push(.{ .reference = null });
+            const cc = vr.method.code orelse return f.push(.{ .reference = null });
+            try f.loader.ensureInit(vr.owner, heap, f.budget);
+            if (f.budget.depth >= f.budget.max_depth) return error.CallDepthExceeded;
+            f.budget.depth += 1;
+            defer f.budget.depth -= 1;
+            const ret = try exec(f.loader.gpa, vr.owner, f.heap, f.loader, f.budget, cc.code, cc.max_stack, cc.max_locals, &.{}, cc.exception_table, f);
+            return f.push(ret orelse Value{ .reference = null });
+        }
         if (eq2(mn, md, "getSuperclass", "()Ljava/lang/Class;")) {
             if (rc.super) |sup| return f.push(.{ .reference = try getMirror(f, sup) });
             return f.push(.{ .reference = null });
@@ -3552,6 +3582,7 @@ fn invokeStatic(f: *Frame, cls: *const Class, code: []const u8) RunError!void {
             return boxStatic(f, owner_name, mname, mdesc);
     }
     const tclass = try resolveClass(f, cls, try refClassName(cls, ref.class_index));
+    if (f.heap) |h| try f.loader.ensureInit(tclass, h, f.budget);
     const tr = tclass.resolve(mname, mdesc) orelse return error.MethodNotFound;
     const target = tr.method;
     const owner = tr.owner;
@@ -3584,7 +3615,7 @@ fn loadConstant(f: *Frame, class: ?*const Class, index: u16) RunError!void {
         .string => |si| try createString(f, cls.cp.utf8(si) catch return error.LinkError),
         .class => {
             const name = cls.cp.classNameOf(index) catch return error.LinkError;
-            const target = f.loader.find(name) orelse return error.LinkError;
+            const target = try resolveClass(f, cls, name);
             try f.push(.{ .reference = try getMirror(f, target) });
         },
         else => return error.UnsupportedOpcode,
@@ -4461,6 +4492,7 @@ fn exec(alloc: std.mem.Allocator, class: ?*const Class, heap: ?*Heap, loader: *L
             const cls = class orelse return error.UnsupportedOpcode;
             const fr = try fieldRef(cls, try u16At(code, f.pc + 1));
             const dcls = try resolveClass(&f, cls, fr.class_name);
+            if (f.heap) |h| try f.loader.ensureInit(dcls, h, f.budget);
             const si = dcls.findStatic(fr.field_name) orelse return error.LinkError;
             try f.pushKind((try f.loader.staticsOf(dcls))[si]);
             f.pc += 3;
@@ -4470,6 +4502,7 @@ fn exec(alloc: std.mem.Allocator, class: ?*const Class, heap: ?*Heap, loader: *L
             const cls = class orelse return error.UnsupportedOpcode;
             const fr = try fieldRef(cls, try u16At(code, f.pc + 1));
             const dcls = try resolveClass(&f, cls, fr.class_name);
+            if (f.heap) |h| try f.loader.ensureInit(dcls, h, f.budget);
             const si = dcls.findStatic(fr.field_name) orelse return error.LinkError;
             const kind = dcls.static_fields[si].kind;
             (try f.loader.staticsOf(dcls))[si] = try f.popKind(kind);

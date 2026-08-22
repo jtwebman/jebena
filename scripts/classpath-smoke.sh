@@ -16,7 +16,7 @@ rm -rf "$OUT"; mkdir -p "$OUT"
 JEBENA="$ROOT/zig-out/bin/jebena"
 EXP=$("$JAVA" -cp "$OUT" Driver cp.Main entry 2>/dev/null)
 # Only the main class is named; the directory is the classpath (no .class args).
-GOT=$("$JEBENA" run cp/Main entry "$OUT" 2>&1 | sed -n 's/.*= \(-\?[0-9]*\).*/\1/p')
+GOT=$("$JEBENA" run cp/Main entry "$OUT" "$ROOT/jbase/out" 2>&1 | sed -n 's/.*= \(-\?[0-9]*\).*/\1/p')
 echo "classpath-smoke: jebena=$GOT  java=$EXP"
 [ "$GOT" = "$EXP" ] && [ -n "$GOT" ] || { echo "CLASSPATH SMOKE FAILED (mismatch)"; exit 1; }
 echo "classpath-smoke: OK — lazy directory classpath loading matches real java"
@@ -30,7 +30,7 @@ else
   # fall back to zip if jar is unavailable
   ( cd "$OUT" && zip -q -r "$JAR" cp/*.class )
 fi
-GOTJAR=$("$JEBENA" run cp/Main entry "$JAR" 2>&1 | sed -n 's/.*= \(-\?[0-9]*\).*/\1/p')
+GOTJAR=$("$JEBENA" run cp/Main entry "$JAR" "$ROOT/jbase/out" 2>&1 | sed -n 's/.*= \(-\?[0-9]*\).*/\1/p')
 echo "classpath-smoke(jar): jebena=$GOTJAR  java=$EXP"
 [ "$GOTJAR" = "$EXP" ] && [ -n "$GOTJAR" ] || { echo "CLASSPATH JAR SMOKE FAILED (mismatch)"; exit 1; }
 echo "classpath-smoke(jar): OK — lazy .jar classpath loading matches real java"

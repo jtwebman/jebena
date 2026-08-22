@@ -30,6 +30,8 @@ public final class Class {
 
     public native boolean isPrimitive();
 
+    public native Object[] getEnumConstants();
+
     static native Class getPrimitiveClass(String name);
 
     public native Class getSuperclass();

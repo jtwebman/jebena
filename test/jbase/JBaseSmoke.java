@@ -708,6 +708,49 @@ public class JBaseSmoke {
         if (reOpt.group(1) == null) r += 19;
         if (reOpt.start(1) == -1) r += 19;
 
+
+        // java.util.concurrent.ConcurrentHashMap — clean-room, differential vs real.
+        java.util.concurrent.ConcurrentHashMap<String, Integer> chm =
+                new java.util.concurrent.ConcurrentHashMap<>();
+        chm.put("a", 1);
+        chm.put("b", 2);
+        chm.put("c", 3);
+        r += chm.get("a") + chm.get("b") + chm.get("c");   // 6
+        r += chm.size();                                    // 3
+        r += chm.getOrDefault("z", 99);                     // 99
+        chm.putIfAbsent("a", 100);                          // no overwrite
+        r += chm.get("a");                                  // 1
+        chm.putIfAbsent("d", 4);
+        r += chm.get("d");                                  // 4
+        chm.computeIfAbsent("e", k -> 5);
+        r += chm.get("e");                                  // 5
+        chm.merge("a", 10, (x, y) -> x + y);                // 1+10=11
+        r += chm.get("a");                                  // 11
+        int chmNpe = 0;
+        try { chm.put(null, 1); } catch (NullPointerException e1) { chmNpe += 1; }
+        try { chm.get(null); } catch (NullPointerException e2) { chmNpe += 10; }
+        try { chm.put("x", null); } catch (NullPointerException e3) { chmNpe += 100; }
+        r += chmNpe;                                         // 111
+
+
+        // java.lang.Enum — values/ordinal/name/valueOf/switch/toString vs real java.
+        r += SmokeColor.values().length;                       // 3
+        r += SmokeColor.RED.ordinal();                         // 0
+        r += SmokeColor.BLUE.ordinal();                        // 2
+        if (SmokeColor.GREEN.name().equals("GREEN")) r += 20;
+        if (SmokeColor.valueOf("BLUE") == SmokeColor.BLUE) r += 200;
+        if (SmokeColor.RED.toString().equals("RED")) r += 20;
+        SmokeColor sc = SmokeColor.GREEN;
+        switch (sc) {
+            case GREEN:
+                r += 2000;
+                break;
+            default:
+                break;
+        }
+
         return r;
     }
+
+    enum SmokeColor { RED, GREEN, BLUE }
 }
