@@ -606,6 +606,71 @@ fn branch(pc: usize, offset: i32, code_len: usize) RunError!usize {
 /// A class registry: name -> Class, with per-class mutable static storage and
 /// lazy <clinit>. This is the beginning of a class loader; classes are still
 /// preloaded by the caller (no classpath search yet).
+/// Minimal in-memory zip reader: returns the uncompressed bytes of the archive
+/// entry named "<want>.class", or null if absent. Handles STORED (method 0) and
+/// DEFLATE (method 8), which is all a JDK-produced jar uses. Caller owns the
+/// returned slice. Bounds-checked throughout; malformed input yields null.
+fn zipReadEntryClass(gpa: std.mem.Allocator, zip: []const u8, want: []const u8) RunError!?[]u8 {
+    const want_name = std.fmt.allocPrint(gpa, "{s}.class", .{want}) catch return error.OutOfMemory;
+    defer gpa.free(want_name);
+    if (zip.len < 22) return null;
+
+    // Locate the End Of Central Directory record (sig 0x06054b50), scanning back
+    // over the (usually empty) trailing comment.
+    var eocd: usize = zip.len - 22;
+    const min_eocd: usize = if (zip.len > 22 + 65535) zip.len - 22 - 65535 else 0;
+    while (true) {
+        if (std.mem.readInt(u32, zip[eocd..][0..4], .little) == 0x06054b50) break;
+        if (eocd == min_eocd) return null;
+        eocd -= 1;
+    }
+    const total = std.mem.readInt(u16, zip[eocd + 10 ..][0..2], .little);
+    var cd = std.mem.readInt(u32, zip[eocd + 16 ..][0..4], .little);
+
+    var i: usize = 0;
+    while (i < total) : (i += 1) {
+        const p: usize = cd;
+        if (p + 46 > zip.len) return null;
+        if (std.mem.readInt(u32, zip[p..][0..4], .little) != 0x02014b50) return null;
+        const method = std.mem.readInt(u16, zip[p + 10 ..][0..2], .little);
+        const comp_size = std.mem.readInt(u32, zip[p + 20 ..][0..4], .little);
+        const name_len = std.mem.readInt(u16, zip[p + 28 ..][0..2], .little);
+        const extra_len = std.mem.readInt(u16, zip[p + 30 ..][0..2], .little);
+        const comment_len = std.mem.readInt(u16, zip[p + 32 ..][0..2], .little);
+        const local_off = std.mem.readInt(u32, zip[p + 42 ..][0..4], .little);
+        const nstart = p + 46;
+        if (nstart + name_len > zip.len) return null;
+        const ename = zip[nstart .. nstart + name_len];
+        cd = @intCast(nstart + name_len + extra_len + comment_len);
+        if (!std.mem.eql(u8, ename, want_name)) continue;
+
+        // Found it: parse the local file header to find the data offset (its
+        // name/extra lengths can differ from the central directory's).
+        const lo: usize = local_off;
+        if (lo + 30 > zip.len) return null;
+        if (std.mem.readInt(u32, zip[lo..][0..4], .little) != 0x04034b50) return null;
+        const lname_len = std.mem.readInt(u16, zip[lo + 26 ..][0..2], .little);
+        const lextra_len = std.mem.readInt(u16, zip[lo + 28 ..][0..2], .little);
+        const data = lo + 30 + @as(usize, lname_len) + @as(usize, lextra_len);
+        if (data + comp_size > zip.len) return null;
+        const comp = zip[data .. data + comp_size];
+
+        if (method == 0) return gpa.dupe(u8, comp) catch error.OutOfMemory;
+        if (method == 8) {
+            const flate = std.compress.flate;
+            const window = gpa.alloc(u8, flate.max_window_len) catch return error.OutOfMemory;
+            defer gpa.free(window);
+            var src = std.Io.Reader.fixed(comp);
+            var dec = flate.Decompress.init(&src, .raw, window);
+            return dec.reader.allocRemaining(gpa, .unlimited) catch return null;
+        }
+        return null; // unsupported compression method
+    }
+    return null;
+}
+
+const JarBytes = struct { path: []const u8, bytes: []u8 };
+
 pub const Loader = struct {
     gpa: std.mem.Allocator,
     classes: std.ArrayList(*const Class) = .empty,
@@ -626,6 +691,9 @@ pub const Loader = struct {
     /// ClassFiles parsed on demand from the classpath; owned here so their
     /// constant pools outlive the Classes that reference them.
     owned_cfs: std.ArrayList(*ClassFile) = .empty,
+    /// Cache of whole .jar archives read from the classpath, keyed by path, so
+    /// each jar is read once and reused across lazy class loads.
+    jar_cache: std.ArrayList(JarBytes) = .empty,
 
     pub fn init(gpa: std.mem.Allocator) Loader {
         return .{ .gpa = gpa };
@@ -642,6 +710,11 @@ pub const Loader = struct {
         }
         self.owned_cfs.deinit(self.gpa);
         self.classpath.deinit(self.gpa);
+        for (self.jar_cache.items) |jc| {
+            self.gpa.free(jc.path);
+            self.gpa.free(jc.bytes);
+        }
+        self.jar_cache.deinit(self.gpa);
     }
 
     /// Lazily load a class by internal name from the classpath directories,
@@ -649,30 +722,55 @@ pub const Loader = struct {
     /// Returns null if not found on the classpath; errors on parse/link failure.
     pub fn loadFromClasspath(self: *Loader, name: []const u8) RunError!?*const Class {
         const io = self.io orelse return null;
-        const arena = self.class_arena orelse return null;
+        if (self.class_arena == null) return null;
         if (self.classpath.items.len == 0) return null;
-        for (self.classpath.items) |dir| {
-            const rel = std.fmt.allocPrint(self.gpa, "{s}/{s}.class", .{ dir, name }) catch return error.OutOfMemory;
-            defer self.gpa.free(rel);
-            const bytes = std.Io.Dir.cwd().readFileAlloc(io, rel, self.gpa, .unlimited) catch continue;
-            defer self.gpa.free(bytes);
-            const cf = self.gpa.create(ClassFile) catch return error.OutOfMemory;
-            cf.* = ClassFile.parse(self.gpa, bytes) catch {
-                self.gpa.destroy(cf);
-                continue;
-            };
-            self.owned_cfs.append(self.gpa, cf) catch return error.OutOfMemory;
-            const super_name: ?[]const u8 = if (cf.super_class != 0) (cf.constant_pool.classNameOf(cf.super_class) catch null) else null;
-            const super: ?*const Class = if (super_name) |sn|
-                (self.find(sn) orelse (try self.loadFromClasspath(sn)) orelse return error.LinkError)
-            else
-                null;
-            const c = arena.create(Class) catch return error.OutOfMemory;
-            c.* = Class.init(self.gpa, arena, cf, super) catch return error.LinkError;
-            self.register(c) catch return error.OutOfMemory;
-            return c;
+        for (self.classpath.items) |entry| {
+            if (std.mem.endsWith(u8, entry, ".jar")) {
+                const jar = (try self.jarBytes(io, entry)) orelse continue;
+                const cls_bytes = (zipReadEntryClass(self.gpa, jar, name) catch continue) orelse continue;
+                defer self.gpa.free(cls_bytes);
+                if (try self.buildFromBytes(cls_bytes)) |c| return c;
+            } else {
+                const rel = std.fmt.allocPrint(self.gpa, "{s}/{s}.class", .{ entry, name }) catch return error.OutOfMemory;
+                defer self.gpa.free(rel);
+                const bytes = std.Io.Dir.cwd().readFileAlloc(io, rel, self.gpa, .unlimited) catch continue;
+                defer self.gpa.free(bytes);
+                if (try self.buildFromBytes(bytes)) |c| return c;
+            }
         }
         return null;
+    }
+
+    /// Parse `bytes` (a .class image) and build+register the Class, resolving its
+    /// superclass lazily. Returns null on parse failure (caller tries next entry).
+    fn buildFromBytes(self: *Loader, bytes: []const u8) RunError!?*const Class {
+        const arena = self.class_arena.?;
+        const cf = self.gpa.create(ClassFile) catch return error.OutOfMemory;
+        cf.* = ClassFile.parse(self.gpa, bytes) catch {
+            self.gpa.destroy(cf);
+            return null;
+        };
+        self.owned_cfs.append(self.gpa, cf) catch return error.OutOfMemory;
+        const super_name: ?[]const u8 = if (cf.super_class != 0) (cf.constant_pool.classNameOf(cf.super_class) catch null) else null;
+        const super: ?*const Class = if (super_name) |sn|
+            (self.find(sn) orelse (try self.loadFromClasspath(sn)) orelse return error.LinkError)
+        else
+            null;
+        const c = arena.create(Class) catch return error.OutOfMemory;
+        c.* = Class.init(self.gpa, arena, cf, super) catch return error.LinkError;
+        self.register(c) catch return error.OutOfMemory;
+        return c;
+    }
+
+    /// Read (and cache) the full bytes of a .jar archive from the classpath.
+    fn jarBytes(self: *Loader, io: std.Io, path: []const u8) RunError!?[]const u8 {
+        for (self.jar_cache.items) |jc| {
+            if (std.mem.eql(u8, jc.path, path)) return jc.bytes;
+        }
+        const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, self.gpa, .unlimited) catch return null;
+        const path_copy = self.gpa.dupe(u8, path) catch return error.OutOfMemory;
+        self.jar_cache.append(self.gpa, .{ .path = path_copy, .bytes = bytes }) catch return error.OutOfMemory;
+        return bytes;
     }
     pub fn register(self: *Loader, class: *const Class) !void {
         const st = try self.gpa.alloc(Value, class.static_fields.len);

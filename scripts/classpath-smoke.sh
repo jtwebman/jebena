@@ -20,3 +20,17 @@ GOT=$("$JEBENA" run cp/Main entry "$OUT" 2>&1 | sed -n 's/.*= \(-\?[0-9]*\).*/\1
 echo "classpath-smoke: jebena=$GOT  java=$EXP"
 [ "$GOT" = "$EXP" ] && [ -n "$GOT" ] || { echo "CLASSPATH SMOKE FAILED (mismatch)"; exit 1; }
 echo "classpath-smoke: OK — lazy directory classpath loading matches real java"
+
+# --- JAR variant: pack the same classes into a .jar and load from the archive ---
+JAR="$OUT/app.jar"
+JARBIN="$(command -v jar || echo "$JDK/bin/jar")"
+if [ -x "$JARBIN" ] || command -v jar >/dev/null 2>&1; then
+  ( cd "$OUT" && "$JARBIN" cf "$JAR" cp/*.class )
+else
+  # fall back to zip if jar is unavailable
+  ( cd "$OUT" && zip -q -r "$JAR" cp/*.class )
+fi
+GOTJAR=$("$JEBENA" run cp/Main entry "$JAR" 2>&1 | sed -n 's/.*= \(-\?[0-9]*\).*/\1/p')
+echo "classpath-smoke(jar): jebena=$GOTJAR  java=$EXP"
+[ "$GOTJAR" = "$EXP" ] && [ -n "$GOTJAR" ] || { echo "CLASSPATH JAR SMOKE FAILED (mismatch)"; exit 1; }
+echo "classpath-smoke(jar): OK — lazy .jar classpath loading matches real java"
