@@ -28,6 +28,7 @@ Each iteration is one small, verified, committed step. Never leave the tree red.
    - `bash scripts/pg-stress.sh` — Postgres v3 wire client (SELECT 1) vs a spec-faithful mock backend, carriers 2 & 4 +GC; also hits a live Postgres when JEBENA_PGTEST is set + reachable
    - `bash scripts/dbapi-stress.sh` — Postgres-backed HTTP API (GET -> PG SELECT 1 -> HTTP body), carriers 3 & 4 +GC; also end-to-end vs live Postgres when JEBENA_PGTEST is set
    - `bash scripts/rich-sql-stress.sh` — multi-row/multi-column PG result-set parse, carriers 2 & 4 +GC; also live Postgres generate_series when JEBENA_PGTEST is set
+   - `bash scripts/router-stress.sh` — multi-endpoint HTTP service (/ping + PG-backed /db + 404), carriers 1 & 4 +GC; live /db when JEBENA_PGTEST is set
    - `bash scripts/portability-check.sh` — VM cross-compiles for macOS/Linux (aarch64/x86_64)
    - `zig fmt --check src/ build.zig` — formatted
    If anything fails: fix it, or revert the change. Do not commit red.
