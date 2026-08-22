@@ -76,6 +76,8 @@ const Frame = struct {
     loader: *Loader = undefined,
     parent: ?*Frame = null,
     code: []const u8 = &.{},
+    class: ?*const Class = null,
+    exceptions: []const attribute_decode.ExceptionTableEntry = &.{},
 
     fn push(f: *Frame, v: Value) RunError!void {
         if (f.sp >= f.stack.len) return error.StackOverflow;
@@ -3608,8 +3610,8 @@ fn invokeStatic(f: *Frame, cls: *const Class, code: []const u8) RunError!void {
     if (ret) |rv| try f.pushKind(rv);
 }
 
-fn loadConstant(f: *Frame, class: ?*const Class, index: u16) RunError!void {
-    const cls = class orelse return error.UnsupportedOpcode;
+fn loadConstant(f: *Frame, index: u16) RunError!void {
+    const cls = f.class orelse return error.UnsupportedOpcode;
     switch ((cls.cp.get(index) catch return error.LinkError).*) {
         .integer => |v| try f.pushInt(v),
         .float => |v| try f.pushFloat(v),
@@ -3622,8 +3624,8 @@ fn loadConstant(f: *Frame, class: ?*const Class, index: u16) RunError!void {
         else => return error.UnsupportedOpcode,
     }
 }
-fn loadConstant2(f: *Frame, class: ?*const Class, index: u16) RunError!void {
-    const cls = class orelse return error.UnsupportedOpcode;
+fn loadConstant2(f: *Frame, index: u16) RunError!void {
+    const cls = f.class orelse return error.UnsupportedOpcode;
     switch ((cls.cp.get(index) catch return error.LinkError).*) {
         .long => |v| try f.pushLong(v),
         .double => |v| try f.pushDouble(v),
@@ -3676,7 +3678,7 @@ fn exec(alloc: std.mem.Allocator, class: ?*const Class, heap: ?*Heap, loader: *L
     for (locals) |*l| l.* = .{ .int = 0 };
     for (arg_slots, 0..) |v, i| locals[i] = v;
 
-    var f = Frame{ .stack = stack, .locals = locals, .budget = budget, .heap = heap, .loader = loader, .parent = parent, .code = code };
+    var f = Frame{ .stack = stack, .locals = locals, .budget = budget, .heap = heap, .loader = loader, .parent = parent, .code = code, .class = class, .exceptions = exceptions };
 
     sw: switch (try opAt(code, f.pc)) {
         .nop => {
@@ -3715,17 +3717,17 @@ fn exec(alloc: std.mem.Allocator, class: ?*const Class, heap: ?*Heap, loader: *L
             continue :sw try step(&f);
         },
         .ldc => {
-            try loadConstant(&f, class, @intCast(try u8At(code, f.pc + 1)));
+            try loadConstant(&f, @intCast(try u8At(code, f.pc + 1)));
             f.pc += 2;
             continue :sw try step(&f);
         },
         .ldc_w => {
-            try loadConstant(&f, class, try u16At(code, f.pc + 1));
+            try loadConstant(&f, try u16At(code, f.pc + 1));
             f.pc += 3;
             continue :sw try step(&f);
         },
         .ldc2_w => {
-            try loadConstant2(&f, class, try u16At(code, f.pc + 1));
+            try loadConstant2(&f, try u16At(code, f.pc + 1));
             f.pc += 3;
             continue :sw try step(&f);
         },
@@ -3913,7 +3915,7 @@ fn exec(alloc: std.mem.Allocator, class: ?*const Class, heap: ?*Heap, loader: *L
             const x = try f.popInt();
             const res = intBinary(o, x, y) catch |e| {
                 if (e == error.ArithmeticException) {
-                    try raise(&f, class, exceptions, "java/lang/ArithmeticException", e);
+                    try raise(&f, f.class, f.exceptions, "java/lang/ArithmeticException", e);
                     continue :sw try step(&f);
                 }
                 return e;
@@ -3933,7 +3935,7 @@ fn exec(alloc: std.mem.Allocator, class: ?*const Class, heap: ?*Heap, loader: *L
             const x = try f.popLong();
             const res = longBinary(o, x, y) catch |e| {
                 if (e == error.ArithmeticException) {
-                    try raise(&f, class, exceptions, "java/lang/ArithmeticException", e);
+                    try raise(&f, f.class, f.exceptions, "java/lang/ArithmeticException", e);
                     continue :sw try step(&f);
                 }
                 return e;
@@ -4207,7 +4209,7 @@ fn exec(alloc: std.mem.Allocator, class: ?*const Class, heap: ?*Heap, loader: *L
         .areturn => return try f.pop(),
         .newarray => {
             doNewArray(&f, code) catch |e| {
-                try mapTrap(&f, class, exceptions, e);
+                try mapTrap(&f, f.class, f.exceptions, e);
                 continue :sw try step(&f);
             };
             f.pc += 2;
@@ -4215,21 +4217,21 @@ fn exec(alloc: std.mem.Allocator, class: ?*const Class, heap: ?*Heap, loader: *L
         },
         .anewarray => {
             doANewArray(&f, code) catch |e| {
-                try mapTrap(&f, class, exceptions, e);
+                try mapTrap(&f, f.class, f.exceptions, e);
                 continue :sw try step(&f);
             };
             f.pc += 3;
             continue :sw try step(&f);
         },
         .multianewarray => {
-            const cls = class orelse return error.UnsupportedOpcode;
+            const cls = f.class orelse return error.UnsupportedOpcode;
             try doMultiANewArray(&f, cls, code);
             f.pc += 4;
             continue :sw try step(&f);
         },
         .arraylength => {
             doArrayLength(&f) catch |e| {
-                try mapTrap(&f, class, exceptions, e);
+                try mapTrap(&f, f.class, f.exceptions, e);
                 continue :sw try step(&f);
             };
             f.pc += 1;
@@ -4237,7 +4239,7 @@ fn exec(alloc: std.mem.Allocator, class: ?*const Class, heap: ?*Heap, loader: *L
         },
         .iaload, .baload, .caload, .saload => {
             const ai = arrayIndex(&f) catch |e| {
-                try mapTrap(&f, class, exceptions, e);
+                try mapTrap(&f, f.class, f.exceptions, e);
                 continue :sw try step(&f);
             };
             try f.pushInt(ai.arr.data[ai.i].int);
@@ -4246,7 +4248,7 @@ fn exec(alloc: std.mem.Allocator, class: ?*const Class, heap: ?*Heap, loader: *L
         },
         .laload => {
             const ai = arrayIndex(&f) catch |e| {
-                try mapTrap(&f, class, exceptions, e);
+                try mapTrap(&f, f.class, f.exceptions, e);
                 continue :sw try step(&f);
             };
             try f.pushLong(ai.arr.data[ai.i].long);
@@ -4255,7 +4257,7 @@ fn exec(alloc: std.mem.Allocator, class: ?*const Class, heap: ?*Heap, loader: *L
         },
         .faload => {
             const ai = arrayIndex(&f) catch |e| {
-                try mapTrap(&f, class, exceptions, e);
+                try mapTrap(&f, f.class, f.exceptions, e);
                 continue :sw try step(&f);
             };
             try f.pushFloat(ai.arr.data[ai.i].float);
@@ -4264,7 +4266,7 @@ fn exec(alloc: std.mem.Allocator, class: ?*const Class, heap: ?*Heap, loader: *L
         },
         .daload => {
             const ai = arrayIndex(&f) catch |e| {
-                try mapTrap(&f, class, exceptions, e);
+                try mapTrap(&f, f.class, f.exceptions, e);
                 continue :sw try step(&f);
             };
             try f.pushDouble(ai.arr.data[ai.i].double);
@@ -4273,7 +4275,7 @@ fn exec(alloc: std.mem.Allocator, class: ?*const Class, heap: ?*Heap, loader: *L
         },
         .aaload => {
             const ai = arrayIndex(&f) catch |e| {
-                try mapTrap(&f, class, exceptions, e);
+                try mapTrap(&f, f.class, f.exceptions, e);
                 continue :sw try step(&f);
             };
             try f.push(ai.arr.data[ai.i]);
@@ -4283,7 +4285,7 @@ fn exec(alloc: std.mem.Allocator, class: ?*const Class, heap: ?*Heap, loader: *L
         .iastore => {
             const v = try f.popInt();
             const ai = arrayIndex(&f) catch |e| {
-                try mapTrap(&f, class, exceptions, e);
+                try mapTrap(&f, f.class, f.exceptions, e);
                 continue :sw try step(&f);
             };
             ai.arr.data[ai.i] = .{ .int = v };
@@ -4293,7 +4295,7 @@ fn exec(alloc: std.mem.Allocator, class: ?*const Class, heap: ?*Heap, loader: *L
         .bastore => {
             const v = try f.popInt();
             const ai = arrayIndex(&f) catch |e| {
-                try mapTrap(&f, class, exceptions, e);
+                try mapTrap(&f, f.class, f.exceptions, e);
                 continue :sw try step(&f);
             };
             ai.arr.data[ai.i] = .{ .int = @as(i8, @truncate(v)) };
@@ -4303,7 +4305,7 @@ fn exec(alloc: std.mem.Allocator, class: ?*const Class, heap: ?*Heap, loader: *L
         .castore => {
             const v = try f.popInt();
             const ai = arrayIndex(&f) catch |e| {
-                try mapTrap(&f, class, exceptions, e);
+                try mapTrap(&f, f.class, f.exceptions, e);
                 continue :sw try step(&f);
             };
             ai.arr.data[ai.i] = .{ .int = @as(u16, @truncate(@as(u32, @bitCast(v)))) };
@@ -4313,7 +4315,7 @@ fn exec(alloc: std.mem.Allocator, class: ?*const Class, heap: ?*Heap, loader: *L
         .sastore => {
             const v = try f.popInt();
             const ai = arrayIndex(&f) catch |e| {
-                try mapTrap(&f, class, exceptions, e);
+                try mapTrap(&f, f.class, f.exceptions, e);
                 continue :sw try step(&f);
             };
             ai.arr.data[ai.i] = .{ .int = @as(i16, @truncate(v)) };
@@ -4323,7 +4325,7 @@ fn exec(alloc: std.mem.Allocator, class: ?*const Class, heap: ?*Heap, loader: *L
         .lastore => {
             const v = try f.popLong();
             const ai = arrayIndex(&f) catch |e| {
-                try mapTrap(&f, class, exceptions, e);
+                try mapTrap(&f, f.class, f.exceptions, e);
                 continue :sw try step(&f);
             };
             ai.arr.data[ai.i] = .{ .long = v };
@@ -4333,7 +4335,7 @@ fn exec(alloc: std.mem.Allocator, class: ?*const Class, heap: ?*Heap, loader: *L
         .fastore => {
             const v = try f.popFloat();
             const ai = arrayIndex(&f) catch |e| {
-                try mapTrap(&f, class, exceptions, e);
+                try mapTrap(&f, f.class, f.exceptions, e);
                 continue :sw try step(&f);
             };
             ai.arr.data[ai.i] = .{ .float = v };
@@ -4343,7 +4345,7 @@ fn exec(alloc: std.mem.Allocator, class: ?*const Class, heap: ?*Heap, loader: *L
         .dastore => {
             const v = try f.popDouble();
             const ai = arrayIndex(&f) catch |e| {
-                try mapTrap(&f, class, exceptions, e);
+                try mapTrap(&f, f.class, f.exceptions, e);
                 continue :sw try step(&f);
             };
             ai.arr.data[ai.i] = .{ .double = v };
@@ -4353,7 +4355,7 @@ fn exec(alloc: std.mem.Allocator, class: ?*const Class, heap: ?*Heap, loader: *L
         .aastore => {
             const v = try f.pop();
             const ai = arrayIndex(&f) catch |e| {
-                try mapTrap(&f, class, exceptions, e);
+                try mapTrap(&f, f.class, f.exceptions, e);
                 continue :sw try step(&f);
             };
             ai.arr.data[ai.i] = v;
@@ -4362,95 +4364,95 @@ fn exec(alloc: std.mem.Allocator, class: ?*const Class, heap: ?*Heap, loader: *L
             continue :sw try step(&f);
         },
         .new => {
-            const cls = class orelse return error.UnsupportedOpcode;
+            const cls = f.class orelse return error.UnsupportedOpcode;
             try doNew(&f, cls, code);
             f.pc += 3;
             continue :sw try step(&f);
         },
         .getfield => {
-            const cls = class orelse return error.UnsupportedOpcode;
+            const cls = f.class orelse return error.UnsupportedOpcode;
             doGetField(&f, cls, code) catch |e| {
-                try mapTrap(&f, class, exceptions, e);
+                try mapTrap(&f, f.class, f.exceptions, e);
                 continue :sw try step(&f);
             };
             f.pc += 3;
             continue :sw try step(&f);
         },
         .putfield => {
-            const cls = class orelse return error.UnsupportedOpcode;
+            const cls = f.class orelse return error.UnsupportedOpcode;
             doPutField(&f, cls, code) catch |e| {
-                try mapTrap(&f, class, exceptions, e);
+                try mapTrap(&f, f.class, f.exceptions, e);
                 continue :sw try step(&f);
             };
             f.pc += 3;
             continue :sw try step(&f);
         },
         .invokespecial => {
-            const cls = class orelse return error.UnsupportedOpcode;
+            const cls = f.class orelse return error.UnsupportedOpcode;
             invokeInstance(&f, cls, code, true) catch |e| {
                 if (e == error.JavaException) {
-                    if (try handleException(&f, class, exceptions, f.budget.pending.?)) {
+                    if (try handleException(&f, f.class, f.exceptions, f.budget.pending.?)) {
                         f.budget.pending = null;
                         continue :sw try step(&f);
                     }
                     return e;
                 }
-                try mapTrap(&f, class, exceptions, e);
+                try mapTrap(&f, f.class, f.exceptions, e);
                 continue :sw try step(&f);
             };
             f.pc += 3;
             continue :sw try step(&f);
         },
         .invokevirtual => {
-            const cls = class orelse return error.UnsupportedOpcode;
+            const cls = f.class orelse return error.UnsupportedOpcode;
             invokeInstance(&f, cls, code, false) catch |e| {
                 if (e == error.JavaException) {
-                    if (try handleException(&f, class, exceptions, f.budget.pending.?)) {
+                    if (try handleException(&f, f.class, f.exceptions, f.budget.pending.?)) {
                         f.budget.pending = null;
                         continue :sw try step(&f);
                     }
                     return e;
                 }
-                try mapTrap(&f, class, exceptions, e);
+                try mapTrap(&f, f.class, f.exceptions, e);
                 continue :sw try step(&f);
             };
             f.pc += 3;
             continue :sw try step(&f);
         },
         .invokeinterface => {
-            const cls = class orelse return error.UnsupportedOpcode;
+            const cls = f.class orelse return error.UnsupportedOpcode;
             invokeInstance(&f, cls, code, false) catch |e| {
                 if (e == error.JavaException) {
-                    if (try handleException(&f, class, exceptions, f.budget.pending.?)) {
+                    if (try handleException(&f, f.class, f.exceptions, f.budget.pending.?)) {
                         f.budget.pending = null;
                         continue :sw try step(&f);
                     }
                     return e;
                 }
-                try mapTrap(&f, class, exceptions, e);
+                try mapTrap(&f, f.class, f.exceptions, e);
                 continue :sw try step(&f);
             };
             f.pc += 5;
             continue :sw try step(&f);
         },
         .invokedynamic => {
-            const cls = class orelse return error.UnsupportedOpcode;
+            const cls = f.class orelse return error.UnsupportedOpcode;
             doInvokeDynamic(&f, cls, code) catch |e| {
                 if (e == error.JavaException) {
-                    if (try handleException(&f, class, exceptions, f.budget.pending.?)) {
+                    if (try handleException(&f, f.class, f.exceptions, f.budget.pending.?)) {
                         f.budget.pending = null;
                         continue :sw try step(&f);
                     }
                     return e;
                 }
-                try mapTrap(&f, class, exceptions, e);
+                try mapTrap(&f, f.class, f.exceptions, e);
                 continue :sw try step(&f);
             };
             f.pc += 5;
             continue :sw try step(&f);
         },
         .instanceof => {
-            const cls = class orelse return error.UnsupportedOpcode;
+            const cls = f.class orelse return error.UnsupportedOpcode;
             const hp = f.heap orelse return error.UnsupportedOpcode;
             const target = try refClassName(cls, try u16At(code, f.pc + 1));
             const r = try f.popRef();
@@ -4468,7 +4470,7 @@ fn exec(alloc: std.mem.Allocator, class: ?*const Class, heap: ?*Heap, loader: *L
             continue :sw try step(&f);
         },
         .checkcast => {
-            const cls = class orelse return error.UnsupportedOpcode;
+            const cls = f.class orelse return error.UnsupportedOpcode;
             const hp = f.heap orelse return error.UnsupportedOpcode;
             const target = try refClassName(cls, try u16At(code, f.pc + 1));
             const r = try f.popRef();
@@ -4490,7 +4492,7 @@ fn exec(alloc: std.mem.Allocator, class: ?*const Class, heap: ?*Heap, loader: *L
             continue :sw try step(&f);
         },
         .getstatic => {
-            const cls = class orelse return error.UnsupportedOpcode;
+            const cls = f.class orelse return error.UnsupportedOpcode;
             const fr = try fieldRef(cls, try u16At(code, f.pc + 1));
             const dcls = try resolveClass(&f, cls, fr.class_name);
             if (f.heap) |h| try f.loader.ensureInit(dcls, h, f.budget);
@@ -4500,7 +4502,7 @@ fn exec(alloc: std.mem.Allocator, class: ?*const Class, heap: ?*Heap, loader: *L
             continue :sw try step(&f);
         },
         .putstatic => {
-            const cls = class orelse return error.UnsupportedOpcode;
+            const cls = f.class orelse return error.UnsupportedOpcode;
             const fr = try fieldRef(cls, try u16At(code, f.pc + 1));
             const dcls = try resolveClass(&f, cls, fr.class_name);
             if (f.heap) |h| try f.loader.ensureInit(dcls, h, f.budget);
@@ -4511,16 +4513,16 @@ fn exec(alloc: std.mem.Allocator, class: ?*const Class, heap: ?*Heap, loader: *L
             continue :sw try step(&f);
         },
         .invokestatic => {
-            const cls = class orelse return error.UnsupportedOpcode;
+            const cls = f.class orelse return error.UnsupportedOpcode;
             invokeStatic(&f, cls, code) catch |e| {
                 if (e == error.JavaException) {
-                    if (try handleException(&f, class, exceptions, f.budget.pending.?)) {
+                    if (try handleException(&f, f.class, f.exceptions, f.budget.pending.?)) {
                         f.budget.pending = null;
                         continue :sw try step(&f);
                     }
                     return e;
                 }
-                try mapTrap(&f, class, exceptions, e);
+                try mapTrap(&f, f.class, f.exceptions, e);
                 continue :sw try step(&f);
             };
             f.pc += 3;
@@ -4528,7 +4530,7 @@ fn exec(alloc: std.mem.Allocator, class: ?*const Class, heap: ?*Heap, loader: *L
         },
         .athrow => {
             const eid = (try f.popRef()) orelse return error.NullPointer;
-            if (try handleException(&f, class, exceptions, eid)) continue :sw try step(&f);
+            if (try handleException(&f, f.class, f.exceptions, eid)) continue :sw try step(&f);
             f.budget.pending = eid;
             return error.JavaException;
         },
