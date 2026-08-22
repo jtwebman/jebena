@@ -19,6 +19,7 @@ Each iteration is one small, verified, committed step. Never leave the tree red.
    - `bash scripts/throw-stress.sh` — exception throw/catch + allocation under concurrent GC (carriers 1 & 4)
    - `bash scripts/sync-stress.sh` — synchronized (reentrant monitors) mutual exclusion (carriers 1 & 4, +GC)
    - `bash scripts/waitnotify-stress.sh` — wait/notify + monitor release/reacquire (carriers 1 & 4, +GC)
+   - `bash scripts/juc-stress.sh` — java.util.concurrent CountDownLatch + Semaphore (carriers 1 & 4, +GC)
    - `bash scripts/portability-check.sh` — VM cross-compiles for macOS/Linux (aarch64/x86_64)
    - `zig fmt --check src/ build.zig` — formatted
    If anything fails: fix it, or revert the change. Do not commit red.
