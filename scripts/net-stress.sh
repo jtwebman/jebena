@@ -4,12 +4,10 @@
 # fiber connects, sends "PINGpong123", reads the echo, returns the byte-sum (888).
 # Matches real java (which has real java.net), so it is differential-checked.
 #
-# Blocking accept/read occupy the OS carrier for the syscall (no fiber parking
-# yet -- see docs/THREADING.md "networking"), so the server + client fibers need
-# DIFFERENT carriers: this runs at JEBENA_CARRIERS 2 & 4 (a lone carrier would be
-# monopolized by the blocking accept). The blocking calls DO cooperate with the
-# stop-the-world GC (enterBlockingSyscall parks at the safepoint), so 4+GC is
-# exercised too. Skips cleanly (exit 0) if the sandbox forbids loopback sockets.
+# Blocking accept/read now PARK the fiber (offload thread; see docs/THREADING.md
+# "Step 6 design"), so the server + client fibers run on ONE carrier fine: this
+# runs at JEBENA_CARRIERS 1, 2 & 4 (+GC). Skips cleanly (exit 0) if the sandbox
+# forbids loopback sockets.
 set -eu
 ZIG=~/.local/zig-x86_64-linux-0.16.0/zig
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -42,8 +40,10 @@ check() { # $1 label  $2 env  $3 reps
     [ "$GOT" = "$EXP" ] || { echo "net-stress: FAIL $1 rep=$rep jebena=$GOT java=$EXP"; fail=1; }
   done
 }
+check "carriers=1" "JEBENA_CARRIERS=1" 6
+check "carriers=1+GC" "JEBENA_GC_INTERVAL=150 JEBENA_CARRIERS=1" 4
 check "carriers=2" "JEBENA_CARRIERS=2" 6
 check "carriers=4" "JEBENA_CARRIERS=4" 10
 check "carriers=4+GC" "JEBENA_GC_INTERVAL=150 JEBENA_CARRIERS=4" 6
 [ "$fail" = 0 ] || exit 1
-echo "net-stress: OK — java.net loopback echo = $EXP (Socket/ServerSocket over std.Io TCP, carriers 2 & 4, +GC), matches real java"
+echo "net-stress: OK — java.net loopback echo = $EXP (Socket/ServerSocket over std.Io TCP, carriers 1, 2 & 4, +GC), matches real java"

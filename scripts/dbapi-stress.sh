@@ -44,6 +44,7 @@ check() { # $1 label  $2 env  $3 reps
     [ "$GOT" = "$EXP" ] || { echo "dbapi-stress: FAIL $1 rep=$rep jebena=$GOT java=$EXP"; fail=1; }
   done
 }
+check "mock carriers=1" "JEBENA_CARRIERS=1" 5
 check "mock carriers=3" "JEBENA_CARRIERS=3" 5
 check "mock carriers=4" "JEBENA_CARRIERS=4" 10
 check "mock carriers=4+GC" "JEBENA_GC_INTERVAL=150 JEBENA_CARRIERS=4" 6

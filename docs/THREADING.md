@@ -474,9 +474,35 @@ the blocking call. Validated 50/50 clean at carriers=4 with GC forced every 120
 allocations. (This is the socket-I/O analogue of why blocking must either park the
 fiber or keep its heap refs as GC roots — a raw id in a Zig local is not a root.)
 
-Next: the big remaining item is lifting the blocking-I/O carrier limit via
-poll/epoll fiber-yield so blocking socket ops PARK the fiber (like
-join/monitor/wait) and work at carriers=1.
+### Step 6 design (2026-08-22): blocking socket I/O parks the fiber (thread-per-op offload)
+
+Goal: blocking socket ops (accept/connect/read/write) must PARK the fiber (yield
+its carrier) instead of holding the carrier in the kernel, so socket code works at
+carriers=1 (a server fiber + client fiber on ONE carrier) and scales past #carriers.
+
+Design (portable, reuses the existing parking machinery; no epoll/O_NONBLOCK):
+- An **offload thread** does the blocking syscall off the carrier. First cut is
+  thread-per-op (std.Thread per blocking call — simple + correct; a persistent
+  pool is a later optimization). It does the syscall via the std.Io.net vtable,
+  touches NO moving-heap object, stores the result in a gpa-owned `IoReq`, and
+  re-readies the fiber under `scheduler.lock`.
+- The native is two-phase like `Object.wait()`: FIRST call allocates an `IoReq`,
+  spawns the offload thread, sets `Fiber.io_op = req`, and returns `error.Park`
+  (the invoke restores sp0 so the re-invoke re-pops args). On RESUME the native
+  sees `io_op` present + done, consumes the result, frees the req, clears io_op,
+  and returns.
+- `parkCommit` gets an io branch that mirrors the monitor race: if `io_op.done`
+  already (the offload finished before we committed) re-ready immediately, else
+  mark `.parked`; the offload thread, on completion under the lock, sets done and
+  re-readies iff already `.parked` — closing the same StoreLoad window.
+- GC safety: the offload thread reads/writes a gpa-owned scratch buffer, never the
+  moving `byte[]`; on resume the native copies scratch↔`byte[]` using the
+  re-popped (GC-current) array id. The `byte[]` also stays a root via `io_buf`.
+  The offload thread is not a carrier and never touches heap objects, so a
+  stop-the-world GC need not stop it; it only mutates `ready`/status/io_op under
+  `scheduler.lock` (lists GC does not scan).
+- Result: all four ops park → net/http/pg/dbapi/rich-sql work at carriers=1;
+  their stress scripts gain a @c1 variant. close0 stays synchronous (non-blocking).
 
 ## Policy (2026-08-21, from the user): thread-safety is now non-negotiable
 

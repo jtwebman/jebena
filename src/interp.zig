@@ -3518,14 +3518,72 @@ fn proxyDispatch(f: *Frame, proxy_id: u32, iface_name: []const u8, mname: []cons
     if (rc == 'L' or rc == '[') return f.push(result);
     return f.pushKind(try convertArgToValue(f, result, kindFromDescChar(rc)));
 }
+/// Offload-thread entry: run ONE blocking socket op off the carrier, then re-ready
+/// the fiber (finishIo). Touches no moving-heap object -- only req.scratch
+/// (gpa-owned) -- so a stop-the-world GC need not stop it. See docs/THREADING.md
+/// "Step 6 design".
+fn ioWorker(req: *IoReq) void {
+    const net = std.Io.net;
+    switch (req.kind) {
+        .accept => {
+            var server: net.Server = .{ .socket = .{ .handle = req.fd, .address = undefined }, .options = if (net.Server.AcceptOptions == void) {} else undefined };
+            if (server.accept(req.io)) |stream| {
+                req.result_fd = @intCast(stream.socket.handle);
+            } else |_| {
+                req.result_fd = -1;
+            }
+        },
+        .connect => {
+            var addr = req.addr;
+            if (addr.connect(req.io, .{ .mode = .stream, .protocol = .tcp })) |stream| {
+                req.result_fd = @intCast(stream.socket.handle);
+            } else |_| {
+                req.result_fd = -1;
+            }
+        },
+        .read => {
+            var iov: [1][]u8 = .{req.scratch};
+            if (req.io.vtable.netRead(req.io.userdata, req.fd, &iov)) |n| {
+                req.result_n = @intCast(n); // 0 = orderly EOF
+            } else |_| {
+                req.result_n = -1;
+            }
+        },
+        .write => {
+            var w: usize = 0;
+            var ok = true;
+            while (w < req.scratch.len) {
+                if (req.io.vtable.netWrite(req.io.userdata, req.fd, req.scratch[w..], &.{""}, 0)) |n| {
+                    if (n == 0) {
+                        ok = false;
+                        break;
+                    }
+                    w += n;
+                } else |_| {
+                    ok = false;
+                    break;
+                }
+            }
+            req.result_n = if (ok) @intCast(w) else -1;
+        },
+    }
+    req.sched.finishIo(req);
+}
+
+/// Spawn the offload thread detached; false if the thread could not be created.
+fn spawnIoDetached(req: *IoReq) bool {
+    const th = std.Thread.spawn(.{}, ioWorker, .{req}) catch return false;
+    th.detach();
+    return true;
+}
+
 /// java.net natives over the portable std.Io TCP layer. Handles are raw
 /// std.posix.fd_t (an i32) carried as Java longs. bind0 packs the resolved port
-/// in the high 32 bits. Blocking calls (connect/accept/read/write) run inside
-/// enterBlockingSyscall/exitBlockingSyscall so a concurrent GC is not stalled;
-/// read/write copy through a stack buffer and re-fetch the byte[] by id AFTER the
-/// blocking call, because GC may relocate it while we are in the kernel. This
-/// occupies the OS carrier for the syscall's duration (no fiber parking yet) --
-/// see docs/THREADING.md "networking".
+/// in the high 32 bits. The blocking ops (accept/connect/read/write) PARK the
+/// fiber: they hand the syscall to an offload thread (ioWorker) and return
+/// error.Park so the carrier runs other fibers; on resume the native collects the
+/// result from Fiber.io_op. This lets socket code run at carriers=1. See
+/// docs/THREADING.md "Step 6 design". (close0/bind0 are non-blocking, done inline.)
 fn netNative(f: *Frame, mn: []const u8, md: []const u8, slots: []const Value, method: *const Class.Method) RunError!void {
     const net = std.Io.net;
     const heap = f.heap orelse return error.UnsupportedOpcode;
@@ -3542,20 +3600,35 @@ fn netNative(f: *Frame, mn: []const u8, md: []const u8, slots: []const Value, me
         const fd: u32 = @bitCast(@as(i32, @intCast(server.socket.handle)));
         return f.pushLong((@as(i64, resolved) << 32) | @as(i64, fd));
     }
-    // ---- ServerSocket.accept0(long fd) -> long  (client fd, or -1)
+    // ---- ServerSocket.accept0(long fd) -> long  (client fd, or -1). PARKS.
     if (eq2(mn, md, "accept0", "(J)J")) {
+        const me = owningThreadFiber(sched, f) orelse return error.LinkError;
+        if (me.io_op) |req| { // resume: offload finished
+            const r = req.result_fd;
+            me.io_op = null;
+            sched.gpa.destroy(req);
+            return f.pushLong(r);
+        }
         const fd: net.Socket.Handle = @intCast(slots[P[0].slot].long & 0xffffffff);
-        var server: net.Server = .{ .socket = .{ .handle = fd, .address = undefined }, .options = if (net.Server.AcceptOptions == void) {} else undefined };
-        sched.enterBlockingSyscall();
-        const stream = server.accept(io) catch {
-            sched.exitBlockingSyscall();
+        const req = sched.gpa.create(IoReq) catch return f.pushLong(-1);
+        req.* = .{ .kind = .accept, .fd = fd, .io = io, .sched = sched, .fiber = me, .gpa = sched.gpa };
+        me.io_op = req;
+        if (!spawnIoDetached(req)) {
+            me.io_op = null;
+            sched.gpa.destroy(req);
             return f.pushLong(-1);
-        };
-        sched.exitBlockingSyscall();
-        return f.pushLong(@intCast(stream.socket.handle));
+        }
+        return error.Park;
     }
-    // ---- Socket.connect0(String host, int port) -> long  (fd, or -1)
+    // ---- Socket.connect0(String host, int port) -> long  (fd, or -1). PARKS.
     if (eq2(mn, md, "connect0", "(Ljava/lang/String;I)J")) {
+        const me = owningThreadFiber(sched, f) orelse return error.LinkError;
+        if (me.io_op) |req| { // resume
+            const r = req.result_fd;
+            me.io_op = null;
+            sched.gpa.destroy(req);
+            return f.pushLong(r);
+        }
         const host_id = switch (slots[P[0].slot]) {
             .reference => |r| r orelse return error.NullPointer,
             else => return error.TypeMismatch,
@@ -3571,53 +3644,74 @@ fn netNative(f: *Frame, mn: []const u8, md: []const u8, slots: []const Value, me
             hostbuf[hlen] = @truncate(@as(u32, @bitCast(c)));
             hlen += 1;
         }
-        var addr = net.IpAddress.parse(hostbuf[0..hlen], port) catch return f.pushLong(-1);
-        sched.enterBlockingSyscall();
-        const stream = addr.connect(io, .{ .mode = .stream, .protocol = .tcp }) catch {
-            sched.exitBlockingSyscall();
+        const addr = net.IpAddress.parse(hostbuf[0..hlen], port) catch return f.pushLong(-1);
+        const req = sched.gpa.create(IoReq) catch return f.pushLong(-1);
+        req.* = .{ .kind = .connect, .addr = addr, .io = io, .sched = sched, .fiber = me, .gpa = sched.gpa };
+        me.io_op = req;
+        if (!spawnIoDetached(req)) {
+            me.io_op = null;
+            sched.gpa.destroy(req);
             return f.pushLong(-1);
-        };
-        sched.exitBlockingSyscall();
-        return f.pushLong(@intCast(stream.socket.handle));
+        }
+        return error.Park;
     }
-    // ---- read0(long fd, byte[] b, int off, int len) -> int  (n, or -1 at EOF/err)
+    // ---- read0(long fd, byte[] b, int off, int len) -> int (n, or -1 EOF/err). PARKS.
     if (eq2(mn, md, "read0", "(J[BII)I")) {
+        const me = owningThreadFiber(sched, f) orelse return error.LinkError;
+        if (me.io_op) |req| { // resume: copy the offload thread's scratch into the
+            // (freshly re-popped, GC-current) byte[], then return the count.
+            const n = req.result_n;
+            const off: usize = @intCast(slots[P[2].slot].int);
+            if (n > 0) {
+                const aid = switch (slots[P[1].slot]) {
+                    .reference => |r| r orelse return error.NullPointer,
+                    else => return error.TypeMismatch,
+                };
+                const arr = switch (heap.get(aid).*) {
+                    .array => |*a| a,
+                    else => return error.LinkError,
+                };
+                var i: usize = 0;
+                while (i < n) : (i += 1) arr.data[off + i] = .{ .int = @as(i32, @as(i8, @bitCast(req.scratch[@intCast(i)]))) };
+            }
+            sched.gpa.free(req.scratch);
+            me.io_op = null;
+            sched.gpa.destroy(req);
+            return f.pushInt(if (n <= 0) -1 else @intCast(n)); // 0 = EOF -> -1
+        }
         const fd: net.Socket.Handle = @intCast(slots[P[0].slot].long & 0xffffffff);
-        const aid = switch (slots[P[1].slot]) {
+        _ = switch (slots[P[1].slot]) { // null-check the byte[] now (re-popped on resume)
             .reference => |r| r orelse return error.NullPointer,
             else => return error.TypeMismatch,
         };
-        const off: usize = @intCast(slots[P[2].slot].int);
         const want: usize = @intCast(slots[P[3].slot].int);
-        var tmp: [8192]u8 = undefined;
-        const cap = @min(want, tmp.len);
+        const cap = @min(want, @as(usize, 8192));
         if (cap == 0) return f.pushInt(0);
-        var iov: [1][]u8 = .{tmp[0..cap]};
-        // Root the byte[] across the blocking read: a compacting GC may run while
-        // we are in the kernel and remap object ids, so `aid` cannot be trusted
-        // afterward -- re-read it from the (GC-remapped) fiber field.
-        const me = owningThreadFiber(sched, f) orelse return error.LinkError;
-        me.io_buf = aid;
-        sched.enterBlockingSyscall();
-        const n = io.vtable.netRead(io.userdata, fd, &iov) catch {
-            sched.exitBlockingSyscall();
-            me.io_buf = null;
+        const scratch = sched.gpa.alloc(u8, cap) catch return f.pushInt(-1);
+        const req = sched.gpa.create(IoReq) catch {
+            sched.gpa.free(scratch);
             return f.pushInt(-1);
         };
-        sched.exitBlockingSyscall();
-        const aid2 = me.io_buf.?;
-        me.io_buf = null;
-        if (n == 0) return f.pushInt(-1); // orderly EOF
-        const arr = switch (heap.get(aid2).*) {
-            .array => |*a| a,
-            else => return error.LinkError,
-        };
-        var i: usize = 0;
-        while (i < n) : (i += 1) arr.data[off + i] = .{ .int = @as(i32, @as(i8, @bitCast(tmp[i]))) };
-        return f.pushInt(@intCast(n));
+        req.* = .{ .kind = .read, .fd = fd, .scratch = scratch, .io = io, .sched = sched, .fiber = me, .gpa = sched.gpa };
+        me.io_op = req;
+        if (!spawnIoDetached(req)) {
+            me.io_op = null;
+            sched.gpa.free(scratch);
+            sched.gpa.destroy(req);
+            return f.pushInt(-1);
+        }
+        return error.Park;
     }
-    // ---- write0(long fd, byte[] b, int off, int len) -> int  (written, or -1)
+    // ---- write0(long fd, byte[] b, int off, int len) -> int (written, or -1). PARKS.
     if (eq2(mn, md, "write0", "(J[BII)I")) {
+        const me = owningThreadFiber(sched, f) orelse return error.LinkError;
+        if (me.io_op) |req| { // resume
+            const n = req.result_n;
+            sched.gpa.free(req.scratch);
+            me.io_op = null;
+            sched.gpa.destroy(req);
+            return f.pushInt(@intCast(n));
+        }
         const fd: net.Socket.Handle = @intCast(slots[P[0].slot].long & 0xffffffff);
         const aid = switch (slots[P[1].slot]) {
             .reference => |r| r orelse return error.NullPointer,
@@ -3625,47 +3719,32 @@ fn netNative(f: *Frame, mn: []const u8, md: []const u8, slots: []const Value, me
         };
         const off: usize = @intCast(slots[P[2].slot].int);
         const len: usize = @intCast(slots[P[3].slot].int);
-        var tmp: [8192]u8 = undefined;
-        var done: usize = 0;
-        // Root the byte[] across each blocking write (a GC between chunks may remap
-        // ids); re-read the remapped id from the fiber field each iteration.
-        const me = owningThreadFiber(sched, f) orelse return error.LinkError;
-        me.io_buf = aid;
-        while (done < len) {
-            const cur = me.io_buf.?;
-            const arr = switch (heap.get(cur).*) {
-                .array => |*a| a,
-                else => {
-                    me.io_buf = null;
-                    return error.LinkError;
-                },
-            };
-            const chunk = @min(len - done, tmp.len);
-            var i: usize = 0;
-            while (i < chunk) : (i += 1) tmp[i] = @truncate(@as(u32, @bitCast(arr.data[off + done + i].int)));
-            sched.enterBlockingSyscall();
-            var w: usize = 0;
-            var ok = true;
-            while (w < chunk) {
-                const n = io.vtable.netWrite(io.userdata, fd, tmp[w..chunk], &.{""}, 0) catch {
-                    ok = false;
-                    break;
-                };
-                if (n == 0) {
-                    ok = false;
-                    break;
-                }
-                w += n;
-            }
-            sched.exitBlockingSyscall();
-            if (!ok) {
-                me.io_buf = null;
-                return f.pushInt(-1);
-            }
-            done += chunk;
+        if (len == 0) return f.pushInt(0);
+        // Copy the byte[] into a gpa scratch NOW (we are running, heap is stable);
+        // the offload thread writes from scratch, never touching the moving heap.
+        const scratch = sched.gpa.alloc(u8, len) catch return f.pushInt(-1);
+        const arr = switch (heap.get(aid).*) {
+            .array => |*a| a,
+            else => {
+                sched.gpa.free(scratch);
+                return error.LinkError;
+            },
+        };
+        var i: usize = 0;
+        while (i < len) : (i += 1) scratch[i] = @truncate(@as(u32, @bitCast(arr.data[off + i].int)));
+        const req = sched.gpa.create(IoReq) catch {
+            sched.gpa.free(scratch);
+            return f.pushInt(-1);
+        };
+        req.* = .{ .kind = .write, .fd = fd, .scratch = scratch, .io = io, .sched = sched, .fiber = me, .gpa = sched.gpa };
+        me.io_op = req;
+        if (!spawnIoDetached(req)) {
+            me.io_op = null;
+            sched.gpa.free(scratch);
+            sched.gpa.destroy(req);
+            return f.pushInt(-1);
         }
-        me.io_buf = null;
-        return f.pushInt(@intCast(done));
+        return error.Park;
     }
     // ---- close0(long fd) -> void  (Socket + ServerSocket)
     if (eq2(mn, md, "close0", "(J)V")) {
@@ -4527,6 +4606,26 @@ const DriveOutcome = enum { completed, yielded, parked };
 
 const FiberStatus = enum { ready, running, parked, done };
 
+/// A blocking socket op offloaded to a std.Thread so the fiber can PARK (yield its
+/// carrier) instead of holding the carrier in the kernel. gpa-owned; the worker
+/// touches only `scratch` (never a moving heap object) and re-readies the fiber on
+/// completion. See docs/THREADING.md "Step 6 design". `done` is published under
+/// scheduler.lock (read by parkCommit + the worker) to close the parkCommit race.
+const IoKind = enum { accept, connect, read, write };
+const IoReq = struct {
+    kind: IoKind,
+    fd: std.posix.fd_t = 0,
+    addr: std.Io.net.IpAddress = undefined, // connect target
+    scratch: []u8 = &.{}, // read dest / write source (gpa-owned)
+    result_fd: i64 = -1, // accept/connect: new fd, or -1
+    result_n: i64 = -1, // read/write: byte count (read: 0 = EOF), or -1
+    done: bool = false,
+    io: std.Io = undefined,
+    sched: *Scheduler = undefined,
+    fiber: *Fiber = undefined,
+    gpa: std.mem.Allocator = undefined,
+};
+
 const Fiber = struct {
     alloc: std.mem.Allocator,
     call_stack: std.ArrayList(*Frame) = .empty,
@@ -4555,6 +4654,9 @@ const Fiber = struct {
     /// running while we are in the kernel neither frees it nor leaves us with a
     /// stale id -- the native re-reads io_buf (remapped) after the syscall.
     io_buf: ?u32 = null,
+    /// In-flight offloaded socket op (set = fiber is parked on I/O; the native
+    /// re-reads it on resume to collect the result). gpa-owned, not a heap object.
+    io_op: ?*IoReq = null,
 
     fn deinit(self: *Fiber) void {
         for (self.call_stack.items) |cf| freeChildFrame(self.alloc, cf);
@@ -4692,6 +4794,21 @@ const Scheduler = struct {
         }
     }
 
+    /// Called by an offload thread when a blocking socket op finishes: publish the
+    /// result + re-ready the fiber. Mirrors wakeMonitor's race handling -- if the
+    /// fiber has not committed to .parked yet, parkCommit's io branch (which reads
+    /// req.done under this same lock) will re-ready it instead.
+    fn finishIo(self: *Scheduler, req: *IoReq) void {
+        self.lock.lock();
+        defer self.lock.unlock();
+        req.done = true;
+        const fib = req.fiber;
+        if (fib.status == .parked and fib.io_op == req) {
+            fib.status = .ready;
+            self.ready.append(self.gpa, fib) catch {};
+        }
+    }
+
     /// Commit a fiber that raised error.Park: under the lock, re-check its wait
     /// condition (joinee already done?) and either re-ready it immediately or mark
     /// it parked. Doing the check here (not in the native) closes the lost-wakeup
@@ -4699,6 +4816,18 @@ const Scheduler = struct {
     fn parkCommit(self: *Scheduler, fib: *Fiber) void {
         self.lock.lock();
         defer self.lock.unlock();
+        if (fib.io_op) |req| {
+            // Offloaded socket op: if the worker already finished, re-ready now
+            // (it saw us not-yet-parked and skipped the wake); else park. Both
+            // sides serialize on this lock -> no lost wakeup.
+            if (req.done) {
+                fib.status = .ready;
+                self.ready.append(self.gpa, fib) catch {};
+            } else {
+                fib.status = .parked;
+            }
+            return;
+        }
         if (fib.park_join) |jid| {
             var satisfied = true; // joinee missing => treat as done (don't block forever)
             for (self.all.items) |w| if (w.id == jid) {
