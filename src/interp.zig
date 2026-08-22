@@ -3957,6 +3957,10 @@ const Scheduler = struct {
     /// 4d-4). carriers_total stays 1 (the active count) until real carrier threads
     /// are actually spawned; this just records the request.
     requested_carriers: u32 = 1,
+    /// Guards the shared ready-queue + all-registry + next_id (Stage 4d). Taken
+    /// only for the brief queue mutations, never across driveFiber. Uncontended
+    /// with one carrier.
+    lock: SpinLock = .{},
 
     fn deinit(self: *Scheduler) void {
         for (self.all.items) |fib| {
@@ -3980,10 +3984,25 @@ const Scheduler = struct {
 
     /// Create a fiber around an already-built base frame and enqueue it ready.
     /// On error the base frame is NOT consumed (caller frees it).
+    fn popReady(self: *Scheduler) ?*Fiber {
+        self.lock.lock();
+        defer self.lock.unlock();
+        if (self.ready.items.len == 0) return null;
+        return self.ready.orderedRemove(0);
+    }
+
+    fn pushReady(self: *Scheduler, fib: *Fiber) RunError!void {
+        self.lock.lock();
+        defer self.lock.unlock();
+        self.ready.append(self.gpa, fib) catch return error.OutOfMemory;
+    }
+
     fn spawn(self: *Scheduler, base: *Frame) RunError!*Fiber {
         const fib = self.gpa.create(Fiber) catch return error.OutOfMemory;
         fib.* = .{ .alloc = self.gpa, .id = self.next_id };
         errdefer self.gpa.destroy(fib);
+        self.lock.lock();
+        defer self.lock.unlock();
         try self.all.append(self.gpa, fib);
         errdefer _ = self.all.pop();
         try self.ready.append(self.gpa, fib);
@@ -3997,8 +4016,7 @@ const Scheduler = struct {
     /// propagate (single-fiber for now; spawned-fiber errors will be isolated
     /// in a later sub-step).
     fn run(self: *Scheduler, budget: *Budget) RunError!void {
-        while (self.ready.items.len > 0) {
-            const fib = self.ready.orderedRemove(0);
+        while (self.popReady()) |fib| {
             self.carrier.current = fib;
             fib.status = .running;
             const outcome = driveFiber(fib, budget) catch |e| {
@@ -4012,7 +4030,7 @@ const Scheduler = struct {
                 .yielded => {
                     budget.reductions = budget.reduction_quantum;
                     fib.status = .ready;
-                    self.ready.append(self.gpa, fib) catch return error.OutOfMemory;
+                    try self.pushReady(fib);
                 },
                 .completed => fib.status = .done,
             }
@@ -4055,8 +4073,7 @@ const Scheduler = struct {
         const saved = self.carrier.current;
         defer self.carrier.current = saved;
         while (!waiter.notified) {
-            if (self.ready.items.len == 0) break;
-            const fib = self.ready.orderedRemove(0);
+            const fib = self.popReady() orelse break;
             self.carrier.current = fib;
             fib.status = .running;
             const outcome = driveFiber(fib, budget) catch |e| {
@@ -4068,7 +4085,7 @@ const Scheduler = struct {
                 .yielded => {
                     budget.reductions = budget.reduction_quantum;
                     fib.status = .ready;
-                    self.ready.append(self.gpa, fib) catch return error.OutOfMemory;
+                    try self.pushReady(fib);
                 },
                 .completed => fib.status = .done,
             }
@@ -4083,8 +4100,7 @@ const Scheduler = struct {
         const saved = self.carrier.current;
         defer self.carrier.current = saved;
         while (target.status != .done) {
-            if (self.ready.items.len == 0) break; // nothing runnable (avoid hang)
-            const fib = self.ready.orderedRemove(0);
+            const fib = self.popReady() orelse break; // nothing runnable (avoid hang)
             self.carrier.current = fib;
             fib.status = .running;
             const outcome = driveFiber(fib, budget) catch |e| {
@@ -4096,7 +4112,7 @@ const Scheduler = struct {
                 .yielded => {
                     budget.reductions = budget.reduction_quantum;
                     fib.status = .ready;
-                    self.ready.append(self.gpa, fib) catch return error.OutOfMemory;
+                    try self.pushReady(fib);
                 },
                 .completed => fib.status = .done,
             }
