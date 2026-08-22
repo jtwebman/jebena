@@ -75,6 +75,7 @@ const Frame = struct {
     heap: ?*Heap = null,
     loader: *Loader = undefined,
     parent: ?*Frame = null,
+    return_pc: usize = 0,
     code: []const u8 = &.{},
     class: ?*const Class = null,
     exceptions: []const attribute_decode.ExceptionTableEntry = &.{},
@@ -1333,6 +1334,7 @@ const PendingCall = struct {
     max_locals: u16,
     exception_table: []const attribute_decode.ExceptionTableEntry,
     slots: []Value,
+    resume_pc: usize = 0,
 };
 
 fn invokeInstance(f: *Frame, cls: *const Class, code: []const u8, is_special: bool, pending: *?PendingCall) RunError!void {
@@ -3675,6 +3677,51 @@ fn handleException(f: *Frame, class: ?*const Class, exceptions: []const attribut
     return false;
 }
 
+/// Outcome of running a single frame to a boundary: a method return, a
+/// Java-to-Java call to push, or a pending exception to unwind.
+const FrameResult = union(enum) {
+    returned: ?Value,
+    call: PendingCall,
+    threw: void,
+};
+
+fn freeChildFrame(alloc: std.mem.Allocator, cf: *Frame) void {
+    alloc.free(cf.stack);
+    alloc.free(cf.locals);
+    alloc.destroy(cf);
+}
+
+/// Build a heap-allocated child frame from a resolved call. Its address is
+/// stable (the GC walks the frame parent-chain), parent is the caller, and the
+/// argument slots are copied into fresh locals. Does not free p.slots.
+fn makeChildFrame(alloc: std.mem.Allocator, p: PendingCall, caller: *Frame) RunError!*Frame {
+    const child = alloc.create(Frame) catch return error.OutOfMemory;
+    errdefer alloc.destroy(child);
+    const st = alloc.alloc(Value, p.max_stack) catch return error.OutOfMemory;
+    errdefer alloc.free(st);
+    const lc = alloc.alloc(Value, p.max_locals) catch return error.OutOfMemory;
+    for (lc) |*l| l.* = .{ .int = 0 };
+    for (p.slots, 0..) |v, i| lc[i] = v;
+    child.* = Frame{
+        .stack = st,
+        .locals = lc,
+        .budget = caller.budget,
+        .heap = caller.heap,
+        .loader = caller.loader,
+        .parent = caller,
+        .code = p.code,
+        .class = p.owner,
+        .exceptions = p.exception_table,
+        .return_pc = p.resume_pc,
+    };
+    return child;
+}
+
+/// Load a compiled method and run it via an EXPLICIT frame stack (no native
+/// recursion for Java-to-Java calls): the driver pushes a child frame on a call,
+/// pops on return, and unwinds across frames on an uncaught exception. Native /
+/// intrinsic re-entry (reflection, lambdas, proxies) still calls exec, each with
+/// its own call stack; the GC parent-chain links them.
 fn exec(alloc: std.mem.Allocator, class: ?*const Class, heap: ?*Heap, loader: *Loader, budget: *Budget, code: []const u8, max_stack: u16, max_locals: u16, arg_slots: []const Value, exceptions: []const attribute_decode.ExceptionTableEntry, parent: ?*Frame) RunError!?Value {
     if (arg_slots.len > max_locals) return error.BadLocal;
     const stack = try alloc.alloc(Value, max_stack);
@@ -3683,10 +3730,55 @@ fn exec(alloc: std.mem.Allocator, class: ?*const Class, heap: ?*Heap, loader: *L
     defer alloc.free(locals);
     for (locals) |*l| l.* = .{ .int = 0 };
     for (arg_slots, 0..) |v, i| locals[i] = v;
-
     var frame_storage = Frame{ .stack = stack, .locals = locals, .budget = budget, .heap = heap, .loader = loader, .parent = parent, .code = code, .class = class, .exceptions = exceptions };
-    const f: *Frame = &frame_storage;
 
+    var call_stack: std.ArrayList(*Frame) = .empty;
+    defer {
+        for (call_stack.items) |cf| if (cf != &frame_storage) freeChildFrame(alloc, cf);
+        call_stack.deinit(alloc);
+    }
+    call_stack.append(alloc, &frame_storage) catch return error.OutOfMemory;
+
+    while (call_stack.items.len > 0) {
+        const top = call_stack.items[call_stack.items.len - 1];
+        const res = try runFrame(top);
+        switch (res) {
+            .returned => |rv| {
+                const finished = call_stack.pop().?;
+                if (finished == &frame_storage) return rv;
+                const caller = call_stack.items[call_stack.items.len - 1];
+                caller.pc = finished.return_pc;
+                if (rv) |v| try caller.pushKind(v);
+                freeChildFrame(alloc, finished);
+            },
+            .call => |p| {
+                defer alloc.free(p.slots);
+                if (call_stack.items.len >= budget.max_depth) return error.CallDepthExceeded;
+                const child = try makeChildFrame(alloc, p, top);
+                call_stack.append(alloc, child) catch {
+                    freeChildFrame(alloc, child);
+                    return error.OutOfMemory;
+                };
+            },
+            .threw => {
+                while (true) {
+                    const cur = call_stack.items[call_stack.items.len - 1];
+                    if (try handleException(cur, cur.class, cur.exceptions, budget.pending.?)) {
+                        budget.pending = null;
+                        break;
+                    }
+                    const finished = call_stack.pop().?;
+                    if (finished == &frame_storage) return error.JavaException;
+                    freeChildFrame(alloc, finished);
+                }
+            },
+        }
+    }
+    return null;
+}
+
+fn runFrame(f: *Frame) RunError!FrameResult {
+    const code = f.code;
     sw: switch (try opAt(code, f.pc)) {
         .nop => {
             f.pc += 1;
@@ -4213,10 +4305,13 @@ fn exec(alloc: std.mem.Allocator, class: ?*const Class, heap: ?*Heap, loader: *L
             f.pc += 1;
             continue :sw try step(f);
         },
-        .areturn => return try f.pop(),
+        .areturn => return .{ .returned = try f.pop() },
         .newarray => {
             doNewArray(f, code) catch |e| {
-                try mapTrap(f, f.class, f.exceptions, e);
+                mapTrap(f, f.class, f.exceptions, e) catch |e2| {
+                    if (e2 == error.JavaException) return .{ .threw = {} };
+                    return e2;
+                };
                 continue :sw try step(f);
             };
             f.pc += 2;
@@ -4224,7 +4319,10 @@ fn exec(alloc: std.mem.Allocator, class: ?*const Class, heap: ?*Heap, loader: *L
         },
         .anewarray => {
             doANewArray(f, code) catch |e| {
-                try mapTrap(f, f.class, f.exceptions, e);
+                mapTrap(f, f.class, f.exceptions, e) catch |e2| {
+                    if (e2 == error.JavaException) return .{ .threw = {} };
+                    return e2;
+                };
                 continue :sw try step(f);
             };
             f.pc += 3;
@@ -4238,7 +4336,10 @@ fn exec(alloc: std.mem.Allocator, class: ?*const Class, heap: ?*Heap, loader: *L
         },
         .arraylength => {
             doArrayLength(f) catch |e| {
-                try mapTrap(f, f.class, f.exceptions, e);
+                mapTrap(f, f.class, f.exceptions, e) catch |e2| {
+                    if (e2 == error.JavaException) return .{ .threw = {} };
+                    return e2;
+                };
                 continue :sw try step(f);
             };
             f.pc += 1;
@@ -4246,7 +4347,10 @@ fn exec(alloc: std.mem.Allocator, class: ?*const Class, heap: ?*Heap, loader: *L
         },
         .iaload, .baload, .caload, .saload => {
             const ai = arrayIndex(f) catch |e| {
-                try mapTrap(f, f.class, f.exceptions, e);
+                mapTrap(f, f.class, f.exceptions, e) catch |e2| {
+                    if (e2 == error.JavaException) return .{ .threw = {} };
+                    return e2;
+                };
                 continue :sw try step(f);
             };
             try f.pushInt(ai.arr.data[ai.i].int);
@@ -4255,7 +4359,10 @@ fn exec(alloc: std.mem.Allocator, class: ?*const Class, heap: ?*Heap, loader: *L
         },
         .laload => {
             const ai = arrayIndex(f) catch |e| {
-                try mapTrap(f, f.class, f.exceptions, e);
+                mapTrap(f, f.class, f.exceptions, e) catch |e2| {
+                    if (e2 == error.JavaException) return .{ .threw = {} };
+                    return e2;
+                };
                 continue :sw try step(f);
             };
             try f.pushLong(ai.arr.data[ai.i].long);
@@ -4264,7 +4371,10 @@ fn exec(alloc: std.mem.Allocator, class: ?*const Class, heap: ?*Heap, loader: *L
         },
         .faload => {
             const ai = arrayIndex(f) catch |e| {
-                try mapTrap(f, f.class, f.exceptions, e);
+                mapTrap(f, f.class, f.exceptions, e) catch |e2| {
+                    if (e2 == error.JavaException) return .{ .threw = {} };
+                    return e2;
+                };
                 continue :sw try step(f);
             };
             try f.pushFloat(ai.arr.data[ai.i].float);
@@ -4273,7 +4383,10 @@ fn exec(alloc: std.mem.Allocator, class: ?*const Class, heap: ?*Heap, loader: *L
         },
         .daload => {
             const ai = arrayIndex(f) catch |e| {
-                try mapTrap(f, f.class, f.exceptions, e);
+                mapTrap(f, f.class, f.exceptions, e) catch |e2| {
+                    if (e2 == error.JavaException) return .{ .threw = {} };
+                    return e2;
+                };
                 continue :sw try step(f);
             };
             try f.pushDouble(ai.arr.data[ai.i].double);
@@ -4282,7 +4395,10 @@ fn exec(alloc: std.mem.Allocator, class: ?*const Class, heap: ?*Heap, loader: *L
         },
         .aaload => {
             const ai = arrayIndex(f) catch |e| {
-                try mapTrap(f, f.class, f.exceptions, e);
+                mapTrap(f, f.class, f.exceptions, e) catch |e2| {
+                    if (e2 == error.JavaException) return .{ .threw = {} };
+                    return e2;
+                };
                 continue :sw try step(f);
             };
             try f.push(ai.arr.data[ai.i]);
@@ -4292,7 +4408,10 @@ fn exec(alloc: std.mem.Allocator, class: ?*const Class, heap: ?*Heap, loader: *L
         .iastore => {
             const v = try f.popInt();
             const ai = arrayIndex(f) catch |e| {
-                try mapTrap(f, f.class, f.exceptions, e);
+                mapTrap(f, f.class, f.exceptions, e) catch |e2| {
+                    if (e2 == error.JavaException) return .{ .threw = {} };
+                    return e2;
+                };
                 continue :sw try step(f);
             };
             ai.arr.data[ai.i] = .{ .int = v };
@@ -4302,7 +4421,10 @@ fn exec(alloc: std.mem.Allocator, class: ?*const Class, heap: ?*Heap, loader: *L
         .bastore => {
             const v = try f.popInt();
             const ai = arrayIndex(f) catch |e| {
-                try mapTrap(f, f.class, f.exceptions, e);
+                mapTrap(f, f.class, f.exceptions, e) catch |e2| {
+                    if (e2 == error.JavaException) return .{ .threw = {} };
+                    return e2;
+                };
                 continue :sw try step(f);
             };
             ai.arr.data[ai.i] = .{ .int = @as(i8, @truncate(v)) };
@@ -4312,7 +4434,10 @@ fn exec(alloc: std.mem.Allocator, class: ?*const Class, heap: ?*Heap, loader: *L
         .castore => {
             const v = try f.popInt();
             const ai = arrayIndex(f) catch |e| {
-                try mapTrap(f, f.class, f.exceptions, e);
+                mapTrap(f, f.class, f.exceptions, e) catch |e2| {
+                    if (e2 == error.JavaException) return .{ .threw = {} };
+                    return e2;
+                };
                 continue :sw try step(f);
             };
             ai.arr.data[ai.i] = .{ .int = @as(u16, @truncate(@as(u32, @bitCast(v)))) };
@@ -4322,7 +4447,10 @@ fn exec(alloc: std.mem.Allocator, class: ?*const Class, heap: ?*Heap, loader: *L
         .sastore => {
             const v = try f.popInt();
             const ai = arrayIndex(f) catch |e| {
-                try mapTrap(f, f.class, f.exceptions, e);
+                mapTrap(f, f.class, f.exceptions, e) catch |e2| {
+                    if (e2 == error.JavaException) return .{ .threw = {} };
+                    return e2;
+                };
                 continue :sw try step(f);
             };
             ai.arr.data[ai.i] = .{ .int = @as(i16, @truncate(v)) };
@@ -4332,7 +4460,10 @@ fn exec(alloc: std.mem.Allocator, class: ?*const Class, heap: ?*Heap, loader: *L
         .lastore => {
             const v = try f.popLong();
             const ai = arrayIndex(f) catch |e| {
-                try mapTrap(f, f.class, f.exceptions, e);
+                mapTrap(f, f.class, f.exceptions, e) catch |e2| {
+                    if (e2 == error.JavaException) return .{ .threw = {} };
+                    return e2;
+                };
                 continue :sw try step(f);
             };
             ai.arr.data[ai.i] = .{ .long = v };
@@ -4342,7 +4473,10 @@ fn exec(alloc: std.mem.Allocator, class: ?*const Class, heap: ?*Heap, loader: *L
         .fastore => {
             const v = try f.popFloat();
             const ai = arrayIndex(f) catch |e| {
-                try mapTrap(f, f.class, f.exceptions, e);
+                mapTrap(f, f.class, f.exceptions, e) catch |e2| {
+                    if (e2 == error.JavaException) return .{ .threw = {} };
+                    return e2;
+                };
                 continue :sw try step(f);
             };
             ai.arr.data[ai.i] = .{ .float = v };
@@ -4352,7 +4486,10 @@ fn exec(alloc: std.mem.Allocator, class: ?*const Class, heap: ?*Heap, loader: *L
         .dastore => {
             const v = try f.popDouble();
             const ai = arrayIndex(f) catch |e| {
-                try mapTrap(f, f.class, f.exceptions, e);
+                mapTrap(f, f.class, f.exceptions, e) catch |e2| {
+                    if (e2 == error.JavaException) return .{ .threw = {} };
+                    return e2;
+                };
                 continue :sw try step(f);
             };
             ai.arr.data[ai.i] = .{ .double = v };
@@ -4362,7 +4499,10 @@ fn exec(alloc: std.mem.Allocator, class: ?*const Class, heap: ?*Heap, loader: *L
         .aastore => {
             const v = try f.pop();
             const ai = arrayIndex(f) catch |e| {
-                try mapTrap(f, f.class, f.exceptions, e);
+                mapTrap(f, f.class, f.exceptions, e) catch |e2| {
+                    if (e2 == error.JavaException) return .{ .threw = {} };
+                    return e2;
+                };
                 continue :sw try step(f);
             };
             ai.arr.data[ai.i] = v;
@@ -4379,7 +4519,10 @@ fn exec(alloc: std.mem.Allocator, class: ?*const Class, heap: ?*Heap, loader: *L
         .getfield => {
             const cls = f.class orelse return error.UnsupportedOpcode;
             doGetField(f, cls, code) catch |e| {
-                try mapTrap(f, f.class, f.exceptions, e);
+                mapTrap(f, f.class, f.exceptions, e) catch |e2| {
+                    if (e2 == error.JavaException) return .{ .threw = {} };
+                    return e2;
+                };
                 continue :sw try step(f);
             };
             f.pc += 3;
@@ -4388,7 +4531,10 @@ fn exec(alloc: std.mem.Allocator, class: ?*const Class, heap: ?*Heap, loader: *L
         .putfield => {
             const cls = f.class orelse return error.UnsupportedOpcode;
             doPutField(f, cls, code) catch |e| {
-                try mapTrap(f, f.class, f.exceptions, e);
+                mapTrap(f, f.class, f.exceptions, e) catch |e2| {
+                    if (e2 == error.JavaException) return .{ .threw = {} };
+                    return e2;
+                };
                 continue :sw try step(f);
             };
             f.pc += 3;
@@ -4403,28 +4549,18 @@ fn exec(alloc: std.mem.Allocator, class: ?*const Class, heap: ?*Heap, loader: *L
                         f.budget.pending = null;
                         continue :sw try step(f);
                     }
-                    return e;
+                    return .{ .threw = {} };
                 }
-                try mapTrap(f, f.class, f.exceptions, e);
+                mapTrap(f, f.class, f.exceptions, e) catch |e2| {
+                    if (e2 == error.JavaException) return .{ .threw = {} };
+                    return e2;
+                };
                 continue :sw try step(f);
             };
             if (pending) |p| {
-                defer f.loader.gpa.free(p.slots);
-                if (f.budget.depth >= f.budget.max_depth) return error.CallDepthExceeded;
-                f.budget.depth += 1;
-                defer f.budget.depth -= 1;
-                const ret = exec(p.owner.gpa, p.owner, f.heap, f.loader, f.budget, p.code, p.max_stack, p.max_locals, p.slots, p.exception_table, f) catch |e| {
-                    if (e == error.JavaException) {
-                        if (try handleException(f, f.class, f.exceptions, f.budget.pending.?)) {
-                            f.budget.pending = null;
-                            continue :sw try step(f);
-                        }
-                        return e;
-                    }
-                    try mapTrap(f, f.class, f.exceptions, e);
-                    continue :sw try step(f);
-                };
-                if (ret) |rv| try f.pushKind(rv);
+                var call = p;
+                call.resume_pc = f.pc + 3;
+                return .{ .call = call };
             }
             f.pc += 3;
             continue :sw try step(f);
@@ -4438,28 +4574,18 @@ fn exec(alloc: std.mem.Allocator, class: ?*const Class, heap: ?*Heap, loader: *L
                         f.budget.pending = null;
                         continue :sw try step(f);
                     }
-                    return e;
+                    return .{ .threw = {} };
                 }
-                try mapTrap(f, f.class, f.exceptions, e);
+                mapTrap(f, f.class, f.exceptions, e) catch |e2| {
+                    if (e2 == error.JavaException) return .{ .threw = {} };
+                    return e2;
+                };
                 continue :sw try step(f);
             };
             if (pending) |p| {
-                defer f.loader.gpa.free(p.slots);
-                if (f.budget.depth >= f.budget.max_depth) return error.CallDepthExceeded;
-                f.budget.depth += 1;
-                defer f.budget.depth -= 1;
-                const ret = exec(p.owner.gpa, p.owner, f.heap, f.loader, f.budget, p.code, p.max_stack, p.max_locals, p.slots, p.exception_table, f) catch |e| {
-                    if (e == error.JavaException) {
-                        if (try handleException(f, f.class, f.exceptions, f.budget.pending.?)) {
-                            f.budget.pending = null;
-                            continue :sw try step(f);
-                        }
-                        return e;
-                    }
-                    try mapTrap(f, f.class, f.exceptions, e);
-                    continue :sw try step(f);
-                };
-                if (ret) |rv| try f.pushKind(rv);
+                var call = p;
+                call.resume_pc = f.pc + 3;
+                return .{ .call = call };
             }
             f.pc += 3;
             continue :sw try step(f);
@@ -4473,28 +4599,18 @@ fn exec(alloc: std.mem.Allocator, class: ?*const Class, heap: ?*Heap, loader: *L
                         f.budget.pending = null;
                         continue :sw try step(f);
                     }
-                    return e;
+                    return .{ .threw = {} };
                 }
-                try mapTrap(f, f.class, f.exceptions, e);
+                mapTrap(f, f.class, f.exceptions, e) catch |e2| {
+                    if (e2 == error.JavaException) return .{ .threw = {} };
+                    return e2;
+                };
                 continue :sw try step(f);
             };
             if (pending) |p| {
-                defer f.loader.gpa.free(p.slots);
-                if (f.budget.depth >= f.budget.max_depth) return error.CallDepthExceeded;
-                f.budget.depth += 1;
-                defer f.budget.depth -= 1;
-                const ret = exec(p.owner.gpa, p.owner, f.heap, f.loader, f.budget, p.code, p.max_stack, p.max_locals, p.slots, p.exception_table, f) catch |e| {
-                    if (e == error.JavaException) {
-                        if (try handleException(f, f.class, f.exceptions, f.budget.pending.?)) {
-                            f.budget.pending = null;
-                            continue :sw try step(f);
-                        }
-                        return e;
-                    }
-                    try mapTrap(f, f.class, f.exceptions, e);
-                    continue :sw try step(f);
-                };
-                if (ret) |rv| try f.pushKind(rv);
+                var call = p;
+                call.resume_pc = f.pc + 5;
+                return .{ .call = call };
             }
             f.pc += 5;
             continue :sw try step(f);
@@ -4507,9 +4623,12 @@ fn exec(alloc: std.mem.Allocator, class: ?*const Class, heap: ?*Heap, loader: *L
                         f.budget.pending = null;
                         continue :sw try step(f);
                     }
-                    return e;
+                    return .{ .threw = {} };
                 }
-                try mapTrap(f, f.class, f.exceptions, e);
+                mapTrap(f, f.class, f.exceptions, e) catch |e2| {
+                    if (e2 == error.JavaException) return .{ .threw = {} };
+                    return e2;
+                };
                 continue :sw try step(f);
             };
             f.pc += 5;
@@ -4585,28 +4704,18 @@ fn exec(alloc: std.mem.Allocator, class: ?*const Class, heap: ?*Heap, loader: *L
                         f.budget.pending = null;
                         continue :sw try step(f);
                     }
-                    return e;
+                    return .{ .threw = {} };
                 }
-                try mapTrap(f, f.class, f.exceptions, e);
+                mapTrap(f, f.class, f.exceptions, e) catch |e2| {
+                    if (e2 == error.JavaException) return .{ .threw = {} };
+                    return e2;
+                };
                 continue :sw try step(f);
             };
             if (pending) |p| {
-                defer f.loader.gpa.free(p.slots);
-                if (f.budget.depth >= f.budget.max_depth) return error.CallDepthExceeded;
-                f.budget.depth += 1;
-                defer f.budget.depth -= 1;
-                const ret = exec(p.owner.gpa, p.owner, f.heap, f.loader, f.budget, p.code, p.max_stack, p.max_locals, p.slots, p.exception_table, f) catch |e| {
-                    if (e == error.JavaException) {
-                        if (try handleException(f, f.class, f.exceptions, f.budget.pending.?)) {
-                            f.budget.pending = null;
-                            continue :sw try step(f);
-                        }
-                        return e;
-                    }
-                    try mapTrap(f, f.class, f.exceptions, e);
-                    continue :sw try step(f);
-                };
-                if (ret) |rv| try f.pushKind(rv);
+                var call = p;
+                call.resume_pc = f.pc + 3;
+                return .{ .call = call };
             }
             f.pc += 3;
             continue :sw try step(f);
@@ -4615,13 +4724,13 @@ fn exec(alloc: std.mem.Allocator, class: ?*const Class, heap: ?*Heap, loader: *L
             const eid = (try f.popRef()) orelse return error.NullPointer;
             if (try handleException(f, f.class, f.exceptions, eid)) continue :sw try step(f);
             f.budget.pending = eid;
-            return error.JavaException;
+            return .{ .threw = {} };
         },
-        .ireturn => return .{ .int = try f.popInt() },
-        .lreturn => return .{ .long = try f.popLong() },
-        .freturn => return .{ .float = try f.popFloat() },
-        .dreturn => return .{ .double = try f.popDouble() },
-        .@"return" => return null,
+        .ireturn => return .{ .returned = .{ .int = try f.popInt() } },
+        .lreturn => return .{ .returned = .{ .long = try f.popLong() } },
+        .freturn => return .{ .returned = .{ .float = try f.popFloat() } },
+        .dreturn => return .{ .returned = .{ .double = try f.popDouble() } },
+        .@"return" => return .{ .returned = null },
         else => return error.UnsupportedOpcode,
     }
 }
