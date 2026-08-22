@@ -662,6 +662,52 @@ public class JBaseSmoke {
         r += (int) (jti.getEpochSecond() % 100000);
         if (jti.isAfter(java.time.Instant.ofEpochSecond(1600000000L))) r += 13;
 
+
+        // java.math.BigInteger — clean-room, differential vs real BigInteger.
+        java.math.BigInteger big1 = new java.math.BigInteger("123456789012345678901234567890");
+        java.math.BigInteger big2 = java.math.BigInteger.valueOf(1000000007L);
+        r += big1.add(big2).signum();                 // 1
+        r += big1.subtract(big1).signum();            // 0
+        r += big1.multiply(big2).mod(java.math.BigInteger.valueOf(97)).intValue();
+        r += java.math.BigInteger.valueOf(2).pow(100)
+                .mod(java.math.BigInteger.valueOf(1000000007L)).intValue();
+        r += big1.compareTo(big2);                    // 1
+        if (big1.toString().equals("123456789012345678901234567890")) r += 17;
+        if (java.math.BigInteger.valueOf(-3).pow(7).toString().equals("-2187")) r += 17;
+        r += java.math.BigInteger.valueOf(48)
+                .gcd(java.math.BigInteger.valueOf(36)).intValue();   // 12
+        r += new java.math.BigInteger("-2187").hashCode() % 1000;    // deterministic
+
+
+        // java.util.regex — clean-room Pattern/Matcher, differential vs real java.
+        if (java.util.regex.Pattern.matches("a.c", "axc")) r += 19;
+        if (!java.util.regex.Pattern.matches("a.c", "a\nc")) r += 19;
+        java.util.regex.Pattern rePat = java.util.regex.Pattern.compile("(\\d+)-(\\d+)");
+        java.util.regex.Matcher reMatch = rePat.matcher("12-345");
+        if (reMatch.matches()) r += 19;
+        if (reMatch.groupCount() == 2) r += 19;
+        if (reMatch.group(1).equals("12")) r += 19;
+        if (reMatch.group(2).equals("345")) r += 19;
+        r += reMatch.start(2);                 // 3
+        r += reMatch.end();                    // 6
+        java.util.regex.Matcher reFind =
+                java.util.regex.Pattern.compile("\\d+").matcher("a12b345c6");
+        int reCount = 0;
+        int reSum = 0;
+        while (reFind.find()) {
+            reCount++;
+            reSum += Integer.parseInt(reFind.group());
+        }
+        r += reCount;                          // 3
+        r += reSum;                            // 12+345+6 = 363
+        if (java.util.regex.Pattern.matches("[a-z]+\\d*", "abc12")) r += 19;
+        if (java.util.regex.Pattern.matches("^a{2,4}$", "aaa")) r += 19;
+        java.util.regex.Matcher reOpt =
+                java.util.regex.Pattern.compile("(a)?b").matcher("b");
+        if (reOpt.matches()) r += 19;
+        if (reOpt.group(1) == null) r += 19;
+        if (reOpt.start(1) == -1) r += 19;
+
         return r;
     }
 }
