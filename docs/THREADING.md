@@ -432,8 +432,16 @@ request line + headers to CRLFCRLF and replies 200 with a Content-Length body
 echoing the path; `http-stress.sh` @carriers 2 & 4 (+GC) matches real java, skips
 cleanly if sockets unavailable.
 
-Next: (3) a minimal Postgres wire-protocol client (opt-in behind JEBENA_PGTEST);
-(4) an HTTP endpoint backed by Postgres.
+Step 3 (2026-08-22): a minimal Postgres v3 wire-protocol CLIENT LANDED (pure Java,
+no interp.zig change) — `test/stress/PgQuery.java` does StartupMessage -> auth
+(Ok/cleartext; MD5+SCRAM documented out-of-scope) -> Query "SELECT 1" -> parse
+RowDescription/DataRow/CommandComplete/ReadyForQuery. Validated both against an
+in-process spec-faithful MOCK backend (always-green, no DB) AND a LIVE
+postgres:16-alpine over docker (trust auth, 127.0.0.1:5432) — both return 1,
+matching real java. `pg-stress.sh` runs the mock always; the live check is opt-in
+behind JEBENA_PGTEST.
+
+Next: (4) an HTTP endpoint that queries Postgres and returns a row.
 
 ## Policy (2026-08-21, from the user): thread-safety is now non-negotiable
 
