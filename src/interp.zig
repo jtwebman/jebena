@@ -3750,9 +3750,13 @@ fn makeBaseFrame(alloc: std.mem.Allocator, class: ?*const Class, heap: ?*Heap, l
 /// A green-thread fiber: its own explicit Java call stack (frame 0 is the base).
 /// The whole stack is heap-owned so a fiber's state survives scheduler switches
 /// (stage 3) and can be marked as GC roots even while parked.
+const DriveOutcome = enum { completed, yielded };
+
 const Fiber = struct {
     alloc: std.mem.Allocator,
     call_stack: std.ArrayList(*Frame) = .empty,
+    /// Set when the fiber's base frame returns (its method result).
+    result: ?Value = null,
 
     fn deinit(self: *Fiber) void {
         for (self.call_stack.items) |cf| freeChildFrame(self.alloc, cf);
@@ -3760,29 +3764,25 @@ const Fiber = struct {
     }
 };
 
-fn exec(alloc: std.mem.Allocator, class: ?*const Class, heap: ?*Heap, loader: *Loader, budget: *Budget, code: []const u8, max_stack: u16, max_locals: u16, arg_slots: []const Value, exceptions: []const attribute_decode.ExceptionTableEntry, parent: ?*Frame) RunError!?Value {
-    const base = try makeBaseFrame(alloc, class, heap, loader, budget, code, max_stack, max_locals, arg_slots, exceptions, parent);
-    var fiber = Fiber{ .alloc = alloc };
-    defer fiber.deinit();
-    fiber.call_stack.append(alloc, base) catch {
-        freeChildFrame(alloc, base);
-        return error.OutOfMemory;
-    };
-
+/// Drive a fiber's explicit call stack until it either completes (its base frame
+/// returns -> result stored, .completed) or exhausts its reduction budget
+/// (.yielded, state preserved for resumption). An uncaught exception at the base
+/// frame propagates as error.JavaException. Shared by the synchronous exec path
+/// (native re-entry) and the scheduler (stage 3b).
+fn driveFiber(fiber: *Fiber, budget: *Budget) RunError!DriveOutcome {
+    const alloc = fiber.alloc;
     while (fiber.call_stack.items.len > 0) {
         const top = fiber.call_stack.items[fiber.call_stack.items.len - 1];
         const res = runFrame(top) catch |e| {
-            // Reduction budget exhausted: yield and resume. Single-fiber for now
-            // (run-to-completion); a scheduler will switch fibers here (stage 3).
-            if (e == error.Yield) {
-                budget.reductions = budget.reduction_quantum;
-                continue;
-            }
+            if (e == error.Yield) return .yielded;
             return e;
         };
         switch (res) {
             .returned => |rv| {
-                if (fiber.call_stack.items.len == 1) return rv;
+                if (fiber.call_stack.items.len == 1) {
+                    fiber.result = rv;
+                    return .completed;
+                }
                 const finished = fiber.call_stack.pop().?;
                 const caller = fiber.call_stack.items[fiber.call_stack.items.len - 1];
                 caller.pc = finished.return_pc;
@@ -3812,7 +3812,28 @@ fn exec(alloc: std.mem.Allocator, class: ?*const Class, heap: ?*Heap, loader: *L
             },
         }
     }
-    return null;
+    fiber.result = null;
+    return .completed;
+}
+
+/// Synchronous run of a compiled method to completion (native re-entry path and
+/// the top-level entry for now). Creates a fiber and drives it, refilling the
+/// reduction quantum across yields. Stage 3b routes the main thread through a
+/// scheduler; native re-entry stays synchronous (a fiber can't yield mid-native).
+fn exec(alloc: std.mem.Allocator, class: ?*const Class, heap: ?*Heap, loader: *Loader, budget: *Budget, code: []const u8, max_stack: u16, max_locals: u16, arg_slots: []const Value, exceptions: []const attribute_decode.ExceptionTableEntry, parent: ?*Frame) RunError!?Value {
+    const base = try makeBaseFrame(alloc, class, heap, loader, budget, code, max_stack, max_locals, arg_slots, exceptions, parent);
+    var fiber = Fiber{ .alloc = alloc };
+    defer fiber.deinit();
+    fiber.call_stack.append(alloc, base) catch {
+        freeChildFrame(alloc, base);
+        return error.OutOfMemory;
+    };
+    while (true) {
+        switch (try driveFiber(&fiber, budget)) {
+            .completed => return fiber.result,
+            .yielded => budget.reductions = budget.reduction_quantum,
+        }
+    }
 }
 
 fn runFrame(f: *Frame) RunError!FrameResult {
