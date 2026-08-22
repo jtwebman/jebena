@@ -556,6 +556,7 @@ fn collectMajor(f: *Frame) void {
             for (ff.locals) |v| markValue(heap, v);
         }
         if (fib.waiting_on) |id| markObject(heap, id);
+        if (fib.park_monitor) |id| markObject(heap, id);
     }
     for (f.loader.scheduler.nested.items) |fib| {
         for (fib.call_stack.items) |ff| {
@@ -563,6 +564,7 @@ fn collectMajor(f: *Frame) void {
             for (ff.locals) |v| markValue(heap, v);
         }
         if (fib.waiting_on) |id| markObject(heap, id);
+        if (fib.park_monitor) |id| markObject(heap, id);
     }
     for (f.loader.statics.items) |st| for (st) |v| markValue(heap, v);
     if (f.budget.pending) |eid| markObject(heap, eid);
@@ -620,8 +622,14 @@ fn collectMajor(f: *Frame) void {
     for (f.loader.scheduler.all.items) |fib| if (fib.waiting_on) |id| {
         fib.waiting_on = forwarding[id];
     };
+    for (f.loader.scheduler.all.items) |fib| if (fib.park_monitor) |id| {
+        fib.park_monitor = forwarding[id];
+    };
     for (f.loader.scheduler.nested.items) |fib| if (fib.waiting_on) |id| {
         fib.waiting_on = forwarding[id];
+    };
+    for (f.loader.scheduler.nested.items) |fib| if (fib.park_monitor) |id| {
+        fib.park_monitor = forwarding[id];
     };
 
     // 4. Move live objects (and their generation/remembered bits) to new slots.
@@ -675,6 +683,7 @@ fn collectMinor(f: *Frame) void {
             for (ff.locals) |v| markYoungValue(heap, v);
         }
         if (fib.waiting_on) |id| markYoungObject(heap, id);
+        if (fib.park_monitor) |id| markYoungObject(heap, id);
     }
     for (f.loader.scheduler.nested.items) |fib| {
         for (fib.call_stack.items) |ff| {
@@ -682,6 +691,7 @@ fn collectMinor(f: *Frame) void {
             for (ff.locals) |v| markYoungValue(heap, v);
         }
         if (fib.waiting_on) |id| markYoungObject(heap, id);
+        if (fib.park_monitor) |id| markYoungObject(heap, id);
     }
     for (f.loader.statics.items) |st| for (st) |v| markYoungValue(heap, v);
     if (f.budget.pending) |eid| markYoungObject(heap, eid);
@@ -3631,64 +3641,48 @@ fn nativeInvoke(f: *Frame, owner: *const Class, method: *const Class.Method, slo
                 else => return error.TypeMismatch,
             };
             const sched = &f.loader.scheduler;
-            const fib = fiberOwningFrame(sched, f) orelse return; // no scheduler fiber: no-op
-            const myown = owningThreadId(sched, f) + 1;
-            // Announce the wait BEFORE releasing the monitor so a notifier that
-            // acquires it next always sees us (closes the lost-wakeup window).
-            fib.waiting_on = recv;
-            @atomicStore(bool, &fib.notified, false, .release);
-            var saved: u32 = 0;
+            const fib = owningThreadFiber(sched, f) orelse return; // no scheduler fiber: no-op
+            const myown = fib.id + 1;
+            if (fib.waiting_on == recv) {
+                // RESUMING a wait on recv: phase 2, reacquire the monitor. (We were
+                // re-readied because we got notified; the reacquire itself may need
+                // to park on the monitor if it's contended.)
+                fib.wait_reacq = true;
+                switch (heap.get(recv).*) {
+                    .instance => |*inst| {
+                        if (@cmpxchgStrong(u64, &inst.mon_owner, 0, myown, .acq_rel, .acquire) == null) {
+                            inst.mon_count = fib.wait_saved;
+                            fib.waiting_on = null;
+                            @atomicStore(bool, &fib.notified, false, .release);
+                            fib.wait_reacq = false;
+                            fib.park_monitor = null;
+                            return;
+                        }
+                    },
+                    else => {
+                        fib.waiting_on = null;
+                        fib.wait_reacq = false;
+                        return;
+                    },
+                }
+                fib.park_monitor = recv; // monitor busy: park until monitorexit wakes us
+                return error.Park;
+            }
+            // FIRST call: must hold the monitor. Release it, park until notified.
             switch (heap.get(recv).*) {
                 .instance => |*inst| {
-                    if (@atomicLoad(u64, &inst.mon_owner, .acquire) != myown) {
-                        fib.waiting_on = null; // not the owner (real java: IllegalMonitorStateException)
-                        return;
-                    }
-                    saved = inst.mon_count;
+                    if (@atomicLoad(u64, &inst.mon_owner, .acquire) != myown) return; // not owner (real java: IllegalMonitorStateException)
+                    fib.wait_saved = inst.mon_count;
                     inst.mon_count = 0;
                     @atomicStore(u64, &inst.mon_owner, 0, .release);
                 },
-                else => {
-                    fib.waiting_on = null;
-                    return;
-                },
+                else => return,
             }
-            // Phase 1: block until notified (spin at >1 carrier, cooperatively pump at 1).
-            if (sched.carriers_total > 1) {
-                while (!@atomicLoad(bool, &fib.notified, .acquire)) {
-                    if (sched.safepoint_requested.load(.acquire)) sched.waitForSafepointRelease();
-                    std.atomic.spinLoopHint();
-                }
-            } else {
-                while (!fib.notified) {
-                    if (!sched.pumpStep(f.budget)) break; // nothing runnable -> spurious wakeup
-                }
-            }
-            // Phase 2: reacquire the monitor. Its id may have moved under a GC, so
-            // read the GC-remapped id from waiting_on each iteration.
-            while (true) {
-                const oid = fib.waiting_on orelse break;
-                var got = false;
-                switch (heap.get(oid).*) {
-                    .instance => |*inst| {
-                        if (@cmpxchgStrong(u64, &inst.mon_owner, 0, myown, .acq_rel, .acquire) == null) {
-                            inst.mon_count = saved;
-                            got = true;
-                        }
-                    },
-                    else => got = true,
-                }
-                if (got) break;
-                if (sched.carriers_total > 1) {
-                    if (sched.safepoint_requested.load(.acquire)) sched.waitForSafepointRelease();
-                    std.atomic.spinLoopHint();
-                } else {
-                    if (!sched.pumpStep(f.budget)) break;
-                }
-            }
-            fib.waiting_on = null;
+            fib.waiting_on = recv;
             @atomicStore(bool, &fib.notified, false, .release);
-            return;
+            fib.wait_reacq = false;
+            if (sched.monitor_parkers.load(.acquire) > 0) sched.wakeMonitor(recv); // let a monitor-parker proceed
+            return error.Park;
         }
         if (eq2(mn, md, "notify", "()V")) {
             const recv = switch (slots[0]) {
@@ -3698,20 +3692,16 @@ fn nativeInvoke(f: *Frame, owner: *const Class, method: *const Class.Method, slo
             const sc = &f.loader.scheduler;
             sc.lock.lock();
             defer sc.lock.unlock();
-            var woke = false;
             for (sc.all.items) |w| {
-                if (!w.notified and w.waiting_on == recv) {
+                if (!w.notified and !w.wait_reacq and w.waiting_on == recv) {
                     @atomicStore(bool, &w.notified, true, .release);
-                    woke = true;
+                    if (w.status == .parked) {
+                        w.status = .ready;
+                        sc.ready.append(sc.gpa, w) catch {};
+                    }
                     break;
                 }
             }
-            if (!woke) for (sc.nested.items) |w| {
-                if (!w.notified and w.waiting_on == recv) {
-                    @atomicStore(bool, &w.notified, true, .release);
-                    break;
-                }
-            };
             return;
         }
         if (eq2(mn, md, "notifyAll", "()V")) {
@@ -3723,10 +3713,13 @@ fn nativeInvoke(f: *Frame, owner: *const Class, method: *const Class.Method, slo
             sc.lock.lock();
             defer sc.lock.unlock();
             for (sc.all.items) |w| {
-                if (w.waiting_on == recv) @atomicStore(bool, &w.notified, true, .release);
-            }
-            for (sc.nested.items) |w| {
-                if (w.waiting_on == recv) @atomicStore(bool, &w.notified, true, .release);
+                if (!w.notified and !w.wait_reacq and w.waiting_on == recv) {
+                    @atomicStore(bool, &w.notified, true, .release);
+                    if (w.status == .parked) {
+                        w.status = .ready;
+                        sc.ready.append(sc.gpa, w) catch {};
+                    }
+                }
             }
             return;
         }
@@ -4363,6 +4356,13 @@ const Fiber = struct {
     notified: bool = false,
     /// Joinee fiber id this fiber is parked on in Thread.join (null = not joining).
     park_join: ?u64 = null,
+    /// Monitor OBJECT id this fiber is parked on in a contended monitorenter.
+    park_monitor: ?u32 = null,
+    /// Object.wait state: monitor hold count to restore, and whether we've passed
+    /// the notify wait and are now reacquiring the monitor. waiting_on is the wait
+    /// target (GC-remapped); notified is set by notify/notifyAll.
+    wait_saved: u32 = 0,
+    wait_reacq: bool = false,
 
     fn deinit(self: *Fiber) void {
         for (self.call_stack.items) |cf| freeChildFrame(self.alloc, cf);
@@ -4413,6 +4413,9 @@ const Scheduler = struct {
     /// Incremented on spawn, decremented on completion. Atomic for multi-carrier.
     outstanding: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
     shutdown: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    /// Count of fibers currently parked on a monitor; lets monitorexit skip the
+    /// wake scan in the common uncontended case.
+    monitor_parkers: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
     /// Bitmask of carrier ids that ran >=1 fiber; used to verify real parallelism.
     carriers_ran: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
     trace_carriers: bool = false,
@@ -4473,6 +4476,21 @@ const Scheduler = struct {
         _ = self.outstanding.fetchSub(1, .acq_rel);
     }
 
+    /// Wake fibers parked on a monitor object whose owner just released it. Wakes
+    /// all (they re-contend on resume: one acquires, the rest re-park).
+    fn wakeMonitor(self: *Scheduler, mid: u32) void {
+        self.lock.lock();
+        defer self.lock.unlock();
+        for (self.all.items) |w| {
+            if (w.status == .parked and w.park_monitor == mid) {
+                w.park_monitor = null;
+                w.status = .ready;
+                self.ready.append(self.gpa, w) catch {};
+                _ = self.monitor_parkers.fetchSub(1, .acq_rel);
+            }
+        }
+    }
+
     /// Commit a fiber that raised error.Park: under the lock, re-check its wait
     /// condition (joinee already done?) and either re-ready it immediately or mark
     /// it parked. Doing the check here (not in the native) closes the lost-wakeup
@@ -4492,6 +4510,41 @@ const Scheduler = struct {
                 self.ready.append(self.gpa, fib) catch {};
                 return;
             }
+        }
+        if (fib.waiting_on != null and !fib.wait_reacq) {
+            // Phase-1 Object.wait: re-ready if already notified (closes the race
+            // with a notify that landed before we committed to parked), else park.
+            if (@atomicLoad(bool, &fib.notified, .acquire)) {
+                fib.status = .ready;
+                self.ready.append(self.gpa, fib) catch {};
+            } else {
+                fib.status = .parked;
+            }
+            return;
+        }
+        if (fib.park_monitor) |mid| {
+            const heap: ?*Heap = if (fib.call_stack.items.len > 0)
+                fib.call_stack.items[fib.call_stack.items.len - 1].heap
+            else
+                null;
+            const myown = fib.id + 1;
+            var acquirable = true;
+            if (heap) |h| switch (h.get(mid).*) {
+                .instance => |*inst| {
+                    const o = @atomicLoad(u64, &inst.mon_owner, .acquire);
+                    acquirable = (o == 0 or o == myown);
+                },
+                else => {},
+            };
+            if (acquirable) {
+                fib.park_monitor = null;
+                fib.status = .ready;
+                self.ready.append(self.gpa, fib) catch {};
+                return;
+            }
+            fib.status = .parked;
+            _ = self.monitor_parkers.fetchAdd(1, .acq_rel);
+            return;
         }
         fib.status = .parked;
     }
@@ -5841,12 +5894,13 @@ fn runFrame(f: *Frame) RunError!FrameResult {
                     else => acquired = true, // non-instance monitor: null-check only (rare)
                 }
                 if (acquired) break;
-                // Contended. One carrier: yield cooperatively so the owner can run
-                // and release (retry at this same pc). Multiple carriers: spin,
-                // polling the safepoint so GC can still stop the world.
-                if (sched.carriers_total <= 1) return error.Yield;
-                if (sched.safepoint_requested.load(.acquire)) sched.waitForSafepointRelease();
-                std.atomic.spinLoopHint();
+                // Contended: park on the monitor object. The owner's monitorexit
+                // wakes us (Scheduler.wakeMonitor); on resume monitorenter re-runs
+                // and retries the CAS. The objref stays on the operand stack (peeked,
+                // not popped), pc unchanged, and GC remaps both it and park_monitor.
+                const me = owningThreadFiber(sched, f) orelse return error.LinkError;
+                me.park_monitor = cur;
+                return error.Park;
             }
             _ = try f.popRef(); // consume the objectref now that we hold the monitor
             f.pc += 1;
@@ -5859,7 +5913,11 @@ fn runFrame(f: *Frame) RunError!FrameResult {
                 .instance => |*inst| {
                     if (inst.mon_count > 0) {
                         inst.mon_count -= 1;
-                        if (inst.mon_count == 0) @atomicStore(u64, &inst.mon_owner, 0, .release);
+                        if (inst.mon_count == 0) {
+                            @atomicStore(u64, &inst.mon_owner, 0, .release);
+                            if (f.loader.scheduler.monitor_parkers.load(.acquire) > 0)
+                                f.loader.scheduler.wakeMonitor(cur);
+                        }
                     }
                 },
                 else => {},

@@ -13,7 +13,7 @@ JAVAC="$(command -v javac || echo /usr/lib/jvm/java-17-openjdk-amd64/bin/javac)"
 OUT=/tmp/jebena-wn
 rm -rf "$OUT"; mkdir -p "$OUT"
 bash "$ROOT/scripts/build-jbase.sh" >/dev/null
-"$JAVAC" -d "$OUT" "$ROOT"/test/stress/WaitNotify.java "$ROOT/test/diff/Driver.java"
+"$JAVAC" -d "$OUT" "$ROOT"/test/stress/WaitNotify.java "$ROOT"/test/stress/ManyWait.java "$ROOT/test/diff/Driver.java"
 "$ZIG" build --build-file "$ROOT/build.zig" >/dev/null 2>&1
 JEBENA="$ROOT/zig-out/bin/jebena"
 EXP=$("$JAVA" -cp "$OUT" Driver st.WaitNotify demo 2>/dev/null)
@@ -31,5 +31,10 @@ check() { # $1 label  $2 env  $3 reps
 check "carriers=1" "JEBENA_CARRIERS=1" 3
 check "carriers=4" "JEBENA_CARRIERS=4" 15
 check "carriers=4+GC" "JEBENA_GC_INTERVAL=200 JEBENA_CARRIERS=4" 8
+MW=$("$JAVA" -cp "$OUT" Driver st.ManyWait demo 2>/dev/null)
+mwcheck() { for rep in $(seq 1 "$2"); do ALL=$(timeout 30 bash -c "$1 '$JEBENA' run st/ManyWait demo $APP $JBASE" 2>&1); [ $? -eq 124 ] && { echo "waitnotify-stress: FAIL ManyWait HANG"; fail=1; }; G=$(printf '%s\n' "$ALL"|sed -n 's/.*demo() = \(-\?[0-9]*\).*/\1/p'); [ "$G" = "$MW" ] || { echo "waitnotify-stress: FAIL ManyWait jebena=$G java=$MW"; fail=1; }; done; }
+mwcheck "JEBENA_CARRIERS=1" 3
+mwcheck "JEBENA_CARRIERS=4" 10
+mwcheck "JEBENA_GC_INTERVAL=200 JEBENA_CARRIERS=4" 5
 [ "$fail" = 0 ] || exit 1
 echo "waitnotify-stress: OK — 8 workers notifyAll + main wait/reacquire = $EXP (carriers 1 & 4, +GC), matches real java"

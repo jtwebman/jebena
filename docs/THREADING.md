@@ -283,11 +283,27 @@ the full gate is green.) Proven by scripts/join-stress.sh: 16 joiners park on on
 worker (16 blocked >> 4 carriers, which would deadlock under spin) = 1016 at
 carriers 1 & 4 and with GC forced. All 14 prior gate scripts stay green.
 
-Next: steps (c) monitorenter->park and (d) wait/notify->park must land TOGETHER --
-attempting (c) alone (iter 84) kept sync/join green but HUNG the monitor+wait combo
-at carriers=4, because wait still SPINS (holding a carrier) while workers park on the
-monitor. WIP at /tmp/interp.monpark.wip.bak. Then (e) re-add CyclicBarrier; (f)
-Executors/thread-pool + blocking queues.
+### Parking steps (c)+(d): monitors + wait/notify -> park — LANDED (iter 85)
+
+ALL blocking now parks (yields the carrier), so blocked fibers can exceed carrier
+count. monitorenter contention parks on Fiber.park_monitor (obj id); monitorexit
+wakes parkers (Scheduler.wakeMonitor, guarded by a monitor_parkers counter).
+Object.wait is a two-stage park: (1) release the monitor + wakeMonitor + park until
+notified; (2) on resume reacquire the monitor (park again on it if contended),
+restore the saved hold count. notify/notifyAll set notified + re-ready parked
+phase-1 waiters under scheduler.lock. parkCommit double-checks (notified? monitor
+free?) under the lock, closing lost-wakeup races. GC marks+remaps park_monitor and
+waiting_on. Steps c and d had to land together (monitor-park alone hung the combo
+because wait still spun -- see iter 84).
+
+Proven at carriers 1 & 4 (+GC): sync-stress now includes MonContend (16 fibers on
+ONE lock, 16 > carriers = 8000), waitnotify-stress includes ManyWait (16 waiters
+park on one monitor, notifyAll = 16), plus join-stress (16 joiners). All the
+spin/pump blocking paths for join/monitor/wait are replaced by parking. This
+unblocks CyclicBarrier, Executors/thread-pools, and blocking queues.
+
+Next: (e) re-add CyclicBarrier + BarrierStress (reverted iter 79 -- should pass
+now); (f) Executors/thread-pool + BlockingQueue.
 
 **Known limitations (opt-in path only; default single carrier unaffected) —
 harden next:**
