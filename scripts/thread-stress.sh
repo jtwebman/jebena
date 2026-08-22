@@ -27,4 +27,4 @@ for carriers in 1 4; do
   done
 done
 [ "$fail" = 0 ] || exit 1
-echo "thread-stress: OK — 8 fibers x1000 incrementAndGet = $EXP (carriers 1 & 4, matches real java)"
+echo "thread-stress: OK — 8 fibers x1000 (AtomicInteger+AtomicLong) = $EXP (carriers 1 & 4, matches real java)"

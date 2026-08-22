@@ -24,52 +24,21 @@ public class AtomicLong extends Number {
         this.value = newValue;
     }
 
-    public final long getAndSet(long newValue) {
-        long old = value;
-        value = newValue;
-        return old;
-    }
+    public final native long getAndSet(long newValue);
 
-    public final long getAndIncrement() {
-        long old = value;
-        value = old + 1L;
-        return old;
-    }
+    public final native long getAndIncrement();
 
-    public final long getAndDecrement() {
-        long old = value;
-        value = old - 1L;
-        return old;
-    }
+    public final native long getAndDecrement();
 
-    public final long getAndAdd(long delta) {
-        long old = value;
-        value = old + delta;
-        return old;
-    }
+    public final native long getAndAdd(long delta);
 
-    public final long incrementAndGet() {
-        value = value + 1L;
-        return value;
-    }
+    public final native long incrementAndGet();
 
-    public final long decrementAndGet() {
-        value = value - 1L;
-        return value;
-    }
+    public final native long decrementAndGet();
 
-    public final long addAndGet(long delta) {
-        value = value + delta;
-        return value;
-    }
+    public final native long addAndGet(long delta);
 
-    public final boolean compareAndSet(long expect, long update) {
-        if (value == expect) {
-            value = update;
-            return true;
-        }
-        return false;
-    }
+    public final native boolean compareAndSet(long expect, long update);
 
     public int intValue() {
         return (int) value;

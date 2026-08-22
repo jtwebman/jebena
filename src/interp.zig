@@ -3255,6 +3255,62 @@ fn nativeInvoke(f: *Frame, owner: *const Class, method: *const Class.Method, slo
     const on = owner.name;
     const mn = method.name;
     const md = method.descriptor;
+    if (std.mem.eql(u8, on, "java/util/concurrent/atomic/AtomicLong")) {
+        const heap = f.heap orelse return error.UnsupportedOpcode;
+        const recv = switch (slots[0]) {
+            .reference => |r| r orelse return error.NullPointer,
+            else => return error.TypeMismatch,
+        };
+        const inst = switch (heap.get(recv).*) {
+            .instance => |*x| x,
+            else => return error.LinkError,
+        };
+        const vidx = inst.class.findField("value") orelse return error.LinkError;
+        f.loader.atomics_lock.lock();
+        defer f.loader.atomics_lock.unlock();
+        const cur = inst.fields[vidx].long;
+        if (eq2(mn, md, "incrementAndGet", "()J")) {
+            inst.fields[vidx] = .{ .long = cur +% 1 };
+            return f.pushLong(cur +% 1);
+        }
+        if (eq2(mn, md, "getAndIncrement", "()J")) {
+            inst.fields[vidx] = .{ .long = cur +% 1 };
+            return f.pushLong(cur);
+        }
+        if (eq2(mn, md, "decrementAndGet", "()J")) {
+            inst.fields[vidx] = .{ .long = cur -% 1 };
+            return f.pushLong(cur -% 1);
+        }
+        if (eq2(mn, md, "getAndDecrement", "()J")) {
+            inst.fields[vidx] = .{ .long = cur -% 1 };
+            return f.pushLong(cur);
+        }
+        if (eq2(mn, md, "getAndAdd", "(J)J")) {
+            const d = slots[method.params[0].slot].long;
+            inst.fields[vidx] = .{ .long = cur +% d };
+            return f.pushLong(cur);
+        }
+        if (eq2(mn, md, "addAndGet", "(J)J")) {
+            const d = slots[method.params[0].slot].long;
+            inst.fields[vidx] = .{ .long = cur +% d };
+            return f.pushLong(cur +% d);
+        }
+        if (eq2(mn, md, "getAndSet", "(J)J")) {
+            const nv = slots[method.params[0].slot].long;
+            inst.fields[vidx] = .{ .long = nv };
+            return f.pushLong(cur);
+        }
+        if (eq2(mn, md, "compareAndSet", "(JJ)Z")) {
+            const expect = slots[method.params[0].slot].long;
+            const update = slots[method.params[1].slot].long;
+            if (cur == expect) {
+                inst.fields[vidx] = .{ .long = update };
+                return f.pushInt(1);
+            }
+            return f.pushInt(0);
+        }
+        return error.UnsupportedOpcode;
+    }
     if (std.mem.eql(u8, on, "java/util/concurrent/atomic/AtomicInteger")) {
         const heap = f.heap orelse return error.UnsupportedOpcode;
         const recv = switch (slots[0]) {
