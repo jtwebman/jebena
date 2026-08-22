@@ -3953,6 +3953,10 @@ const Scheduler = struct {
     /// safepoint. The requester waits until parked == carriers_total-1 (all others).
     carriers_total: u32 = 1,
     parked: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
+    /// Desired carrier count from JEBENA_CARRIERS (opt-in parallelism, Stage
+    /// 4d-4). carriers_total stays 1 (the active count) until real carrier threads
+    /// are actually spawned; this just records the request.
+    requested_carriers: u32 = 1,
 
     fn deinit(self: *Scheduler) void {
         for (self.all.items) |fib| {

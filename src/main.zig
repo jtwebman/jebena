@@ -29,7 +29,11 @@ pub fn main(init: std.process.Init) !void {
         defer gpa.free(bytes);
         try disasm(gpa, bytes);
     } else if (std.mem.eql(u8, cmd, "run")) {
-        try cmdRun(gpa, io, &args);
+        const carriers: u32 = if (init.environ_map.get("JEBENA_CARRIERS")) |v|
+            (std.fmt.parseInt(u32, v, 10) catch 1)
+        else
+            1;
+        try cmdRun(gpa, io, &args, carriers);
     } else {
         return usage();
     }
@@ -60,7 +64,7 @@ fn runEntry(loader: *IC.Loader, cls: *const IC.Class, method: []const u8, desc: 
 /// Load a compiled multi-class program from disk and run a static no-arg method.
 /// Provides a minimal java.lang stub chain so user classes can extend
 /// Object/Throwable/Exception/RuntimeException.
-fn cmdRun(gpa: std.mem.Allocator, io: std.Io, it: *std.process.Args.Iterator) !void {
+fn cmdRun(gpa: std.mem.Allocator, io: std.Io, it: *std.process.Args.Iterator, carriers: u32) !void {
     const main_class = it.next() orelse return usage();
     const method = it.next() orelse return usage();
 
@@ -87,6 +91,7 @@ fn cmdRun(gpa: std.mem.Allocator, io: std.Io, it: *std.process.Args.Iterator) !v
     var loader = IC.Loader.init(gpa);
     loader.io = io; // portable IO handle for System.out / clocks
     loader.class_arena = a; // arena for lazily-built Classes
+    loader.scheduler.requested_carriers = if (carriers == 0) 1 else carriers; // opt-in parallelism (4d-4)
     try loader.classpath.appendSlice(gpa, cpdirs.items);
     defer loader.deinit();
 
