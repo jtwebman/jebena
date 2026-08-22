@@ -752,10 +752,22 @@ fn collectMinor(f: *Frame) void {
 /// frame for a handler. Returns normally if handled (f.pc at the handler); returns
 /// error.JavaException to propagate. If the class or heap is unavailable, the
 /// internal error propagates unchanged.
-fn raise(f: *Frame, class: ?*const Class, exceptions: []const attribute_decode.ExceptionTableEntry, name: []const u8, fallback: RunError) RunError!void {
+fn raise(f: *Frame, class: ?*const Class, exceptions: []const attribute_decode.ExceptionTableEntry, name: []const u8, fallback: RunError, message: ?[]const u8) RunError!void {
     const heap = f.heap orelse return fallback;
     const cls = f.loader.find(name) orelse return fallback;
     const eid = heap.allocInstance(cls) catch return error.OutOfMemory;
+    // Set the detail message for the trap (e.g. "/ by zero") so a catcher's
+    // getMessage() matches real java. No GC fires during these allocations, so
+    // eid stays valid; re-fetch the instance after building the String.
+    if (message) |m| {
+        if (cls.findField("detailMessage")) |fi| {
+            const sid = stringFromBytes(f, m) catch null;
+            if (sid) |s| switch (heap.get(eid).*) {
+                .instance => |*inst| inst.fields[fi] = .{ .reference = s },
+                else => {},
+            };
+        }
+    }
     if (try handleException(f, class, exceptions, eid)) return;
     f.budget.pending = eid;
     return error.JavaException;
@@ -771,7 +783,14 @@ fn mapTrap(f: *Frame, class: ?*const Class, exceptions: []const attribute_decode
         error.NegativeArraySize => "java/lang/NegativeArraySizeException",
         else => return e,
     };
-    return raise(f, class, exceptions, name, e);
+    // A message only where it deterministically matches real java's; the JDK's
+    // helpful-NPE / AIOOBE messages are elaborate and version-specific, so leave
+    // those null rather than emit a divergent string.
+    const message: ?[]const u8 = switch (e) {
+        error.ArithmeticException => "/ by zero",
+        else => null,
+    };
+    return raise(f, class, exceptions, name, e, message);
 }
 
 /// Write barrier: record an old object that now references a young object.
@@ -6023,11 +6042,11 @@ fn runFrame(f: *Frame) RunError!FrameResult {
             const y = try f.popInt();
             const x = try f.popInt();
             const res = intBinary(o, x, y) catch |e| {
-                if (e == error.ArithmeticException) {
-                    try raise(f, f.class, f.exceptions, "java/lang/ArithmeticException", e);
-                    continue :sw try step(f);
-                }
-                return e;
+                mapTrap(f, f.class, f.exceptions, e) catch |e2| {
+                    if (e2 == error.JavaException) return .{ .threw = {} };
+                    return e2;
+                };
+                continue :sw try step(f);
             };
             try f.pushInt(res);
             f.pc += 1;
@@ -6043,11 +6062,11 @@ fn runFrame(f: *Frame) RunError!FrameResult {
             const y = try f.popLong();
             const x = try f.popLong();
             const res = longBinary(o, x, y) catch |e| {
-                if (e == error.ArithmeticException) {
-                    try raise(f, f.class, f.exceptions, "java/lang/ArithmeticException", e);
-                    continue :sw try step(f);
-                }
-                return e;
+                mapTrap(f, f.class, f.exceptions, e) catch |e2| {
+                    if (e2 == error.JavaException) return .{ .threw = {} };
+                    return e2;
+                };
+                continue :sw try step(f);
             };
             try f.pushLong(res);
             f.pc += 1;

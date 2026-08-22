@@ -39,6 +39,7 @@ Each iteration is one small, verified, committed step. Never leave the tree red.
    - `bash scripts/app-smoke.sh` — a bigger end-to-end program (WordFreq: String.split + HashMap + Collections.sort with a lambda Comparator + Collection.stream()/filter/map/sorted/findFirst + mapToInt/sum + recursion + a caught NumberFormatException); full stdout byte-identical to real java (builtin text + argv)
    - `bash scripts/cch-stress.sh` — java.util.concurrent.ConcurrentHashMap.merge under concurrent mutation (8 fibers × 500 increments over 4 shared keys); atomic RMW under the map's monitor across carriers 1 & 4 (+GC) = 40010, matches real java
    - `bash scripts/cause-smoke.sh` — Throwable cause chaining: `new RuntimeException(msg, cause)` prints a `Caused by:` section with common-frame elision (`\t... N more`) byte-identical to real java
+   - `bash scripts/calc-smoke.sh` — a recursive-descent integer calculator (tokenize/parse/eval, +-*/ + parens + unary minus, a cross-frame divide-by-zero caught as ArithmeticException "/ by zero"); full stdout byte-identical to real java
    - `bash scripts/portability-check.sh` — VM cross-compiles for macOS/Linux (aarch64/x86_64)
    - `zig fmt --check src/ build.zig` — formatted
    If anything fails: fix it, or revert the change. Do not commit red.
