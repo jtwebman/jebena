@@ -20,7 +20,32 @@ shared-heap reality. NOT raw 1:1 OS threads.
 | --- | --- |
 | Reduction-counting preemption (budget of work per process, then yield) | **Adopt.** We already have a per-run `Budget`; a fiber gets a step budget and yields at zero. |
 | Per-core schedulers, run-queues, work-stealing | **Adopt** (the M:N carriers). |
-| Per-process heaps (share-nothing) → independent per-process GC, no global stop-the-world | **Cannot fully adopt.** Java threads *share* the heap. So we keep a shared heap and pay with safepoints (only at yield points) + per-carrier TLABs. |
+| Per-process heaps (share-nothing) → independent per-process GC, no global stop-the-world | **Cannot fully adopt** — but can be *approximated*. See "Per-fiber nurseries" below. |
+
+### Per-fiber heaps: why not purely, and the hybrid that works
+
+A *pure* BEAM per-process heap breaks Java. BEAM works because Erlang is
+share-nothing: processes communicate only by *copying* immutable messages, so no
+mutable reference is ever shared. Java is the opposite — static fields,
+singletons, `ConcurrentHashMap`, interned strings, `Class` objects all hold
+objects that multiple threads read **and mutate** and must all see. Private
+per-fiber heaps would leave one fiber pointing into another's heap (dangles when
+that heap moves), and copying-on-share breaks the "same object, shared writes"
+contract because Java sharing is implicit (any field write).
+
+The hybrid — most of the benefit, preserves Java semantics, and fits our
+existing generational GC (write barrier + remembered set):
+
+- Each fiber/carrier gets a private **nursery (young region)**; allocation there
+  is lock-free (TLAB).
+- Most objects are born and die in the nursery → collect it **independently,
+  without stopping other fibers**. This is the BEAM-like win for the common case.
+- The **write barrier detects escape** — when a young object becomes reachable
+  from outside the fiber, promote it to the **shared old generation** (global,
+  safepointed). Only genuinely-shared objects pay global-coordination cost.
+
+So: per-fiber **stacks** — always (mandatory, free). Per-fiber **heaps** — as
+private nurseries over a shared old gen, not as full share-nothing heaps.
 
 The win of being a VM: **safepoints are cheap.** "Stop the world" = each carrier
 parks at its next yield point (allocation, backward branch, method entry) — the
