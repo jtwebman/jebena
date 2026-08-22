@@ -255,17 +255,67 @@ const SpinLock = struct {
     }
 };
 
+/// Paged object-table storage: a fixed-capacity directory of fixed-size pages.
+/// Page pointers never move once allocated, so get(id) for any committed id is a
+/// lockless read with no torn-realloc race -- the key to concurrent allocation
+/// across carriers (put appends under alloc_lock; get needs no lock). GC runs at a
+/// safepoint (exclusive) and may rewrite/shrink freely.
+fn Pages(comptime T: type) type {
+    return struct {
+        const Self = @This();
+        const PAGE = 4096;
+        const MAX_PAGES = 1 << 16; // 65536 * 4096 = ~268M objects
+
+        dir: ?[][]T = null, // directory of page slices (each stable once set)
+        npages: usize = 0, // pages actually allocated
+        len: usize = 0, // committed slot count
+
+        fn deinit(self: *Self, gpa: std.mem.Allocator) void {
+            if (self.dir) |d| {
+                for (0..self.npages) |i| gpa.free(d[i]);
+                gpa.free(d);
+            }
+            self.* = .{};
+        }
+        inline fn get(self: *const Self, id: usize) *T {
+            return &self.dir.?[id / PAGE][id % PAGE];
+        }
+        fn count(self: *const Self) usize {
+            return self.len;
+        }
+        /// GC-only (safepoint): shrink the committed count after compaction.
+        fn setLen(self: *Self, n: usize) void {
+            self.len = n;
+        }
+        /// Append a value; returns its id. Caller holds the heap alloc_lock. Grows
+        /// the directory/page lazily; existing pages are never moved.
+        fn append(self: *Self, gpa: std.mem.Allocator, v: T) !usize {
+            if (self.dir == null) self.dir = try gpa.alloc([]T, MAX_PAGES);
+            const id = self.len;
+            const page = id / PAGE;
+            if (page >= self.npages) {
+                if (page >= MAX_PAGES) return error.OutOfMemory;
+                self.dir.?[page] = try gpa.alloc(T, PAGE);
+                self.npages += 1;
+            }
+            self.dir.?[page][id % PAGE] = v;
+            self.len += 1; // publish last: a committed id's slot+page already exist
+            return id;
+        }
+    };
+}
+
 pub const Heap = struct {
     gpa: std.mem.Allocator,
     /// Object table; a null slot is free (reused via free_list). Object ids are
     /// stable across collection (non-moving GC).
-    objects: std.ArrayList(?HeapObj) = .empty,
-    marked: std.ArrayList(bool) = .empty,
+    objects: Pages(?HeapObj) = .{},
+    marked: Pages(bool) = .{},
     /// Generation: true = old (survived a minor collection).
-    old: std.ArrayList(bool) = .empty,
+    old: Pages(bool) = .{},
     /// Remembered set: old objects that may hold references to young objects
     /// (maintained by the write barrier). Parallel to `objects`.
-    remembered: std.ArrayList(bool) = .empty,
+    remembered: Pages(bool) = .{},
     free_list: std.ArrayList(u32) = .empty,
     /// String literal pool: interned literal content (2 bytes/char, LE) -> instance
     /// id. Roots for GC (marked always; remapped by the compacting major collector).
@@ -281,7 +331,7 @@ pub const Heap = struct {
     minors_per_major: usize = 8,
 
     pub fn deinit(self: *Heap) void {
-        for (self.objects.items) |maybe| if (maybe) |o| switch (o) {
+        for (0..self.objects.count()) |id| if (self.objects.get(id).*) |o| switch (o) {
             .instance => |x| self.gpa.free(x.fields),
             .array => |x| self.gpa.free(x.data),
             .string => |x| self.gpa.free(x.chars),
@@ -304,17 +354,17 @@ pub const Heap = struct {
         if (self.free_list.items.len > 0) {
             const id = self.free_list.items[self.free_list.items.len - 1];
             self.free_list.items.len -= 1;
-            self.objects.items[id] = obj;
-            self.marked.items[id] = false;
-            self.old.items[id] = false; // reused slot: new object is young
-            self.remembered.items[id] = false;
+            self.objects.get(id).* = obj;
+            self.marked.get(id).* = false;
+            self.old.get(id).* = false; // reused slot: new object is young
+            self.remembered.get(id).* = false;
             return id;
         }
-        try self.objects.append(self.gpa, obj);
-        try self.marked.append(self.gpa, false);
-        try self.old.append(self.gpa, false);
-        try self.remembered.append(self.gpa, false);
-        return @intCast(self.objects.items.len - 1);
+        const id = try self.objects.append(self.gpa, obj);
+        _ = try self.marked.append(self.gpa, false);
+        _ = try self.old.append(self.gpa, false);
+        _ = try self.remembered.append(self.gpa, false);
+        return @intCast(id);
     }
     pub fn allocInstance(self: *Heap, class: *const Class) !u32 {
         const fields = try self.gpa.alloc(Value, class.instance_fields.len);
@@ -340,10 +390,10 @@ pub const Heap = struct {
         return self.put(.{ .boxed = .{ .class = class, .value = value } });
     }
     pub fn get(self: *Heap, id: u32) *HeapObj {
-        return if (self.objects.items[id]) |*o| o else unreachable;
+        return if (self.objects.get(id).*) |*o| o else unreachable;
     }
     pub fn liveCount(self: *Heap) usize {
-        return self.objects.items.len - self.free_list.items.len;
+        return self.objects.count() - self.free_list.items.len;
     }
 };
 
@@ -356,8 +406,8 @@ fn markValue(heap: *Heap, v: Value) void {
     }
 }
 fn markObject(heap: *Heap, id: u32) void {
-    if (heap.marked.items[id]) return;
-    heap.marked.items[id] = true;
+    if (heap.marked.get(id).*) return;
+    heap.marked.get(id).* = true;
     switch (heap.get(id).*) {
         .instance => |x| for (x.fields) |v| markValue(heap, v),
         .array => |x| if (x.elem == .reference) for (x.data) |v| markValue(heap, v),
@@ -414,7 +464,7 @@ fn collectMajor(f: *Frame) void {
     // re-entry (nested exec) -- so iterating those covers all frame roots. This is
     // kept SYMMETRIC with remapRoots below: marking a frame that remap won't rewrite
     // (or vice versa) would leave stale ids after compaction.
-    for (heap.marked.items) |*m| m.* = false;
+    for (0..heap.marked.count()) |i| heap.marked.get(i).* = false;
     for (f.loader.scheduler.all.items) |fib| {
         for (fib.call_stack.items) |ff| {
             for (ff.stack[0..ff.sp]) |v| markValue(heap, v);
@@ -435,12 +485,12 @@ fn collectMajor(f: *Frame) void {
     for (f.loader.mirrors.items) |m| if (m) |id| markObject(heap, id);
 
     // 2. Assign new ids to live objects (compact order); free the dead.
-    const forwarding = heap.gpa.alloc(u32, heap.objects.items.len) catch return;
+    const forwarding = heap.gpa.alloc(u32, heap.objects.count()) catch return;
     defer heap.gpa.free(forwarding);
     var new_id: u32 = 0;
-    for (heap.objects.items, 0..) |maybe, old| {
-        if (maybe) |obj| {
-            if (heap.marked.items[old]) {
+    for (0..heap.objects.count()) |old| {
+        if (heap.objects.get(old).*) |obj| {
+            if (heap.marked.get(old).*) {
                 forwarding[old] = new_id;
                 new_id += 1;
             } else {
@@ -452,7 +502,7 @@ fn collectMajor(f: *Frame) void {
                     .builder => |x| heap.gpa.free(x.buf),
                     .boxed => {},
                 }
-                heap.objects.items[old] = null;
+                heap.objects.get(old).* = null;
             }
         }
     }
@@ -461,7 +511,7 @@ fn collectMajor(f: *Frame) void {
     // 3. Rewrite every reference to its object's new id (objects still at old
     //    positions; only dead slots are null).
     remapRoots(f, forwarding);
-    for (heap.objects.items) |*maybe| if (maybe.*) |*obj| remapObject(obj, forwarding);
+    for (0..heap.objects.count()) |i| if (heap.objects.get(i).*) |*obj| remapObject(obj, forwarding);
     if (f.budget.pending) |eid| f.budget.pending = forwarding[eid];
     {
         var it = heap.interned.valueIterator();
@@ -475,19 +525,19 @@ fn collectMajor(f: *Frame) void {
     };
 
     // 4. Move live objects (and their generation/remembered bits) to new slots.
-    for (heap.objects.items, 0..) |maybe, oid| {
-        if (maybe) |obj| {
+    for (0..heap.objects.count()) |oid| {
+        if (heap.objects.get(oid).*) |obj| {
             const nid = forwarding[oid];
-            heap.objects.items[nid] = obj;
-            heap.old.items[nid] = heap.old.items[oid];
-            heap.remembered.items[nid] = heap.remembered.items[oid];
+            heap.objects.get(nid).* = obj;
+            heap.old.get(nid).* = heap.old.get(oid).*;
+            heap.remembered.get(nid).* = heap.remembered.get(oid).*;
         }
     }
-    heap.objects.items.len = live;
-    heap.marked.items.len = live;
-    heap.old.items.len = live;
-    heap.remembered.items.len = live;
-    heap.free_list.items.len = 0;
+    heap.objects.setLen(live);
+    heap.marked.setLen(live);
+    heap.old.setLen(live);
+    heap.remembered.setLen(live);
+    heap.free_list.clearRetainingCapacity();
 }
 
 // --- Generational minor collection (non-moving mark-sweep of the young gen) ---
@@ -499,9 +549,9 @@ fn markYoungValue(heap: *Heap, v: Value) void {
     }
 }
 fn markYoungObject(heap: *Heap, id: u32) void {
-    if (heap.old.items[id]) return; // old objects are not collected by a minor GC
-    if (heap.marked.items[id]) return;
-    heap.marked.items[id] = true;
+    if (heap.old.get(id).*) return; // old objects are not collected by a minor GC
+    if (heap.marked.get(id).*) return;
+    heap.marked.get(id).* = true;
     switch (heap.get(id).*) {
         .instance => |x| for (x.fields) |v| markYoungValue(heap, v),
         .array => |x| if (x.elem == .reference) for (x.data) |v| markYoungValue(heap, v),
@@ -518,7 +568,7 @@ fn markYoungObject(heap: *Heap, id: u32) void {
 /// afterward, so the remembered set is cleared.
 fn collectMinor(f: *Frame) void {
     const heap = f.heap orelse return;
-    for (heap.marked.items) |*m| m.* = false;
+    for (0..heap.marked.count()) |i| heap.marked.get(i).* = false;
     for (f.loader.scheduler.all.items) |fib| {
         for (fib.call_stack.items) |ff| {
             for (ff.stack[0..ff.sp]) |v| markYoungValue(heap, v);
@@ -538,9 +588,9 @@ fn collectMinor(f: *Frame) void {
     }
     for (f.loader.mirrors.items) |m| if (m) |mid| markYoungObject(heap, mid);
     var id: u32 = 0;
-    while (id < heap.objects.items.len) : (id += 1) {
-        if (heap.remembered.items[id]) {
-            if (heap.objects.items[id]) |obj| switch (obj) {
+    while (id < heap.objects.count()) : (id += 1) {
+        if (heap.remembered.get(id).*) {
+            if (heap.objects.get(id).*) |obj| switch (obj) {
                 .instance => |x| for (x.fields) |v| markYoungValue(heap, v),
                 .array => |x| if (x.elem == .reference) for (x.data) |v| markYoungValue(heap, v),
                 .string => {},
@@ -551,11 +601,11 @@ fn collectMinor(f: *Frame) void {
         }
     }
     id = 0;
-    while (id < heap.objects.items.len) : (id += 1) {
-        if (heap.objects.items[id]) |obj| {
-            if (!heap.old.items[id]) {
-                if (heap.marked.items[id]) {
-                    heap.old.items[id] = true; // promote survivor
+    while (id < heap.objects.count()) : (id += 1) {
+        if (heap.objects.get(id).*) |obj| {
+            if (!heap.old.get(id).*) {
+                if (heap.marked.get(id).*) {
+                    heap.old.get(id).* = true; // promote survivor
                 } else {
                     switch (obj) {
                         .instance => |x| heap.gpa.free(x.fields),
@@ -565,13 +615,13 @@ fn collectMinor(f: *Frame) void {
                         .builder => |x| heap.gpa.free(x.buf),
                         .boxed => {},
                     }
-                    heap.objects.items[id] = null;
+                    heap.objects.get(id).* = null;
                     heap.free_list.append(heap.gpa, id) catch {};
                 }
             }
         }
     }
-    for (heap.remembered.items) |*r| r.* = false;
+    for (0..heap.remembered.count()) |i| heap.remembered.get(i).* = false;
 }
 
 /// Throw a fresh built-in exception object of class `name`, searching the current
@@ -604,7 +654,7 @@ fn mapTrap(f: *Frame, class: ?*const Class, exceptions: []const attribute_decode
 fn writeBarrier(heap: *Heap, target_id: u32, v: Value) void {
     switch (v) {
         .reference => |r| if (r) |vid| {
-            if (heap.old.items[target_id] and !heap.old.items[vid]) heap.remembered.items[target_id] = true;
+            if (heap.old.get(target_id).* and !heap.old.get(vid).*) heap.remembered.get(target_id).* = true;
         },
         else => {},
     }
@@ -6037,7 +6087,7 @@ test "GC: garbage is reclaimed, reachable objects survive" {
         const r = try runInLoaderWithHeap(&loader, &gct, "allocLoop", "(I)I", &.{.{ .int = 1000 }}, &b, &heap);
         try testing.expectEqual(Value{ .int = 1000000 }, r.?);
         // 1000 objects allocated, but GC kept the table small.
-        try testing.expect(heap.objects.items.len < 64);
+        try testing.expect(heap.objects.count() < 64);
     }
 
     // arraySum(500): all 500 Points are reachable via the array; GC must keep

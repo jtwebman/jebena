@@ -26,13 +26,29 @@ EXP=$("$JAVA" -cp "$OUT" Driver st.AllocStress demo 2>/dev/null)
 JBASE=$(find "$ROOT/jbase/out" -name '*.class' | tr '\n' ' ')
 APP=$(ls "$OUT"/st/*.class | tr '\n' ' ')
 fail=0
+# 1 carrier: moving GC forced at several intervals.
 for interval in 200 500 2000; do
   for rep in 1 2 3; do
     ALL=$(timeout 40 bash -c "JEBENA_GC_INTERVAL=$interval JEBENA_CARRIERS=1 '$JEBENA' run st/AllocStress demo $APP $JBASE" 2>&1)
-    [ $? -eq 124 ] && { echo "alloc-gc-stress: FAIL interval=$interval rep=$rep HANG (timeout)"; fail=1; }
+    [ $? -eq 124 ] && { echo "alloc-gc-stress: FAIL c=1 interval=$interval rep=$rep HANG (timeout)"; fail=1; }
     GOT=$(printf '%s\n' "$ALL" | sed -n 's/.*demo() = \(-\?[0-9]*\).*/\1/p')
-    [ "$GOT" = "$EXP" ] || { echo "alloc-gc-stress: FAIL interval=$interval rep=$rep jebena=$GOT java=$EXP"; fail=1; }
+    [ "$GOT" = "$EXP" ] || { echo "alloc-gc-stress: FAIL c=1 interval=$interval rep=$rep jebena=$GOT java=$EXP"; fail=1; }
+  done
+done
+# 4 REAL carriers: concurrent allocation, and concurrent moving GC. This is the
+# hard case -- lockless get() on the paged object table while other carriers
+# allocate + a stop-the-world collector compacts. 8 reps each, must be exact AND
+# genuinely parallel (>=2 carriers ran).
+for interval in 0 1000 300; do
+  env="JEBENA_CARRIERS=4"; [ "$interval" != 0 ] && env="JEBENA_GC_INTERVAL=$interval $env"
+  for rep in $(seq 1 8); do
+    ALL=$(timeout 40 bash -c "JEBENA_CARRIER_TRACE=1 $env '$JEBENA' run st/AllocStress demo $APP $JBASE" 2>&1)
+    [ $? -eq 124 ] && { echo "alloc-gc-stress: FAIL c=4 interval=$interval rep=$rep HANG (timeout)"; fail=1; }
+    GOT=$(printf '%s\n' "$ALL" | sed -n 's/.*demo() = \(-\?[0-9]*\).*/\1/p')
+    RAN=$(printf '%s\n' "$ALL" | sed -n 's/.*carriers-ran=\([0-9]*\).*/\1/p')
+    [ "$GOT" = "$EXP" ] || { echo "alloc-gc-stress: FAIL c=4 interval=$interval rep=$rep jebena=$GOT java=$EXP"; fail=1; }
+    [ "${RAN:-0}" -ge 2 ] || { echo "alloc-gc-stress: FAIL c=4 interval=$interval rep=$rep not parallel (ran=${RAN:-0})"; fail=1; }
   done
 done
 [ "$fail" = 0 ] || exit 1
-echo "alloc-gc-stress: OK — 8 fibers x2000 allocs, moving GC forced (intervals 200/500/2000) = $EXP, matches real java"
+echo "alloc-gc-stress: OK — 8 fibers x2000 allocs = $EXP; single-carrier moving GC + 4 REAL carriers concurrent alloc & concurrent moving GC, matches real java"

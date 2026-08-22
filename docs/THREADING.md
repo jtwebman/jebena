@@ -218,18 +218,27 @@ With these, **single-carrier moving GC under heavy allocation is solid**
 (`scripts/alloc-gc-stress.sh`: 8 fibers × 2000 allocs, GC forced every 200–2000
 allocs, exact match to real java, in the gate).
 
-**BUT concurrent allocation at `JEBENA_CARRIERS>1` is still unsafe — this is the
-top blocker, GC aside.** `heap.get(id)` reads `heap.objects.items` locklessly on
-the hot path, while `put()` grows that ArrayList under `alloc_lock`; when a `put`
-reallocs the backing array, a concurrent `get` reads a freed/torn slice →
-segfault. So the current opt-in parallelism is only safe for **non-allocating**
-parallel hot paths (e.g. the atomics in `thread-stress.sh`); any program that
-allocates on multiple carriers can crash. Fix (next): a concurrent-safe object
-table — reserve stable storage so the backing array never moves (paged/segmented
-table, or reserved capacity) so committed ids can be read locklessly, then revisit
-concurrent GC (the coordination above is ready and correct once allocation is safe).
-Per-carrier `budget.pending` is also not rooted/remapped across carriers (only the
-collector's); harmless today because the stress paths throw no exceptions.
+### SOLVED (2026-08-21, iter 70): concurrent allocation + concurrent moving GC across real carriers
+
+The object table was migrated from `std.ArrayList` to a **paged table** (`Pages(T)`):
+a fixed-capacity directory of fixed-size (4096-slot) pages. Page slices never move
+once allocated, so `get(id)` for any committed id is a **lockless read with no
+torn-realloc** -- `put()` appends under `alloc_lock` and allocates a new page only
+when crossing a page boundary; the directory and existing pages are never
+reallocated. `objects`, `marked`, `old`, and `remembered` all use it; GC (at a
+safepoint, exclusive) iterates/compacts/shrinks by index.
+
+With the paged table plus the iter-69 GC coordination fixes, **concurrent
+allocation AND concurrent moving GC now work across real carriers.**
+`scripts/alloc-gc-stress.sh` runs AllocStress (8 fibers x 2000 array allocations)
+at `JEBENA_CARRIERS=4` with no forced GC, with GC every 1000 allocs, and with
+aggressive GC every 300 allocs -- exact `257792000` every time, all 4 carriers
+ran, no crash/hang, 30+ reps, timeout-guarded, zero new leaks. Opt-in parallelism
+is now safe for **allocating** workloads too, not just atomics.
+
+Remaining N>1 gaps (smaller): per-carrier `budget.pending` isn't rooted/remapped
+across carriers (only the collector's) -- harmless today (stress paths throw no
+exceptions); plus the items in the list below.
 
 **Known limitations (opt-in path only; default single carrier unaffected) —
 harden next:**
