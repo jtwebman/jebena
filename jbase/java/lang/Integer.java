@@ -132,4 +132,78 @@ public final class Integer extends Number implements Comparable<Integer> {
     public static String toBinaryString(int i) {
         return toUnsignedString(i, 1);
     }
+
+    public static int bitCount(int i) {
+        i = i - ((i >>> 1) & 0x55555555);
+        i = (i & 0x33333333) + ((i >>> 2) & 0x33333333);
+        i = (i + (i >>> 4)) & 0x0f0f0f0f;
+        i = i + (i >>> 8);
+        i = i + (i >>> 16);
+        return i & 0x3f;
+    }
+
+    public static int numberOfLeadingZeros(int i) {
+        if (i <= 0) {
+            return i == 0 ? 32 : 0;
+        }
+        int n = 31;
+        if (i >= 1 << 16) {
+            n -= 16;
+            i >>>= 16;
+        }
+        if (i >= 1 << 8) {
+            n -= 8;
+            i >>>= 8;
+        }
+        if (i >= 1 << 4) {
+            n -= 4;
+            i >>>= 4;
+        }
+        if (i >= 1 << 2) {
+            n -= 2;
+            i >>>= 2;
+        }
+        return n - (i >>> 1);
+    }
+
+    public static int numberOfTrailingZeros(int i) {
+        i = ~i & (i - 1);
+        if (i <= 0) {
+            return i & 32;
+        }
+        int n = 1;
+        if (i > 1 << 16) {
+            n += 16;
+            i >>>= 16;
+        }
+        if (i > 1 << 8) {
+            n += 8;
+            i >>>= 8;
+        }
+        if (i > 1 << 4) {
+            n += 4;
+            i >>>= 4;
+        }
+        if (i > 1 << 2) {
+            n += 2;
+            i >>>= 2;
+        }
+        return n + (i >>> 1);
+    }
+
+    public static int highestOneBit(int i) {
+        return i & (0x80000000 >>> numberOfLeadingZeros(i));
+    }
+
+    public static int lowestOneBit(int i) {
+        return i & -i;
+    }
+
+    public static int reverse(int i) {
+        i = (i & 0x55555555) << 1 | (i >>> 1) & 0x55555555;
+        i = (i & 0x33333333) << 2 | (i >>> 2) & 0x33333333;
+        i = (i & 0x0f0f0f0f) << 4 | (i >>> 4) & 0x0f0f0f0f;
+        i = (i << 24) | ((i & 0xff00) << 8) | ((i >>> 8) & 0xff00) | (i >>> 24);
+        return i;
+    }
 }

@@ -120,6 +120,30 @@ public final class StringBuilder implements CharSequence {
         return this;
     }
 
+    public StringBuilder delete(int start, int end) {
+        if (end > count) {
+            end = count;
+        }
+        if (start < 0 || start > count || start > end) {
+            throw new StringIndexOutOfBoundsException();
+        }
+        int len = end - start;
+        if (len > 0) {
+            for (int i = end; i < count; i++) {
+                value[i - len] = value[i];
+            }
+            count -= len;
+        }
+        return this;
+    }
+
+    public void setCharAt(int index, char ch) {
+        if (index < 0 || index >= count) {
+            throw new StringIndexOutOfBoundsException();
+        }
+        value[index] = ch;
+    }
+
     public StringBuilder insert(int offset, String str) {
         if (offset < 0 || offset > count) {
             throw new StringIndexOutOfBoundsException();
