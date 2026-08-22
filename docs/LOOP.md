@@ -12,6 +12,8 @@ Each iteration is one small, verified, committed step. Never leave the tree red.
    - `zig build test` (via ~/.local/zig-x86_64-linux-0.16.0/zig) — all unit tests green
    - `bash scripts/differential.sh` — byte-identical to the JDK21 oracle (SE-conformant)
    - `bash scripts/jbase-smoke.sh` + `bash scripts/output-smoke.sh` — our own clean-room java.base bytecode runs correctly
+   - `bash scripts/classpath-smoke.sh` — lazy directory classpath loading matches real java
+   - `bash scripts/portability-check.sh` — VM cross-compiles for macOS/Linux (aarch64/x86_64)
    - `zig fmt --check src/ build.zig` — formatted
    If anything fails: fix it, or revert the change. Do not commit red.
 5. Commit with a clear message (end with the Claude-Session line). Push if a

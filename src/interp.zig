@@ -617,6 +617,15 @@ pub const Loader = struct {
     /// Portable IO handle for OS-boundary natives (System.out write, clocks).
     /// Null under unit tests, which never call those natives.
     io: ?std.Io = null,
+    /// Classpath directories searched (in order) to lazily load a class by name
+    /// on first resolution. Empty under unit tests and eager-file runs.
+    classpath: std.ArrayList([]const u8) = .empty,
+    /// Arena for Class structs built lazily from the classpath. Set by the CLI
+    /// to the same arena that owns eagerly-built classes; null disables lazy load.
+    class_arena: ?std.mem.Allocator = null,
+    /// ClassFiles parsed on demand from the classpath; owned here so their
+    /// constant pools outlive the Classes that reference them.
+    owned_cfs: std.ArrayList(*ClassFile) = .empty,
 
     pub fn init(gpa: std.mem.Allocator) Loader {
         return .{ .gpa = gpa };
@@ -627,6 +636,43 @@ pub const Loader = struct {
         self.classes.deinit(self.gpa);
         self.initialized.deinit(self.gpa);
         self.mirrors.deinit(self.gpa);
+        for (self.owned_cfs.items) |cf| {
+            cf.deinit();
+            self.gpa.destroy(cf);
+        }
+        self.owned_cfs.deinit(self.gpa);
+        self.classpath.deinit(self.gpa);
+    }
+
+    /// Lazily load a class by internal name from the classpath directories,
+    /// parsing + building + registering it (and its superclass) on demand.
+    /// Returns null if not found on the classpath; errors on parse/link failure.
+    pub fn loadFromClasspath(self: *Loader, name: []const u8) RunError!?*const Class {
+        const io = self.io orelse return null;
+        const arena = self.class_arena orelse return null;
+        if (self.classpath.items.len == 0) return null;
+        for (self.classpath.items) |dir| {
+            const rel = std.fmt.allocPrint(self.gpa, "{s}/{s}.class", .{ dir, name }) catch return error.OutOfMemory;
+            defer self.gpa.free(rel);
+            const bytes = std.Io.Dir.cwd().readFileAlloc(io, rel, self.gpa, .unlimited) catch continue;
+            defer self.gpa.free(bytes);
+            const cf = self.gpa.create(ClassFile) catch return error.OutOfMemory;
+            cf.* = ClassFile.parse(self.gpa, bytes) catch {
+                self.gpa.destroy(cf);
+                continue;
+            };
+            self.owned_cfs.append(self.gpa, cf) catch return error.OutOfMemory;
+            const super_name: ?[]const u8 = if (cf.super_class != 0) (cf.constant_pool.classNameOf(cf.super_class) catch null) else null;
+            const super: ?*const Class = if (super_name) |sn|
+                (self.find(sn) orelse (try self.loadFromClasspath(sn)) orelse return error.LinkError)
+            else
+                null;
+            const c = arena.create(Class) catch return error.OutOfMemory;
+            c.* = Class.init(self.gpa, arena, cf, super) catch return error.LinkError;
+            self.register(c) catch return error.OutOfMemory;
+            return c;
+        }
+        return null;
     }
     pub fn register(self: *Loader, class: *const Class) !void {
         const st = try self.gpa.alloc(Value, class.static_fields.len);
@@ -1265,7 +1311,8 @@ fn fieldRef(cls: *const Class, cp_index: u16) RunError!FieldRefInfo {
 
 fn resolveClass(f: *Frame, current: *const Class, name: []const u8) RunError!*const Class {
     if (std.mem.eql(u8, name, current.name)) return current;
-    return f.loader.find(name) orelse error.LinkError;
+    if (f.loader.find(name)) |c| return c;
+    return (try f.loader.loadFromClasspath(name)) orelse error.LinkError;
 }
 
 fn layoutArgs(m: *const Class.Method, args: []const Value, out: []Value) RunError!usize {

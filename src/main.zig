@@ -64,10 +64,21 @@ fn cmdRun(gpa: std.mem.Allocator, io: std.Io, it: *std.process.Args.Iterator) !v
     const main_class = it.next() orelse return usage();
     const method = it.next() orelse return usage();
 
+    // Trailing args are either explicit .class files (parsed eagerly, as before)
+    // or classpath directories (searched lazily to load classes by name on first
+    // use). This keeps the file-list form working while unblocking large apps.
     var files: std.ArrayList([]const u8) = .empty;
     defer files.deinit(gpa);
-    while (it.next()) |pth| try files.append(gpa, pth);
-    if (files.items.len == 0) return usage();
+    var cpdirs: std.ArrayList([]const u8) = .empty;
+    defer cpdirs.deinit(gpa);
+    while (it.next()) |pth| {
+        if (std.mem.endsWith(u8, pth, ".class")) {
+            try files.append(gpa, pth);
+        } else {
+            try cpdirs.append(gpa, pth); // directory classpath entry
+        }
+    }
+    if (files.items.len == 0 and cpdirs.items.len == 0) return usage();
 
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
@@ -75,6 +86,8 @@ fn cmdRun(gpa: std.mem.Allocator, io: std.Io, it: *std.process.Args.Iterator) !v
 
     var loader = IC.Loader.init(gpa);
     loader.io = io; // portable IO handle for System.out / clocks
+    loader.class_arena = a; // arena for lazily-built Classes
+    try loader.classpath.appendSlice(gpa, cpdirs.items);
     defer loader.deinit();
 
     // Parse the provided class files first. Any class supplied as real bytecode
@@ -172,8 +185,9 @@ fn cmdRun(gpa: std.mem.Allocator, io: std.Io, it: *std.process.Args.Iterator) !v
         }
     }
 
-    // Resolve and run the entry method.
-    const cls = loader.find(main_class) orelse {
+    // Resolve and run the entry method (lazy-loading the main class from the
+    // classpath if it was not supplied as an explicit .class file).
+    const cls = loader.find(main_class) orelse (try loader.loadFromClasspath(main_class)) orelse {
         std.debug.print("class not found: {s}\n", .{main_class});
         return error.ClassNotFound;
     };
