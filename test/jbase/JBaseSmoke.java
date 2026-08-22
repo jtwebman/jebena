@@ -401,6 +401,29 @@ public class JBaseSmoke {
         }
         r += tssum;
 
+        // === Dynamic proxy: InvocationHandler routes interface calls ===
+        java.lang.reflect.InvocationHandler handler = (proxy, method, args) -> {
+            if (method.getName().equals("add")) {
+                return (Integer) args[0] + (Integer) args[1];
+            }
+            if (method.getName().equals("name")) {
+                return "proxy-calc";
+            }
+            return null;
+        };
+        Calculator calc = (Calculator) java.lang.reflect.Proxy.newProxyInstance(
+                Calculator.class.getClassLoader(), new Class[] { Calculator.class }, handler);
+        r += calc.add(20, 22);        // 42 via handler
+        r += calc.name().length();    // "proxy-calc" -> 10
+
+        // === Atomics ===
+        java.util.concurrent.atomic.AtomicInteger ai = new java.util.concurrent.atomic.AtomicInteger(10);
+        r += ai.incrementAndGet();    // 11
+        r += ai.getAndAdd(5);         // returns 11, value -> 16
+        r += ai.get();                // 16
+        java.util.concurrent.atomic.AtomicLong al = new java.util.concurrent.atomic.AtomicLong(100L);
+        r += (int) al.addAndGet(23L); // 123
+
         // === Annotations: presence via RuntimeVisibleAnnotations decode ===
         Annotated anx = new Annotated();
         Class<?> ac = anx.getClass();

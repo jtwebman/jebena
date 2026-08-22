@@ -735,6 +735,8 @@ pub const Class = struct {
     is_stub: bool = false,
     /// Internal names of the class's RuntimeVisibleAnnotations (e.g. "jebena/MyAnno").
     annotations: []const []const u8 = &.{},
+    /// True for a runtime-built java.lang.reflect.Proxy class (dispatch to handler).
+    is_proxy: bool = false,
 
     pub const Field = struct { name: []const u8, kind: Kind };
     pub const Param = struct { kind: Kind, slot: u16 };
@@ -1134,6 +1136,7 @@ fn invokeInstance(f: *Frame, cls: *const Class, code: []const u8, is_special: bo
         .string => |x| x.class,
         else => return error.LinkError,
     };
+    if (rclass.is_proxy) return proxyDispatch(f, oid, cname, mname, mdesc, slots, pl.params);
     const tr = rclass.resolve(mname, mdesc) orelse return error.MethodNotFound;
     const target = tr.method;
     const owner = tr.owner;
@@ -2690,6 +2693,136 @@ fn reflectNewInstance(f: *Frame, ctor_mirror: u32, slots: []const Value) RunErro
     _ = try exec(owner.gpa, owner, f.heap, f.loader, f.budget, cc.code, cc.max_stack, cc.max_locals, islots, cc.exception_table, f);
     return f.push(.{ .reference = id });
 }
+fn kindFromDescChar(rc: u8) Kind {
+    return switch (rc) {
+        'J' => .long,
+        'D' => .double,
+        'F' => .float,
+        else => .int,
+    };
+}
+fn boxArg(f: *Frame, val: Value, kind: Kind) RunError!Value {
+    if (kind == .reference) return val;
+    const rc: u8 = switch (kind) {
+        .long => 'J',
+        .double => 'D',
+        .float => 'F',
+        else => 'I',
+    };
+    return .{ .reference = try boxValueForDesc(f, rc, val) };
+}
+fn makeProxyClass(f: *Frame, iface_names: [][]const u8) RunError!*const Class {
+    const gpa = f.loader.gpa;
+    const obj = f.loader.find("java/lang/Object") orelse return error.LinkError;
+    const methods = gpa.alloc(Class.Method, 1) catch return error.OutOfMemory;
+    methods[0] = .{
+        .name = "<init>",
+        .descriptor = "()V",
+        .code = .{ .max_stack = 0, .max_locals = 1, .code = &stub_return_code, .exception_table = &.{}, .attributes = &.{} },
+        .is_native = false,
+        .params = &.{},
+        .arg_slots = 1,
+        .ret = null,
+        .is_static = false,
+    };
+    const fields = gpa.alloc(Class.Field, 1) catch return error.OutOfMemory;
+    fields[0] = .{ .name = "h", .kind = .reference };
+    const name = std.fmt.allocPrint(gpa, "$Proxy{d}", .{f.loader.classes.items.len}) catch return error.OutOfMemory;
+    const pc = gpa.create(Class) catch return error.OutOfMemory;
+    pc.* = Class{
+        .gpa = gpa,
+        .cp = .{ .entries = &stub_cp_entries },
+        .name = name,
+        .super = obj,
+        .super_name = "java/lang/Object",
+        .interfaces = iface_names,
+        .methods = methods,
+        .instance_fields = fields,
+        .static_fields = &.{},
+        .bootstrap_methods = &.{},
+        .is_stub = false,
+        .is_proxy = true,
+    };
+    f.loader.register(pc) catch return error.OutOfMemory;
+    return pc;
+}
+fn invokeHandler(f: *Frame, handler_id: u32, proxy_val: Value, method_val: Value, args_val: Value) RunError!Value {
+    const heap = f.heap orelse return error.UnsupportedOpcode;
+    switch (heap.get(handler_id).*) {
+        .lambda => |lam| {
+            const ss = [_]Value{ proxy_val, method_val, args_val };
+            const pp = [_]Class.Param{
+                .{ .kind = .reference, .slot = 0 },
+                .{ .kind = .reference, .slot = 1 },
+                .{ .kind = .reference, .slot = 2 },
+            };
+            try dispatchLambda(f, lam, &ss, &pp);
+            return f.pop();
+        },
+        .instance => |inst| {
+            const tr = inst.class.resolve("invoke", "(Ljava/lang/Object;Ljava/lang/reflect/Method;[Ljava/lang/Object;)Ljava/lang/Object;") orelse return error.MethodNotFound;
+            try runImplInstance(f, tr.owner, tr.method, handler_id, &[_]Value{ proxy_val, method_val, args_val });
+            return f.pop();
+        },
+        else => return error.LinkError,
+    }
+}
+fn proxyDispatch(f: *Frame, proxy_id: u32, iface_name: []const u8, mname: []const u8, mdesc: []const u8, slots: []const Value, params: []const Class.Param) RunError!void {
+    const heap = f.heap orelse return error.UnsupportedOpcode;
+    const pinst = switch (heap.get(proxy_id).*) {
+        .instance => |x| x,
+        else => return error.LinkError,
+    };
+    // handler first (before any allocation)
+    const hi = pinst.class.findField("h") orelse return error.LinkError;
+    const handler_id = switch (pinst.fields[hi]) {
+        .reference => |r| r orelse return error.NullPointer,
+        else => return error.TypeMismatch,
+    };
+    // locate declaring interface + method index
+    var decl: ?*const Class = null;
+    var method_idx: usize = 0;
+    if (f.loader.find(iface_name)) |ic| {
+        for (ic.methods, 0..) |m, i| {
+            if (eq2(m.name, m.descriptor, mname, mdesc)) {
+                decl = ic;
+                method_idx = i;
+                break;
+            }
+        }
+    }
+    if (decl == null) {
+        for (pinst.class.interfaces) |ifn| {
+            if (f.loader.find(ifn)) |ic| {
+                for (ic.methods, 0..) |m, i| {
+                    if (eq2(m.name, m.descriptor, mname, mdesc)) {
+                        decl = ic;
+                        method_idx = i;
+                        break;
+                    }
+                }
+            }
+            if (decl != null) break;
+        }
+    }
+    const dc = decl orelse return error.MethodNotFound;
+    const class_idx = f.loader.indexOf(dc) orelse return error.LinkError;
+    const method_mirror = try memberMirror(f, "java/lang/reflect/Method", class_idx, method_idx);
+    // box args into Object[]
+    const args_id = try heap.allocArray(.reference, params.len);
+    const boxed = f.loader.gpa.alloc(Value, params.len) catch return error.OutOfMemory;
+    defer f.loader.gpa.free(boxed);
+    for (params, 0..) |p, i| boxed[i] = try boxArg(f, slots[p.slot], p.kind);
+    const aa = try arrayOf(f, args_id);
+    for (boxed, 0..) |bv, i| aa.data[i] = bv;
+    // dispatch to handler
+    const result = try invokeHandler(f, handler_id, .{ .reference = proxy_id }, .{ .reference = method_mirror }, .{ .reference = args_id });
+    // unbox / return per the interface method's return type
+    const rc = returnDescChar(mdesc);
+    if (rc == 'V') return;
+    if (rc == 'L' or rc == '[') return f.push(result);
+    return f.pushKind(try convertArgToValue(f, result, kindFromDescChar(rc)));
+}
 fn nativeInvoke(f: *Frame, owner: *const Class, method: *const Class.Method, slots: []const Value) RunError!void {
     const on = owner.name;
     const mn = method.name;
@@ -2781,6 +2914,36 @@ fn nativeInvoke(f: *Frame, owner: *const Class, method: *const Class.Method, slo
             return;
         }
     }
+    if (std.mem.eql(u8, on, "java/lang/reflect/Proxy")) {
+        if (eq2(mn, md, "newProxyInstance", "(Ljava/lang/ClassLoader;[Ljava/lang/Class;Ljava/lang/reflect/InvocationHandler;)Ljava/lang/Object;")) {
+            const heap = f.heap orelse return error.UnsupportedOpcode;
+            const ifaces_id = switch (slots[method.params[1].slot]) {
+                .reference => |r| r orelse return error.NullPointer,
+                else => return error.TypeMismatch,
+            };
+            const handler_id = switch (slots[method.params[2].slot]) {
+                .reference => |r| r orelse return error.NullPointer,
+                else => return error.TypeMismatch,
+            };
+            const iarr = try arrayOf(f, ifaces_id);
+            const names = f.loader.gpa.alloc([]const u8, iarr.data.len) catch return error.OutOfMemory;
+            for (iarr.data, 0..) |cv, i| {
+                const mref = switch (cv) {
+                    .reference => |r| r orelse return error.NullPointer,
+                    else => return error.TypeMismatch,
+                };
+                names[i] = (try mirrorClass(f, mref)).name;
+            }
+            const pc = try makeProxyClass(f, names);
+            const id = try heap.allocInstance(pc);
+            const hfi = pc.findField("h") orelse return error.LinkError;
+            switch (heap.get(id).*) {
+                .instance => |*inst| inst.fields[hfi] = .{ .reference = handler_id },
+                else => return error.LinkError,
+            }
+            return f.push(.{ .reference = id });
+        }
+    }
     if (std.mem.eql(u8, on, "java/lang/Class")) {
         const recv = switch (slots[0]) {
             .reference => |r| r orelse return error.NullPointer,
@@ -2792,6 +2955,7 @@ fn nativeInvoke(f: *Frame, owner: *const Class, method: *const Class.Method, slo
         if (eq2(mn, md, "getDeclaredMethods", "()[Ljava/lang/reflect/Method;")) return reflectGetMembers(f, recv, .methods);
         if (eq2(mn, md, "getDeclaredFields", "()[Ljava/lang/reflect/Field;")) return reflectGetMembers(f, recv, .fields);
         if (eq2(mn, md, "getDeclaredConstructors", "()[Ljava/lang/reflect/Constructor;")) return reflectGetMembers(f, recv, .ctors);
+        if (eq2(mn, md, "getClassLoader", "()Ljava/lang/ClassLoader;")) return f.push(.{ .reference = null });
         if (eq2(mn, md, "isAnnotationPresent", "(Ljava/lang/Class;)Z")) {
             const arg = switch (slots[method.params[0].slot]) {
                 .reference => |r| r orelse return error.NullPointer,

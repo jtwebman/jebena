@@ -22,6 +22,8 @@ public final class Class {
 
     public native boolean isAnnotationPresent(Class annotationClass);
 
+    public native ClassLoader getClassLoader();
+
     public String toString() {
         return "class " + getName();
     }
