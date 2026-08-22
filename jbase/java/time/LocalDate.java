@@ -92,6 +92,18 @@ public final class LocalDate implements Comparable<LocalDate> {
         return lengthOfMonth(year, month);
     }
 
+    public int getDayOfYear() {
+        int doy = day;
+        for (int m = 1; m < month; m++) {
+            doy += lengthOfMonth(year, m);
+        }
+        return doy;
+    }
+
+    public int lengthOfYear() {
+        return isLeapYear() ? 366 : 365;
+    }
+
     private static int lengthOfMonth(int year, int month) {
         switch (month) {
             case 2:

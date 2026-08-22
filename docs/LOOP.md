@@ -31,6 +31,7 @@ Each iteration is one small, verified, committed step. Never leave the tree red.
    - `bash scripts/router-stress.sh` — multi-endpoint HTTP service (/ping + PG-backed /db + 404), carriers 1 & 4 +GC; live /db when JEBENA_PGTEST is set
    - `bash scripts/executor-stress.sh` — java.util.concurrent thread pool (Executors/ThreadPoolExecutor/Future), 100 tasks summed via get(), carriers 1 & 4 +GC
    - `bash scripts/inject-err-stress.sh` — fiber-error isolation: one worker's uncaught error terminates only that fiber (no carrier death / GC deadlock), total=35, carriers 1 & 4 +GC
+   - `bash scripts/breadth-diff.sh` — java.* breadth differential (java.time LocalDate/LocalTime/Duration arithmetic, TreeMap/LinkedHashMap ordered iteration, Collections + Arrays helpers) checked byte-for-byte vs real java, exercising clean-room jbase bytecode via EAGER classpath
    - `bash scripts/portability-check.sh` — VM cross-compiles for macOS/Linux (aarch64/x86_64)
    - `zig fmt --check src/ build.zig` — formatted
    If anything fails: fix it, or revert the change. Do not commit red.

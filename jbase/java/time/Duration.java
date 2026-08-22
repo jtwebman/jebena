@@ -94,6 +94,26 @@ public final class Duration implements Comparable<Duration> {
         return plusSeconds(-secondsToSubtract);
     }
 
+    public Duration plusMinutes(long minutesToAdd) {
+        return plusSeconds(minutesToAdd * 60L);
+    }
+
+    public Duration plusHours(long hoursToAdd) {
+        return plusSeconds(hoursToAdd * 3600L);
+    }
+
+    public Duration plusDays(long daysToAdd) {
+        return plusSeconds(daysToAdd * 86400L);
+    }
+
+    public Duration minusMinutes(long minutesToSubtract) {
+        return plusSeconds(-minutesToSubtract * 60L);
+    }
+
+    public Duration minusHours(long hoursToSubtract) {
+        return plusSeconds(-hoursToSubtract * 3600L);
+    }
+
     public Duration plus(Duration other) {
         return plus(other.seconds, other.nanos);
     }
