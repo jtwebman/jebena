@@ -454,9 +454,29 @@ concurrently (HTTP client + HTTP server + PG backend), so it needs carriers >= 3
 bytecode, serves an HTTP request by querying Postgres over hand-written wire
 protocols on portable std.Io sockets.**
 
-Next: richer queries (WHERE / multiple rows / typed columns); the big remaining
-item is lifting the blocking-I/O carrier limit via poll/epoll fiber-yield so
-blocking socket ops PARK the fiber (like join/monitor/wait) and work at carriers=1.
+Step 5 (2026-08-22): richer SQL result sets (RichSql.java — multiple rows, multiple
+typed text columns via a general query()), validated against a mock and live
+Postgres (generate_series). This surfaced + fixed a latent GC bug in the step-1
+socket natives (see below).
+
+### FIX (2026-08-22): socket read/write cached a heap id across a remapping GC
+
+read0/write0 stashed the target byte[]'s object id in a Zig local across
+`enterBlockingSyscall`. But the compacting major GC REMAPS object ids, and while a
+carrier is blocked in a socket syscall another carrier can run that GC — so the
+cached id went stale and the post-read copy wrote into the wrong array
+(index-out-of-bounds panic, ~27% under aggressive GC in heavy-read code; the light
+net/http/pg/dbapi loopback tests passed under GC only by luck). Fix mirrors the
+parking machinery: a new `Fiber.io_buf` holds the byte[] id, is a GC root (marked
+in the major + young mark, remapped in the major compaction alongside
+waiting_on/park_monitor), and read0/write0 re-read the remapped id from it after
+the blocking call. Validated 50/50 clean at carriers=4 with GC forced every 120
+allocations. (This is the socket-I/O analogue of why blocking must either park the
+fiber or keep its heap refs as GC roots — a raw id in a Zig local is not a root.)
+
+Next: the big remaining item is lifting the blocking-I/O carrier limit via
+poll/epoll fiber-yield so blocking socket ops PARK the fiber (like
+join/monitor/wait) and work at carriers=1.
 
 ## Policy (2026-08-21, from the user): thread-safety is now non-negotiable
 

@@ -557,6 +557,7 @@ fn collectMajor(f: *Frame) void {
         }
         if (fib.waiting_on) |id| markObject(heap, id);
         if (fib.park_monitor) |id| markObject(heap, id);
+        if (fib.io_buf) |id| markObject(heap, id);
     }
     for (f.loader.scheduler.nested.items) |fib| {
         for (fib.call_stack.items) |ff| {
@@ -565,6 +566,7 @@ fn collectMajor(f: *Frame) void {
         }
         if (fib.waiting_on) |id| markObject(heap, id);
         if (fib.park_monitor) |id| markObject(heap, id);
+        if (fib.io_buf) |id| markObject(heap, id);
     }
     for (f.loader.statics.items) |st| for (st) |v| markValue(heap, v);
     if (f.budget.pending) |eid| markObject(heap, eid);
@@ -631,6 +633,12 @@ fn collectMajor(f: *Frame) void {
     for (f.loader.scheduler.nested.items) |fib| if (fib.park_monitor) |id| {
         fib.park_monitor = forwarding[id];
     };
+    for (f.loader.scheduler.all.items) |fib| if (fib.io_buf) |id| {
+        fib.io_buf = forwarding[id];
+    };
+    for (f.loader.scheduler.nested.items) |fib| if (fib.io_buf) |id| {
+        fib.io_buf = forwarding[id];
+    };
 
     // 4. Move live objects (and their generation/remembered bits) to new slots.
     for (0..heap.objects.count()) |oid| {
@@ -684,6 +692,7 @@ fn collectMinor(f: *Frame) void {
         }
         if (fib.waiting_on) |id| markYoungObject(heap, id);
         if (fib.park_monitor) |id| markYoungObject(heap, id);
+        if (fib.io_buf) |id| markYoungObject(heap, id);
     }
     for (f.loader.scheduler.nested.items) |fib| {
         for (fib.call_stack.items) |ff| {
@@ -692,6 +701,7 @@ fn collectMinor(f: *Frame) void {
         }
         if (fib.waiting_on) |id| markYoungObject(heap, id);
         if (fib.park_monitor) |id| markYoungObject(heap, id);
+        if (fib.io_buf) |id| markYoungObject(heap, id);
     }
     for (f.loader.statics.items) |st| for (st) |v| markYoungValue(heap, v);
     if (f.budget.pending) |eid| markYoungObject(heap, eid);
@@ -3583,14 +3593,22 @@ fn netNative(f: *Frame, mn: []const u8, md: []const u8, slots: []const Value, me
         const cap = @min(want, tmp.len);
         if (cap == 0) return f.pushInt(0);
         var iov: [1][]u8 = .{tmp[0..cap]};
+        // Root the byte[] across the blocking read: a compacting GC may run while
+        // we are in the kernel and remap object ids, so `aid` cannot be trusted
+        // afterward -- re-read it from the (GC-remapped) fiber field.
+        const me = owningThreadFiber(sched, f) orelse return error.LinkError;
+        me.io_buf = aid;
         sched.enterBlockingSyscall();
         const n = io.vtable.netRead(io.userdata, fd, &iov) catch {
             sched.exitBlockingSyscall();
+            me.io_buf = null;
             return f.pushInt(-1);
         };
         sched.exitBlockingSyscall();
+        const aid2 = me.io_buf.?;
+        me.io_buf = null;
         if (n == 0) return f.pushInt(-1); // orderly EOF
-        const arr = switch (heap.get(aid).*) {
+        const arr = switch (heap.get(aid2).*) {
             .array => |*a| a,
             else => return error.LinkError,
         };
@@ -3609,10 +3627,18 @@ fn netNative(f: *Frame, mn: []const u8, md: []const u8, slots: []const Value, me
         const len: usize = @intCast(slots[P[3].slot].int);
         var tmp: [8192]u8 = undefined;
         var done: usize = 0;
+        // Root the byte[] across each blocking write (a GC between chunks may remap
+        // ids); re-read the remapped id from the fiber field each iteration.
+        const me = owningThreadFiber(sched, f) orelse return error.LinkError;
+        me.io_buf = aid;
         while (done < len) {
-            const arr = switch (heap.get(aid).*) {
+            const cur = me.io_buf.?;
+            const arr = switch (heap.get(cur).*) {
                 .array => |*a| a,
-                else => return error.LinkError,
+                else => {
+                    me.io_buf = null;
+                    return error.LinkError;
+                },
             };
             const chunk = @min(len - done, tmp.len);
             var i: usize = 0;
@@ -3632,9 +3658,13 @@ fn netNative(f: *Frame, mn: []const u8, md: []const u8, slots: []const Value, me
                 w += n;
             }
             sched.exitBlockingSyscall();
-            if (!ok) return f.pushInt(-1);
+            if (!ok) {
+                me.io_buf = null;
+                return f.pushInt(-1);
+            }
             done += chunk;
         }
+        me.io_buf = null;
         return f.pushInt(@intCast(done));
     }
     // ---- close0(long fd) -> void  (Socket + ServerSocket)
@@ -4520,6 +4550,11 @@ const Fiber = struct {
     /// target (GC-remapped); notified is set by notify/notifyAll.
     wait_saved: u32 = 0,
     wait_reacq: bool = false,
+    /// byte[] object id a blocking socket read/write is copying to/from. Kept as a
+    /// GC root (marked + remapped) across enterBlockingSyscall so a compacting GC
+    /// running while we are in the kernel neither frees it nor leaves us with a
+    /// stale id -- the native re-reads io_buf (remapped) after the syscall.
+    io_buf: ?u32 = null,
 
     fn deinit(self: *Fiber) void {
         for (self.call_stack.items) |cf| freeChildFrame(self.alloc, cf);
