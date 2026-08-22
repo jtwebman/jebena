@@ -254,8 +254,10 @@ harden next:**
   scan `all`+`nested` under `scheduler.lock`. Proven: `sync-stress.sh` (8 fibers
   x1000 `synchronized count++` = 8000) and `waitnotify-stress.sh` (8 workers
   notifyAll + main wait/reacquire), both @carriers 1 & 4 (+GC). NOTE: synchronized
-  *methods* (ACC_SYNCHRONIZED) and monitors on non-instance objects are not yet
-  covered -- synchronized *blocks* on instances are.
+  instance *methods* (ACC_SYNCHRONIZED) are covered too (iter 75; the monitor is
+  `this`=locals[0], acquired at frame entry / released on every frame pop, proven
+  by sync-stress.sh). Still not covered: static synchronized methods (lock the
+  Class mirror) and monitors on non-instance objects (arrays/strings).
 - Concurrent **lazy class loading / `getMirror` / string interning**: FIXED
   (iter 71). A reentrant, safepoint-polling `Loader.load_lock` serializes
   `resolveClass` (find-or-load-and-register), `getMirror`, `internLiteral`, and

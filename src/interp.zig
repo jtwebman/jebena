@@ -86,6 +86,9 @@ const Frame = struct {
     code: []const u8 = &.{},
     class: ?*const Class = null,
     exceptions: []const attribute_decode.ExceptionTableEntry = &.{},
+    /// synchronized instance method: this (locals[0]) is locked for the body.
+    is_sync: bool = false,
+    mon_acquired: bool = false,
 
     fn push(f: *Frame, v: Value) RunError!void {
         if (f.sp >= f.stack.len) return error.StackOverflow;
@@ -1209,6 +1212,7 @@ pub const Class = struct {
         ret: ?Kind,
         is_static: bool,
         is_native: bool,
+        is_synchronized: bool = false,
         annotations: []const AnnotationInfo = &.{},
     };
 
@@ -1264,6 +1268,7 @@ pub const Class = struct {
             const desc = try cf.constant_pool.utf8(m.descriptor_index);
             const is_static = m.access_flags.isStatic();
             const is_native = m.access_flags.isNative();
+            const is_synchronized = m.access_flags.isSynchronized();
             const mt = try descriptor.parseMethodDescriptor(arena, desc);
             const params = try arena.alloc(Param, mt.params.len);
             var slot: u16 = if (is_static) 0 else 1; // slot 0 is `this` for instance methods
@@ -1287,6 +1292,7 @@ pub const Class = struct {
                 .ret = if (mt.ret) |r| kindOf(r) else null,
                 .is_static = is_static,
                 .is_native = is_native,
+                .is_synchronized = is_synchronized,
                 .annotations = decodeMemberAnnotations(arena, cf.constant_pool, m.attributes),
             };
         }
@@ -1577,6 +1583,7 @@ const PendingCall = struct {
     exception_table: []const attribute_decode.ExceptionTableEntry,
     slots: []Value,
     resume_pc: usize = 0,
+    is_sync: bool = false, // synchronized instance method: lock this (slots[0])
 };
 
 fn invokeInstance(f: *Frame, cls: *const Class, code: []const u8, is_special: bool, pending: *?PendingCall) RunError!void {
@@ -1650,7 +1657,7 @@ fn invokeInstance(f: *Frame, cls: *const Class, code: []const u8, is_special: bo
     if (target.is_native) return nativeInvoke(f, owner, target, slots);
 
     const cc = target.code orelse return error.LinkError;
-    pending.* = .{ .owner = owner, .code = cc.code, .max_stack = cc.max_stack, .max_locals = cc.max_locals, .exception_table = cc.exception_table, .slots = f.loader.gpa.dupe(Value, slots) catch return error.OutOfMemory };
+    pending.* = .{ .owner = owner, .code = cc.code, .max_stack = cc.max_stack, .max_locals = cc.max_locals, .exception_table = cc.exception_table, .slots = f.loader.gpa.dupe(Value, slots) catch return error.OutOfMemory, .is_sync = target.is_synchronized and !target.is_static };
 }
 
 const FieldRefInfo = struct { class_name: []const u8, field_name: []const u8 };
@@ -4250,6 +4257,7 @@ fn makeChildFrame(alloc: std.mem.Allocator, p: PendingCall, caller: *Frame) RunE
         .class = p.owner,
         .exceptions = p.exception_table,
         .return_pc = p.resume_pc,
+        .is_sync = p.is_sync,
     };
     return child;
 }
@@ -4655,10 +4663,12 @@ fn driveFiber(fiber: *Fiber, budget: *Budget) RunError!DriveOutcome {
         switch (res) {
             .returned => |rv| {
                 if (fiber.call_stack.items.len == 1) {
+                    monitorReleaseThis(top);
                     fiber.result = rv;
                     return .completed;
                 }
                 const finished = fiber.call_stack.pop().?;
+                monitorReleaseThis(finished);
                 const caller = fiber.call_stack.items[fiber.call_stack.items.len - 1];
                 caller.pc = finished.return_pc;
                 if (rv) |v| try caller.pushKind(v);
@@ -4680,8 +4690,12 @@ fn driveFiber(fiber: *Fiber, budget: *Budget) RunError!DriveOutcome {
                         budget.pending = null;
                         break;
                     }
-                    if (fiber.call_stack.items.len == 1) return error.JavaException;
+                    if (fiber.call_stack.items.len == 1) {
+                        monitorReleaseThis(cur);
+                        return error.JavaException;
+                    }
                     const finished = fiber.call_stack.pop().?;
+                    monitorReleaseThis(finished);
                     freeChildFrame(alloc, finished);
                 }
             },
@@ -4736,8 +4750,68 @@ fn exec(alloc: std.mem.Allocator, class: ?*const Class, heap: ?*Heap, loader: *L
     }
 }
 
+/// Acquire the monitor on `this` (locals[0]) for a synchronized instance method,
+/// on first entry to the frame. Reentrant per owning thread; yields cooperatively
+/// at one carrier and spins polling the safepoint at N>1. locals[0] is GC-remapped
+/// so it is re-read each spin. No-op without a heap (unit tests).
+fn monitorAcquireThis(f: *Frame) RunError!void {
+    const heap = f.heap orelse {
+        f.mon_acquired = true;
+        return;
+    };
+    const sched = &f.loader.scheduler;
+    const myown = owningThreadId(sched, f) + 1;
+    while (true) {
+        const oid = f.locals[0].reference orelse {
+            f.mon_acquired = true; // no receiver to lock (shouldn't happen): skip
+            return;
+        };
+        var got = false;
+        switch (heap.get(oid).*) {
+            .instance => |*inst| {
+                const owner = @atomicLoad(u64, &inst.mon_owner, .acquire);
+                if (owner == 0) {
+                    if (@cmpxchgStrong(u64, &inst.mon_owner, 0, myown, .acq_rel, .acquire) == null) {
+                        inst.mon_count = 1;
+                        got = true;
+                    }
+                } else if (owner == myown) {
+                    inst.mon_count += 1;
+                    got = true;
+                }
+            },
+            else => got = true,
+        }
+        if (got) {
+            f.mon_acquired = true;
+            return;
+        }
+        if (sched.carriers_total <= 1) return error.Yield;
+        if (sched.safepoint_requested.load(.acquire)) sched.waitForSafepointRelease();
+        std.atomic.spinLoopHint();
+    }
+}
+
+/// Release the monitor held by a synchronized-method frame (on its exit).
+fn monitorReleaseThis(f: *Frame) void {
+    if (!f.mon_acquired) return;
+    f.mon_acquired = false;
+    const heap = f.heap orelse return;
+    const oid = f.locals[0].reference orelse return;
+    switch (heap.get(oid).*) {
+        .instance => |*inst| {
+            if (inst.mon_count > 0) {
+                inst.mon_count -= 1;
+                if (inst.mon_count == 0) @atomicStore(u64, &inst.mon_owner, 0, .release);
+            }
+        },
+        else => {},
+    }
+}
+
 fn runFrame(f: *Frame) RunError!FrameResult {
     const code = f.code;
+    if (f.is_sync and !f.mon_acquired) try monitorAcquireThis(f);
     sw: switch (try opAt(code, f.pc)) {
         .nop => {
             f.pc += 1;

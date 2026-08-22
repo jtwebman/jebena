@@ -14,23 +14,26 @@ JAVAC="$(command -v javac || echo /usr/lib/jvm/java-17-openjdk-amd64/bin/javac)"
 OUT=/tmp/jebena-sync
 rm -rf "$OUT"; mkdir -p "$OUT"
 bash "$ROOT/scripts/build-jbase.sh" >/dev/null
-"$JAVAC" -d "$OUT" "$ROOT"/test/stress/SyncCounter.java "$ROOT/test/diff/Driver.java"
+"$JAVAC" -d "$OUT" "$ROOT"/test/stress/SyncCounter.java "$ROOT"/test/stress/SyncMethod.java "$ROOT/test/diff/Driver.java"
 "$ZIG" build --build-file "$ROOT/build.zig" >/dev/null 2>&1
 JEBENA="$ROOT/zig-out/bin/jebena"
-EXP=$("$JAVA" -cp "$OUT" Driver st.SyncCounter demo 2>/dev/null)
 JBASE=$(find "$ROOT/jbase/out" -name '*.class' | tr '\n' ' ')
 APP=$(ls "$OUT"/st/*.class | tr '\n' ' ')
 fail=0
-check() { # $1 label  $2 env  $3 reps
-  for rep in $(seq 1 "$3"); do
-    ALL=$(timeout 40 bash -c "$2 '$JEBENA' run st/SyncCounter demo $APP $JBASE" 2>&1)
-    [ $? -eq 124 ] && { echo "sync-stress: FAIL $1 rep=$rep HANG"; fail=1; }
+check() { # $1 main-class  $2 label  $3 env  $4 reps  $5 expected
+  for rep in $(seq 1 "$4"); do
+    ALL=$(timeout 40 bash -c "$3 '$JEBENA' run st/$1 demo $APP $JBASE" 2>&1)
+    [ $? -eq 124 ] && { echo "sync-stress: FAIL $1 $2 rep=$rep HANG"; fail=1; }
     GOT=$(printf '%s\n' "$ALL" | sed -n 's/.*demo() = \(-\?[0-9]*\).*/\1/p')
-    [ "$GOT" = "$EXP" ] || { echo "sync-stress: FAIL $1 rep=$rep jebena=$GOT java=$EXP"; fail=1; }
+    [ "$GOT" = "$5" ] || { echo "sync-stress: FAIL $1 $2 rep=$rep jebena=$GOT java=$5"; fail=1; }
   done
 }
-check "carriers=1" "JEBENA_CARRIERS=1" 3
-check "carriers=4" "JEBENA_CARRIERS=4" 12
-check "carriers=4+GC" "JEBENA_GC_INTERVAL=300 JEBENA_CARRIERS=4" 6
+# synchronized BLOCKS (SyncCounter) and synchronized METHODS (SyncMethod).
+for main in SyncCounter SyncMethod; do
+  EXP=$("$JAVA" -cp "$OUT" Driver "st.$main" demo 2>/dev/null)
+  check "$main" "carriers=1" "JEBENA_CARRIERS=1" 3 "$EXP"
+  check "$main" "carriers=4" "JEBENA_CARRIERS=4" 12 "$EXP"
+  check "$main" "carriers=4+GC" "JEBENA_GC_INTERVAL=300 JEBENA_CARRIERS=4" 6 "$EXP"
+done
 [ "$fail" = 0 ] || exit 1
-echo "sync-stress: OK — 8 fibers x1000 synchronized count++ = $EXP (carriers 1 & 4, +GC), real mutual exclusion, matches real java"
+echo "sync-stress: OK — synchronized blocks + methods, 8 fibers x1000 = 8000 (carriers 1 & 4, +GC), real mutual exclusion, matches real java"
