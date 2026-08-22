@@ -1321,7 +1321,21 @@ fn resolveInterfaceDefault(f: *Frame, start: *const Class, name: []const u8, des
     }
     return null;
 }
-fn invokeInstance(f: *Frame, cls: *const Class, code: []const u8, is_special: bool) RunError!void {
+/// A resolved Java-to-Java call the driver loop should execute: a new frame's
+/// worth of context. Returned via an out-param by invokeInstance/invokeStatic
+/// for the non-native, non-intrinsic path; ownership of `slots` transfers to
+/// the caller (freed after the call). Enables converting recursion into an
+/// explicit frame stack.
+const PendingCall = struct {
+    owner: *const Class,
+    code: []const u8,
+    max_stack: u16,
+    max_locals: u16,
+    exception_table: []const attribute_decode.ExceptionTableEntry,
+    slots: []Value,
+};
+
+fn invokeInstance(f: *Frame, cls: *const Class, code: []const u8, is_special: bool, pending: *?PendingCall) RunError!void {
     const idx = try u16At(code, f.pc + 1);
     const c = cls.cp.get(idx) catch return error.LinkError;
     const ref = switch (c.*) {
@@ -1391,12 +1405,8 @@ fn invokeInstance(f: *Frame, cls: *const Class, code: []const u8, is_special: bo
 
     if (target.is_native) return nativeInvoke(f, owner, target, slots);
 
-    if (f.budget.depth >= f.budget.max_depth) return error.CallDepthExceeded;
-    f.budget.depth += 1;
-    defer f.budget.depth -= 1;
     const cc = target.code orelse return error.LinkError;
-    const ret = try exec(owner.gpa, owner, f.heap, f.loader, f.budget, cc.code, cc.max_stack, cc.max_locals, slots, cc.exception_table, f);
-    if (ret) |rv| try f.pushKind(rv);
+    pending.* = .{ .owner = owner, .code = cc.code, .max_stack = cc.max_stack, .max_locals = cc.max_locals, .exception_table = cc.exception_table, .slots = f.loader.gpa.dupe(Value, slots) catch return error.OutOfMemory };
 }
 
 const FieldRefInfo = struct { class_name: []const u8, field_name: []const u8 };
@@ -3537,7 +3547,7 @@ fn nativeInvoke(f: *Frame, owner: *const Class, method: *const Class.Method, slo
     }
     return error.UnsupportedOpcode;
 }
-fn invokeStatic(f: *Frame, cls: *const Class, code: []const u8) RunError!void {
+fn invokeStatic(f: *Frame, cls: *const Class, code: []const u8, pending: *?PendingCall) RunError!void {
     const idx = try u16At(code, f.pc + 1);
     const mref = cls.cp.get(idx) catch return error.LinkError;
     const ref = switch (mref.*) {
@@ -3602,12 +3612,8 @@ fn invokeStatic(f: *Frame, cls: *const Class, code: []const u8) RunError!void {
 
     if (target.is_native) return nativeInvoke(f, owner, target, slots);
 
-    if (f.budget.depth >= f.budget.max_depth) return error.CallDepthExceeded;
-    f.budget.depth += 1;
-    defer f.budget.depth -= 1;
     const c = target.code orelse return error.LinkError;
-    const ret = try exec(owner.gpa, owner, f.heap, f.loader, f.budget, c.code, c.max_stack, c.max_locals, slots, c.exception_table, f);
-    if (ret) |rv| try f.pushKind(rv);
+    pending.* = .{ .owner = owner, .code = c.code, .max_stack = c.max_stack, .max_locals = c.max_locals, .exception_table = c.exception_table, .slots = f.loader.gpa.dupe(Value, slots) catch return error.OutOfMemory };
 }
 
 fn loadConstant(f: *Frame, index: u16) RunError!void {
@@ -4390,7 +4396,8 @@ fn exec(alloc: std.mem.Allocator, class: ?*const Class, heap: ?*Heap, loader: *L
         },
         .invokespecial => {
             const cls = f.class orelse return error.UnsupportedOpcode;
-            invokeInstance(f, cls, code, true) catch |e| {
+            var pending: ?PendingCall = null;
+            invokeInstance(f, cls, code, true, &pending) catch |e| {
                 if (e == error.JavaException) {
                     if (try handleException(f, f.class, f.exceptions, f.budget.pending.?)) {
                         f.budget.pending = null;
@@ -4401,12 +4408,31 @@ fn exec(alloc: std.mem.Allocator, class: ?*const Class, heap: ?*Heap, loader: *L
                 try mapTrap(f, f.class, f.exceptions, e);
                 continue :sw try step(f);
             };
+            if (pending) |p| {
+                defer f.loader.gpa.free(p.slots);
+                if (f.budget.depth >= f.budget.max_depth) return error.CallDepthExceeded;
+                f.budget.depth += 1;
+                defer f.budget.depth -= 1;
+                const ret = exec(p.owner.gpa, p.owner, f.heap, f.loader, f.budget, p.code, p.max_stack, p.max_locals, p.slots, p.exception_table, f) catch |e| {
+                    if (e == error.JavaException) {
+                        if (try handleException(f, f.class, f.exceptions, f.budget.pending.?)) {
+                            f.budget.pending = null;
+                            continue :sw try step(f);
+                        }
+                        return e;
+                    }
+                    try mapTrap(f, f.class, f.exceptions, e);
+                    continue :sw try step(f);
+                };
+                if (ret) |rv| try f.pushKind(rv);
+            }
             f.pc += 3;
             continue :sw try step(f);
         },
         .invokevirtual => {
             const cls = f.class orelse return error.UnsupportedOpcode;
-            invokeInstance(f, cls, code, false) catch |e| {
+            var pending: ?PendingCall = null;
+            invokeInstance(f, cls, code, false, &pending) catch |e| {
                 if (e == error.JavaException) {
                     if (try handleException(f, f.class, f.exceptions, f.budget.pending.?)) {
                         f.budget.pending = null;
@@ -4417,12 +4443,31 @@ fn exec(alloc: std.mem.Allocator, class: ?*const Class, heap: ?*Heap, loader: *L
                 try mapTrap(f, f.class, f.exceptions, e);
                 continue :sw try step(f);
             };
+            if (pending) |p| {
+                defer f.loader.gpa.free(p.slots);
+                if (f.budget.depth >= f.budget.max_depth) return error.CallDepthExceeded;
+                f.budget.depth += 1;
+                defer f.budget.depth -= 1;
+                const ret = exec(p.owner.gpa, p.owner, f.heap, f.loader, f.budget, p.code, p.max_stack, p.max_locals, p.slots, p.exception_table, f) catch |e| {
+                    if (e == error.JavaException) {
+                        if (try handleException(f, f.class, f.exceptions, f.budget.pending.?)) {
+                            f.budget.pending = null;
+                            continue :sw try step(f);
+                        }
+                        return e;
+                    }
+                    try mapTrap(f, f.class, f.exceptions, e);
+                    continue :sw try step(f);
+                };
+                if (ret) |rv| try f.pushKind(rv);
+            }
             f.pc += 3;
             continue :sw try step(f);
         },
         .invokeinterface => {
             const cls = f.class orelse return error.UnsupportedOpcode;
-            invokeInstance(f, cls, code, false) catch |e| {
+            var pending: ?PendingCall = null;
+            invokeInstance(f, cls, code, false, &pending) catch |e| {
                 if (e == error.JavaException) {
                     if (try handleException(f, f.class, f.exceptions, f.budget.pending.?)) {
                         f.budget.pending = null;
@@ -4433,6 +4478,24 @@ fn exec(alloc: std.mem.Allocator, class: ?*const Class, heap: ?*Heap, loader: *L
                 try mapTrap(f, f.class, f.exceptions, e);
                 continue :sw try step(f);
             };
+            if (pending) |p| {
+                defer f.loader.gpa.free(p.slots);
+                if (f.budget.depth >= f.budget.max_depth) return error.CallDepthExceeded;
+                f.budget.depth += 1;
+                defer f.budget.depth -= 1;
+                const ret = exec(p.owner.gpa, p.owner, f.heap, f.loader, f.budget, p.code, p.max_stack, p.max_locals, p.slots, p.exception_table, f) catch |e| {
+                    if (e == error.JavaException) {
+                        if (try handleException(f, f.class, f.exceptions, f.budget.pending.?)) {
+                            f.budget.pending = null;
+                            continue :sw try step(f);
+                        }
+                        return e;
+                    }
+                    try mapTrap(f, f.class, f.exceptions, e);
+                    continue :sw try step(f);
+                };
+                if (ret) |rv| try f.pushKind(rv);
+            }
             f.pc += 5;
             continue :sw try step(f);
         },
@@ -4515,7 +4578,8 @@ fn exec(alloc: std.mem.Allocator, class: ?*const Class, heap: ?*Heap, loader: *L
         },
         .invokestatic => {
             const cls = f.class orelse return error.UnsupportedOpcode;
-            invokeStatic(f, cls, code) catch |e| {
+            var pending: ?PendingCall = null;
+            invokeStatic(f, cls, code, &pending) catch |e| {
                 if (e == error.JavaException) {
                     if (try handleException(f, f.class, f.exceptions, f.budget.pending.?)) {
                         f.budget.pending = null;
@@ -4526,6 +4590,24 @@ fn exec(alloc: std.mem.Allocator, class: ?*const Class, heap: ?*Heap, loader: *L
                 try mapTrap(f, f.class, f.exceptions, e);
                 continue :sw try step(f);
             };
+            if (pending) |p| {
+                defer f.loader.gpa.free(p.slots);
+                if (f.budget.depth >= f.budget.max_depth) return error.CallDepthExceeded;
+                f.budget.depth += 1;
+                defer f.budget.depth -= 1;
+                const ret = exec(p.owner.gpa, p.owner, f.heap, f.loader, f.budget, p.code, p.max_stack, p.max_locals, p.slots, p.exception_table, f) catch |e| {
+                    if (e == error.JavaException) {
+                        if (try handleException(f, f.class, f.exceptions, f.budget.pending.?)) {
+                            f.budget.pending = null;
+                            continue :sw try step(f);
+                        }
+                        return e;
+                    }
+                    try mapTrap(f, f.class, f.exceptions, e);
+                    continue :sw try step(f);
+                };
+                if (ret) |rv| try f.pushKind(rv);
+            }
             f.pc += 3;
             continue :sw try step(f);
         },
