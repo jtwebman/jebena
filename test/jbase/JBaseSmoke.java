@@ -611,6 +611,57 @@ public class JBaseSmoke {
         r += pr.test(10) ? 7 : 0;
         java.util.function.Supplier<Integer> sup = () -> 99;
         r += sup.get();          // 99
+
+        // Primitive class literals (int.class -> getstatic Integer.TYPE) + isPrimitive.
+        if (int.class == Integer.TYPE) r += 3;
+        if (long.class == Long.TYPE) r += 3;
+        if (double.class == Double.TYPE) r += 3;
+        if (boolean.class == Boolean.TYPE) r += 3;
+        if (void.class == Void.TYPE) r += 3;
+        if (int.class.isPrimitive()) r += 5;
+        if (!String.class.isPrimitive()) r += 5;
+        if (int.class.getName().equals("int")) r += 5;
+
+        // java.util.UUID: exact JDK round-trip / version / variant / hashCode bit-math.
+        java.util.UUID uu = java.util.UUID.fromString("f81d4fae-7dec-11d0-a765-00a0c91e6bf6");
+        if (uu.toString().equals("f81d4fae-7dec-11d0-a765-00a0c91e6bf6")) r += 11;
+        if (uu.version() == 1) r += 11;
+        if (uu.variant() == 2) r += 11;
+        r += uu.hashCode();   // -343263960 exactly (matches OpenJDK)
+
+
+        // java.time — deterministic arithmetic + ISO-8601 formatting (validated vs real java).
+        java.time.LocalDate jtd = java.time.LocalDate.of(2020, 2, 29);
+        if (jtd.isLeapYear()) r += 13;
+        if (jtd.lengthOfMonth() == 29) r += 13;
+        r += (int) (jtd.toEpochDay() % 100000);
+        java.time.LocalDate jtd2 = jtd.plusDays(1);              // 2020-03-01
+        if (jtd2.getMonthValue() == 3 && jtd2.getDayOfMonth() == 1) r += 13;
+        if (jtd.toEpochDay() < jtd2.toEpochDay()) r += 13;
+        if (jtd.toString().equals("2020-02-29")) r += 13;
+        if (jtd2.toString().equals("2020-03-01")) r += 13;
+
+        java.time.LocalTime jtt = java.time.LocalTime.of(9, 5, 3);
+        r += jtt.toSecondOfDay();                               // 32703
+        if (jtt.plusHours(1).getHour() == 10) r += 13;
+        if (jtt.toString().equals("09:05:03")) r += 13;
+
+        java.time.LocalDateTime jtdt = java.time.LocalDateTime.of(2020, 2, 29, 9, 5, 3);
+        if (jtdt.toString().equals("2020-02-29T09:05:03")) r += 13;
+        if (jtdt.plusDays(1).getDayOfMonth() == 1) r += 13;
+
+        java.time.Duration jtdu = java.time.Duration.ofMinutes(3).plusSeconds(30);
+        r += (int) jtdu.getSeconds();                            // 210
+        r += (int) jtdu.toMillis();                              // 210000
+        if (jtdu.toMinutes() == 3) r += 13;
+
+        java.time.Period jtpe = java.time.Period.of(1, 2, 10);
+        r += jtpe.getYears() * 100 + jtpe.getMonths() * 10 + jtpe.getDays();  // 130
+
+        java.time.Instant jti = java.time.Instant.ofEpochSecond(1600000000L).plusSeconds(123);
+        r += (int) (jti.getEpochSecond() % 100000);
+        if (jti.isAfter(java.time.Instant.ofEpochSecond(1600000000L))) r += 13;
+
         return r;
     }
 }

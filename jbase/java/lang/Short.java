@@ -1,6 +1,8 @@
 package java.lang;
 
 public final class Short extends Number implements Comparable<Short> {
+    public static final Class TYPE = Class.getPrimitiveClass("short");
+
     private final short value;
 
     public Short(short value) {

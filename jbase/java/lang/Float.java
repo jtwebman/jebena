@@ -1,6 +1,8 @@
 package java.lang;
 
 public final class Float extends Number implements Comparable<Float> {
+    public static final Class TYPE = Class.getPrimitiveClass("float");
+
     private final float value;
 
     public Float(float value) {

@@ -6,6 +6,8 @@ package java.lang;
  * spec. The cache is an ordinary static field (a GC root), built in <clinit>.
  */
 public final class Integer extends Number implements Comparable<Integer> {
+    public static final Class TYPE = Class.getPrimitiveClass("int");
+
     private final int value;
 
     public Integer(int value) {

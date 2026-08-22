@@ -1,6 +1,8 @@
 package java.lang;
 
 public final class Byte extends Number implements Comparable<Byte> {
+    public static final Class TYPE = Class.getPrimitiveClass("byte");
+
     private final byte value;
 
     public Byte(byte value) {

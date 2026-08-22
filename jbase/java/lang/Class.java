@@ -28,6 +28,10 @@ public final class Class {
 
     public native boolean isInterface();
 
+    public native boolean isPrimitive();
+
+    static native Class getPrimitiveClass(String name);
+
     public native Class getSuperclass();
 
     public native Class[] getInterfaces();

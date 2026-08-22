@@ -806,6 +806,7 @@ pub const Class = struct {
     /// True for a runtime-built java.lang.reflect.Proxy class (dispatch to handler).
     is_proxy: bool = false,
     is_interface: bool = false,
+    is_primitive: bool = false,
 
     pub const Field = struct { name: []const u8, kind: Kind, annotations: []const AnnotationInfo = &.{} };
     pub const Param = struct { kind: Kind, slot: u16 };
@@ -2861,6 +2862,28 @@ fn boxArg(f: *Frame, val: Value, kind: Kind) RunError!Value {
     };
     return .{ .reference = try boxValueForDesc(f, rc, val) };
 }
+fn primitiveClass(f: *Frame, name: []const u8) RunError!*const Class {
+    if (f.loader.find(name)) |c| return c;
+    const gpa = f.loader.gpa;
+    const nm = gpa.dupe(u8, name) catch return error.OutOfMemory;
+    const pc = gpa.create(Class) catch return error.OutOfMemory;
+    pc.* = Class{
+        .gpa = gpa,
+        .cp = .{ .entries = &stub_cp_entries },
+        .name = nm,
+        .super = null,
+        .super_name = null,
+        .interfaces = &.{},
+        .methods = &.{},
+        .instance_fields = &.{},
+        .static_fields = &.{},
+        .bootstrap_methods = &.{},
+        .is_stub = false,
+        .is_primitive = true,
+    };
+    f.loader.register(pc) catch return error.OutOfMemory;
+    return pc;
+}
 fn makeProxyClass(f: *Frame, iface_names: [][]const u8) RunError!*const Class {
     const gpa = f.loader.gpa;
     const obj = f.loader.find("java/lang/Object") orelse return error.LinkError;
@@ -3095,6 +3118,21 @@ fn nativeInvoke(f: *Frame, owner: *const Class, method: *const Class.Method, slo
         }
     }
     if (std.mem.eql(u8, on, "java/lang/Class")) {
+        if (eq2(mn, md, "getPrimitiveClass", "(Ljava/lang/String;)Ljava/lang/Class;")) {
+            const heap = f.heap orelse return error.UnsupportedOpcode;
+            const sref = switch (slots[method.params[0].slot]) {
+                .reference => |r| r orelse return error.NullPointer,
+                else => return error.TypeMismatch,
+            };
+            var chars: std.ArrayList(i32) = .empty;
+            defer chars.deinit(heap.gpa);
+            try appendStringObj(&chars, heap, sref);
+            var nm = heap.gpa.alloc(u8, chars.items.len) catch return error.OutOfMemory;
+            defer heap.gpa.free(nm);
+            for (chars.items, 0..) |c, i| nm[i] = @intCast(@as(u32, @bitCast(c)) & 0xFF);
+            const pc = try primitiveClass(f, nm);
+            return f.push(.{ .reference = try getMirror(f, pc) });
+        }
         if (eq2(mn, md, "forName", "(Ljava/lang/String;)Ljava/lang/Class;")) {
             const heap = f.heap orelse return error.UnsupportedOpcode;
             const sref = switch (slots[method.params[0].slot]) {
@@ -3118,6 +3156,7 @@ fn nativeInvoke(f: *Frame, owner: *const Class, method: *const Class.Method, slo
         if (eq2(mn, md, "getName", "()Ljava/lang/String;")) return pushDottedName(f, rc.name, false);
         if (eq2(mn, md, "getSimpleName", "()Ljava/lang/String;")) return pushDottedName(f, rc.name, true);
         if (eq2(mn, md, "isInterface", "()Z")) return f.pushInt(if (rc.is_interface) 1 else 0);
+        if (eq2(mn, md, "isPrimitive", "()Z")) return f.pushInt(if (rc.is_primitive) 1 else 0);
         if (eq2(mn, md, "getSuperclass", "()Ljava/lang/Class;")) {
             if (rc.super) |sup| return f.push(.{ .reference = try getMirror(f, sup) });
             return f.push(.{ .reference = null });

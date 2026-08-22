@@ -1,6 +1,8 @@
 package java.lang;
 
 public final class Double extends Number implements Comparable<Double> {
+    public static final Class TYPE = Class.getPrimitiveClass("double");
+
     private final double value;
 
     public Double(double value) {

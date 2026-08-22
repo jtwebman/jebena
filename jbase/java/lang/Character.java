@@ -1,6 +1,8 @@
 package java.lang;
 
 public final class Character implements Comparable<Character> {
+    public static final Class TYPE = Class.getPrimitiveClass("char");
+
     private final char value;
 
     public Character(char value) {
