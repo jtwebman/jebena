@@ -1294,6 +1294,9 @@ pub const Class = struct {
     is_proxy: bool = false,
     is_interface: bool = false,
     is_primitive: bool = false,
+    /// Class-level SourceFile attribute value (e.g. "App.java"), or null. Used to
+    /// render stack-trace frames as Class.method(SourceFile:line).
+    source_file: ?[]const u8 = null,
 
     pub const Field = struct { name: []const u8, kind: Kind, annotations: []const AnnotationInfo = &.{} };
     pub const Param = struct { kind: Kind, slot: u16 };
@@ -1399,12 +1402,17 @@ pub const Class = struct {
             }
         }
         var bootstrap: []const attribute_decode.BootstrapMethod = &.{};
+        var source_file: ?[]const u8 = null;
         for (cf.attributes) |ai| {
-            if (std.mem.eql(u8, try cf.constant_pool.utf8(ai.name_index), "BootstrapMethods")) {
+            const an = try cf.constant_pool.utf8(ai.name_index);
+            if (std.mem.eql(u8, an, "BootstrapMethods")) {
                 bootstrap = (try attribute_decode.decode(arena, cf.constant_pool, ai)).bootstrap_methods;
+            } else if (std.mem.eql(u8, an, "SourceFile")) {
+                const sf = try attribute_decode.decode(arena, cf.constant_pool, ai);
+                source_file = cf.constant_pool.utf8(sf.source_file) catch null;
             }
         }
-        return .{ .gpa = gpa, .cp = cf.constant_pool, .name = cls_name, .super = super, .super_name = super_name, .interfaces = interfaces, .methods = methods, .instance_fields = instance_fields, .static_fields = static_fields, .bootstrap_methods = bootstrap, .annotations = class_annos, .is_interface = cf.access_flags.isInterface() };
+        return .{ .gpa = gpa, .cp = cf.constant_pool, .name = cls_name, .super = super, .super_name = super_name, .interfaces = interfaces, .methods = methods, .instance_fields = instance_fields, .static_fields = static_fields, .bootstrap_methods = bootstrap, .annotations = class_annos, .is_interface = cf.access_flags.isInterface(), .source_file = source_file };
     }
 
     fn findField(self: *const Class, name: []const u8) ?usize {
@@ -1855,6 +1863,39 @@ pub fn buildArgsArray(loader: *Loader, heap: *Heap, argv: []const []const u8) Ru
         }
     }
     return aid;
+}
+
+/// Recover the Method a frame is executing by matching its bytecode slice against
+/// the owning class's methods (the code slices are distinct per method). Used only
+/// on the rare stack-trace path, so a linear scan is fine and no per-frame method
+/// pointer needs threading through the frame-creation hot paths.
+fn frameMethod(class: *const Class, code: []const u8) ?*const Class.Method {
+    for (class.methods) |*m| {
+        if (m.code) |c| {
+            if (c.code.ptr == code.ptr and c.code.len == code.len) return m;
+        }
+    }
+    return null;
+}
+
+/// Map a bytecode pc to its source line via the method's LineNumberTable (the
+/// entry with the greatest start_pc <= pc), or -1 if unavailable.
+fn lineForPc(method: *const Class.Method, pc: usize) i32 {
+    const c = method.code orelse return -1;
+    var best: i32 = -1;
+    var best_start: i64 = -1;
+    for (c.attributes) |attr| {
+        switch (attr) {
+            .line_number_table => |lnt| for (lnt) |e| {
+                if (e.start_pc <= pc and @as(i64, e.start_pc) > best_start) {
+                    best_start = e.start_pc;
+                    best = e.line_number;
+                }
+            },
+            else => {},
+        }
+    }
+    return best;
 }
 
 /// Print an uncaught exception the way `java` does its first line:
@@ -6725,6 +6766,24 @@ test "Compute: int methods still work" {
     try testing.expectEqual(Value{ .int = 55 }, (try cls.callStatic("sumTo", "(I)I", &.{10})).?);
     try testing.expectEqual(Value{ .int = 120 }, (try cls.callStatic("fact", "(I)I", &.{5})).?);
     try testing.expectEqual(Value{ .int = 1000042 }, (try cls.callStatic("big", "(I)I", &.{42})).?);
+}
+
+test "stack-trace groundwork: source_file, frameMethod, lineForPc" {
+    var cf: ClassFile = undefined;
+    var arena: std.heap.ArenaAllocator = undefined;
+    const cls = try loadClass("testdata/Compute.class", &cf, &arena);
+    defer cf.deinit();
+    defer arena.deinit();
+    // javac emits a SourceFile attribute by default.
+    try testing.expectEqualStrings("Compute.java", cls.source_file.?);
+    // Each method's bytecode maps back to itself via frameMethod, and its first
+    // pc resolves to a real (>0) source line via the LineNumberTable.
+    for (cls.methods) |*m| {
+        const code = (m.code orelse continue).code;
+        const found = frameMethod(&cls, code) orelse return error.TestUnexpectedResult;
+        try testing.expectEqualStrings(m.name, found.name);
+        try testing.expect(lineForPc(m, 0) > 0);
+    }
 }
 
 test "Recur: recursion still works" {
