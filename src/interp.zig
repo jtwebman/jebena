@@ -4049,6 +4049,10 @@ const Fiber = struct {
 const Carrier = struct {
     id: u32 = 0,
     current: ?*Fiber = null,
+    /// Per-carrier execution budget (reductions + in-flight exception `pending`).
+    /// Per-carrier because a fiber can be run by any carrier, one at a time; when
+    /// a carrier picks up a fiber it re-points that fiber's frames at this budget.
+    budget: Budget = .{},
 };
 
 /// Cooperative scheduler over green-thread fibers (single carrier for now).
@@ -4133,10 +4137,13 @@ const Scheduler = struct {
     /// propagate (single-fiber for now; spawned-fiber errors will be isolated
     /// in a later sub-step).
     fn run(self: *Scheduler, budget: *Budget) RunError!void {
+        self.carrier.budget = budget.*; // seed carrier 0 from the run budget
+        const cb = &self.carrier.budget;
         while (self.popReady()) |fib| {
+            for (fib.call_stack.items) |fr| fr.budget = cb; // this carrier now owns the fiber
             self.carrier.current = fib;
             fib.status = .running;
-            const outcome = driveFiber(fib, budget) catch |e| {
+            const outcome = driveFiber(fib, cb) catch |e| {
                 fib.err = e;
                 fib.status = .done;
                 self.carrier.current = null;
@@ -4145,7 +4152,7 @@ const Scheduler = struct {
             self.carrier.current = null;
             switch (outcome) {
                 .yielded => {
-                    budget.reductions = budget.reduction_quantum;
+                    cb.reductions = cb.reduction_quantum;
                     fib.status = .ready;
                     try self.pushReady(fib);
                 },
@@ -4191,6 +4198,7 @@ const Scheduler = struct {
         defer self.carrier.current = saved;
         while (!waiter.notified) {
             const fib = self.popReady() orelse break;
+            for (fib.call_stack.items) |fr| fr.budget = budget;
             self.carrier.current = fib;
             fib.status = .running;
             const outcome = driveFiber(fib, budget) catch |e| {
@@ -4218,6 +4226,7 @@ const Scheduler = struct {
         defer self.carrier.current = saved;
         while (target.status != .done) {
             const fib = self.popReady() orelse break; // nothing runnable (avoid hang)
+            for (fib.call_stack.items) |fr| fr.budget = budget;
             self.carrier.current = fib;
             fib.status = .running;
             const outcome = driveFiber(fib, budget) catch |e| {
