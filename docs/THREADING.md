@@ -266,6 +266,19 @@ parked fiber back to the ready queue. This is the next major concurrency feature
 it unblocks `CyclicBarrier`, `Executors`/thread-pools, and blocking queues. Until
 then, keep concurrent library code to patterns where blocked < carriers.
 
+### Parking step (b) attempt (iter 82): join0->park reverted (jbase-smoke regression)
+
+Converted Thread.join0 to real parking (park_join fiber field; retire() wakes
+joiners on completion; parkCommit() double-checks under scheduler.lock; invoke
+handlers restore operand-stack sp on error.Park so resume re-runs the invoke
+cleanly). Isolated join patterns pass (StressMain 8-join, alloc-child+join,
+wait/notify+join all exact @1&4), but jbase-smoke regressed to a LinkError with the
+full sequence -- root cause not yet pinpointed (initial nested-Thread-subclass
+repros turned out to fail at iter81 too, i.e. invalid red herrings). Reverted to
+the iter81 spin/pump join to keep the gate green; the WIP is saved for a proper
+next-iteration debug that bisects WITHIN jbase-smoke (not synthetic tests). The
+inert parking plumbing (iter80) and lambdas-on-explicit-stack (iter81) remain.
+
 **Known limitations (opt-in path only; default single carrier unaffected) —
 harden next:**
 - Real monitors + `wait/notify`: DONE (iter 74). `monitorenter/monitorexit` are
