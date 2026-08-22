@@ -16,6 +16,7 @@ Each iteration is one small, verified, committed step. Never leave the tree red.
    - `bash scripts/thread-stress.sh` — green-thread scheduler + AtomicInteger under many fibers (carriers 1 & 4)
    - `bash scripts/alloc-gc-stress.sh` — moving mark-compact GC under heavy allocation (carriers 1 & 4, concurrent GC)
    - `bash scripts/load-stress.sh` — concurrent lazy class loading + interning across carriers (1 & 4, +GC)
+   - `bash scripts/throw-stress.sh` — exception throw/catch + allocation under concurrent GC (carriers 1 & 4)
    - `bash scripts/portability-check.sh` — VM cross-compiles for macOS/Linux (aarch64/x86_64)
    - `zig fmt --check src/ build.zig` — formatted
    If anything fails: fix it, or revert the change. Do not commit red.

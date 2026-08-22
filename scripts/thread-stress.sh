@@ -15,7 +15,9 @@ JAVAC="$(command -v javac || echo /usr/lib/jvm/java-17-openjdk-amd64/bin/javac)"
 OUT=/tmp/jebena-thread-stress
 rm -rf "$OUT"; mkdir -p "$OUT"
 bash "$ROOT/scripts/build-jbase.sh" >/dev/null
-"$JAVAC" -d "$OUT" "$ROOT"/test/stress/*.java "$ROOT/test/diff/Driver.java"
+# Compile only StressMain (not test/stress/*.java: other stress mains like
+# LoadStress depend on classpath-dir helper classes not present here).
+"$JAVAC" -d "$OUT" "$ROOT"/test/stress/StressMain.java "$ROOT/test/diff/Driver.java"
 "$ZIG" build --build-file "$ROOT/build.zig" >/dev/null 2>&1
 JEBENA="$ROOT/zig-out/bin/jebena"
 EXP=$("$JAVA" -cp "$OUT" Driver st.StressMain demo 2>/dev/null)

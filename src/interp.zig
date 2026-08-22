@@ -510,6 +510,7 @@ fn collectMajor(f: *Frame) void {
     };
     for (f.loader.statics.items) |st| for (st) |v| markValue(heap, v);
     if (f.budget.pending) |eid| markObject(heap, eid);
+    for (f.loader.scheduler.carriers) |*c| if (c.budget.pending) |eid| markObject(heap, eid);
     {
         var it = heap.interned.valueIterator();
         while (it.next()) |vp| markObject(heap, vp.*);
@@ -544,7 +545,15 @@ fn collectMajor(f: *Frame) void {
     //    positions; only dead slots are null).
     remapRoots(f, forwarding);
     for (0..heap.objects.count()) |i| if (heap.objects.get(i).*) |*obj| remapObject(obj, forwarding);
-    if (f.budget.pending) |eid| f.budget.pending = forwarding[eid];
+    if (f.loader.scheduler.carriers.len > 0) {
+        // Multi-carrier: f.budget IS one of these, so remap via the slice only
+        // (remap is not idempotent -- must touch each pending exactly once).
+        for (f.loader.scheduler.carriers) |*c| if (c.budget.pending) |eid| {
+            c.budget.pending = forwarding[eid];
+        };
+    } else if (f.budget.pending) |eid| {
+        f.budget.pending = forwarding[eid];
+    }
     {
         var it = heap.interned.valueIterator();
         while (it.next()) |vp| vp.* = forwarding[vp.*];
@@ -614,6 +623,7 @@ fn collectMinor(f: *Frame) void {
     };
     for (f.loader.statics.items) |st| for (st) |v| markYoungValue(heap, v);
     if (f.budget.pending) |eid| markYoungObject(heap, eid);
+    for (f.loader.scheduler.carriers) |*c| if (c.budget.pending) |eid| markYoungObject(heap, eid);
     {
         var it = heap.interned.valueIterator();
         while (it.next()) |vp| markYoungObject(heap, vp.*);
@@ -4200,6 +4210,11 @@ const Scheduler = struct {
     /// Number of carriers in the pool (1 today) and how many are parked at the
     /// safepoint. The requester waits until parked == carriers_total-1 (all others).
     carriers_total: u32 = 1,
+    /// Live carriers for the current multi-carrier run (set by runMulti, cleared
+    /// after). GC roots every carrier's budget.pending -- an in-flight exception on
+    /// a worker must survive a collection triggered on another carrier. Empty at
+    /// one carrier (the collecting frame's f.budget is handled directly).
+    carriers: []Carrier = &.{},
     parked: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
     /// Desired carrier count from JEBENA_CARRIERS (opt-in parallelism, Stage
     /// 4d-4). carriers_total stays 1 (the active count) until real carrier threads
@@ -4300,6 +4315,8 @@ const Scheduler = struct {
         const carriers = self.gpa.alloc(Carrier, n) catch return error.OutOfMemory;
         defer self.gpa.free(carriers);
         for (carriers, 0..) |*c, i| c.* = .{ .id = @intCast(i), .budget = budget.* };
+        self.carriers = carriers; // GC roots each carrier's budget.pending
+        defer self.carriers = &.{};
         const threads = self.gpa.alloc(std.Thread, n - 1) catch return error.OutOfMemory;
         defer self.gpa.free(threads);
         var spawned: usize = 0;
