@@ -44,6 +44,7 @@ Each iteration is one small, verified, committed step. Never leave the tree red.
    - `bash scripts/cch-compute-stress.sh` — ConcurrentHashMap.computeIfAbsent single-create atomicity: 8 fibers race to create+increment a shared AtomicInteger per key (5 keys) -> 40005 at carriers 1 & 4 (+GC), matches real java
    - `bash scripts/rpn-smoke.sh` — an RPN integer evaluator over ArrayDeque (push/pop/size + split + parseInt + arithmetic + caught ArithmeticException/IllegalStateException); full stdout byte-identical to real java
    - `bash scripts/lbq-stress.sh` — LinkedBlockingQueue producer/consumer distinct-value checksum (6 producers × 200 unique values, 3 consumers take()/park, AtomicLong sum, poison pills) = 30120600 at carriers 1 & 4 (+GC), matches real java
+   - `bash scripts/bigint-smoke.sh` — a BigInteger factorial/Fibonacci/power table (exact big values in String.format columns + 50!/fib(100)/2^256/digits(100!)); full stdout byte-identical to real java
    - `bash scripts/portability-check.sh` — VM cross-compiles for macOS/Linux (aarch64/x86_64)
    - `zig fmt --check src/ build.zig` — formatted
    If anything fails: fix it, or revert the change. Do not commit red.
