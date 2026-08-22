@@ -426,9 +426,14 @@ proper fix (poll/epoll integration so a blocked fiber yields its carrier, like
 the join/monitor/wait parking) is future work; step 1 is correct where tested and
 documents the limit, per the incremental plan.
 
-Next: (2) a hand-written HTTP/1.1 server in Java + test client; (3) a minimal
-Postgres wire-protocol client (opt-in behind JEBENA_PGTEST); (4) an HTTP endpoint
-backed by Postgres.
+Step 2 (2026-08-22): a hand-written HTTP/1.1 server + client LANDED (pure Java on
+the step-1 sockets, no interp.zig change) — `test/stress/HttpEcho.java` parses the
+request line + headers to CRLFCRLF and replies 200 with a Content-Length body
+echoing the path; `http-stress.sh` @carriers 2 & 4 (+GC) matches real java, skips
+cleanly if sockets unavailable.
+
+Next: (3) a minimal Postgres wire-protocol client (opt-in behind JEBENA_PGTEST);
+(4) an HTTP endpoint backed by Postgres.
 
 ## Policy (2026-08-21, from the user): thread-safety is now non-negotiable
 
