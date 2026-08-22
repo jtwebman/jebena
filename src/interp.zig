@@ -3674,14 +3674,19 @@ fn nativeInvoke(f: *Frame, owner: *const Class, method: *const Class.Method, slo
                     if (@atomicLoad(u64, &inst.mon_owner, .acquire) != myown) return; // not owner (real java: IllegalMonitorStateException)
                     fib.wait_saved = inst.mon_count;
                     inst.mon_count = 0;
+                    fib.waiting_on = recv;
+                    @atomicStore(bool, &fib.notified, false, .release);
+                    fib.wait_reacq = false;
+                    // Same monitor-release lost-wakeup race as monitorexit: release the
+                    // monitor and wake monitor-parkers in ONE critical section under
+                    // scheduler.lock, serialized with parkCommit.
+                    sched.lock.lock();
                     @atomicStore(u64, &inst.mon_owner, 0, .release);
+                    if (sched.monitor_parkers.load(.acquire) > 0) sched.wakeMonitorLocked(recv); // let a monitor-parker proceed
+                    sched.lock.unlock();
                 },
                 else => return,
             }
-            fib.waiting_on = recv;
-            @atomicStore(bool, &fib.notified, false, .release);
-            fib.wait_reacq = false;
-            if (sched.monitor_parkers.load(.acquire) > 0) sched.wakeMonitor(recv); // let a monitor-parker proceed
             return error.Park;
         }
         if (eq2(mn, md, "notify", "()V")) {
@@ -4481,6 +4486,15 @@ const Scheduler = struct {
     fn wakeMonitor(self: *Scheduler, mid: u32) void {
         self.lock.lock();
         defer self.lock.unlock();
+        self.wakeMonitorLocked(mid);
+    }
+
+    /// wakeMonitor body; caller MUST already hold self.lock. The monitor release
+    /// path (monitorexit / wait) takes the lock itself so that releasing the
+    /// monitor and waking parkers is one critical section, serialized with
+    /// parkCommit's mon_owner-read + monitor_parkers++ (closes the StoreLoad
+    /// lost-wakeup race — see monitorexit).
+    fn wakeMonitorLocked(self: *Scheduler, mid: u32) void {
         for (self.all.items) |w| {
             if (w.status == .parked and w.park_monitor == mid) {
                 w.park_monitor = null;
@@ -5914,9 +5928,21 @@ fn runFrame(f: *Frame) RunError!FrameResult {
                     if (inst.mon_count > 0) {
                         inst.mon_count -= 1;
                         if (inst.mon_count == 0) {
+                            // Release the monitor and wake parkers in ONE critical
+                            // section under scheduler.lock. Doing the mon_owner=0 store
+                            // and the monitor_parkers check lock-free loses a wakeup: a
+                            // contender in parkCommit (holding the lock) can read the
+                            // still-held mon_owner and then increment monitor_parkers
+                            // AFTER we read it as 0 — a StoreLoad race. Serializing here
+                            // with parkCommit closes it: whoever takes the lock first
+                            // either parks against a held monitor we then wake, or reads
+                            // the released monitor and re-readies itself.
+                            const sched = &f.loader.scheduler;
+                            sched.lock.lock();
                             @atomicStore(u64, &inst.mon_owner, 0, .release);
-                            if (f.loader.scheduler.monitor_parkers.load(.acquire) > 0)
-                                f.loader.scheduler.wakeMonitor(cur);
+                            if (sched.monitor_parkers.load(.acquire) > 0)
+                                sched.wakeMonitorLocked(cur);
+                            sched.lock.unlock();
                         }
                     }
                 },

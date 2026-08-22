@@ -296,6 +296,33 @@ free?) under the lock, closing lost-wakeup races. GC marks+remaps park_monitor a
 waiting_on. Steps c and d had to land together (monitor-park alone hung the combo
 because wait still spun -- see iter 84).
 
+### FIX (2026-08-22): monitor-release lost-wakeup race (StoreLoad) — was flaky since iter 85
+
+A rare (~1-3%, timing-dependent) hang under monitor contention: the process would
+sit with the main thread parked and every carrier spinning an empty ready-queue
+(a parked fiber never re-readied). Root cause was a classic StoreLoad race between
+`monitorexit` (and the `wait()`-release path) and `parkCommit`:
+
+- `monitorexit` did `store mon_owner=0` then, LOCK-FREE, `load monitor_parkers`;
+  if 0 it skipped `wakeMonitor`.
+- `parkCommit` (under `scheduler.lock`) did `read mon_owner`; if still held it
+  parked the fiber and `monitor_parkers += 1`.
+
+Interleaving that lost the wakeup: a contender (holding the lock) reads the
+still-held `mon_owner` → decides to park; the owner then stores `mon_owner=0` and
+reads `monitor_parkers` as 0 (the contender has not incremented yet) → skips the
+wake; the contender finishes committing to `.parked` → nobody ever wakes it.
+(join and notify were already safe: both sides synchronize on `scheduler.lock`.)
+
+Fix: the monitor RELEASE + parker-check + wake is now ONE critical section under
+`scheduler.lock` (`wakeMonitorLocked`), serialized with `parkCommit`. Whoever
+takes the lock first either parks against a monitor we then wake, or reads the
+released monitor and re-readies itself — no lost wakeup. Validated: 1200 amplified
+runs across MonContend/WaitNotify/ManyWait/QueueStress/SyncCounter/SyncMethod at
+carriers=4 (+GC) with 0 hangs (baseline ~2.7%). NOTE: `bash -c` invocation in the
+gate scripts amplifies the race window vs a direct exec — it was masking the bug's
+frequency, not causing it (the hung VM had empty stdout = mid-computation).
+
 Proven at carriers 1 & 4 (+GC): sync-stress now includes MonContend (16 fibers on
 ONE lock, 16 > carriers = 8000), waitnotify-stress includes ManyWait (16 waiters
 park on one monitor, notifyAll = 16), plus join-stress (16 joiners). All the
