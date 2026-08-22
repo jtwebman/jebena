@@ -665,6 +665,62 @@ pub const Loader = struct {
     }
 };
 
+fn annoReadU16(info: []const u8, cur: *usize) u16 {
+    if (cur.* + 2 > info.len) {
+        cur.* = info.len;
+        return 0;
+    }
+    const v = std.mem.readInt(u16, info[cur.*..][0..2], .big);
+    cur.* += 2;
+    return v;
+}
+fn annoSkipElementValue(info: []const u8, cur: *usize) void {
+    if (cur.* >= info.len) return;
+    const tag = info[cur.*];
+    cur.* += 1;
+    switch (tag) {
+        'B', 'C', 'D', 'F', 'I', 'J', 'S', 'Z', 's', 'c' => _ = annoReadU16(info, cur),
+        'e' => {
+            _ = annoReadU16(info, cur);
+            _ = annoReadU16(info, cur);
+        },
+        '@' => {
+            _ = annoReadU16(info, cur); // type index
+            const np = annoReadU16(info, cur);
+            var i: usize = 0;
+            while (i < np) : (i += 1) {
+                _ = annoReadU16(info, cur); // element name
+                annoSkipElementValue(info, cur);
+            }
+        },
+        '[' => {
+            const n = annoReadU16(info, cur);
+            var i: usize = 0;
+            while (i < n) : (i += 1) annoSkipElementValue(info, cur);
+        },
+        else => {},
+    }
+}
+fn decodeAnnotationTypeNames(arena: std.mem.Allocator, cp: anytype, info: []const u8) ![]const []const u8 {
+    var names: std.ArrayListUnmanaged([]const u8) = .empty;
+    var cur: usize = 0;
+    const num = annoReadU16(info, &cur);
+    var a: usize = 0;
+    while (a < num) : (a += 1) {
+        const type_index = annoReadU16(info, &cur);
+        const desc = cp.utf8(type_index) catch "";
+        if (desc.len >= 2 and desc[0] == 'L' and desc[desc.len - 1] == ';') {
+            try names.append(arena, desc[1 .. desc.len - 1]);
+        }
+        const num_pairs = annoReadU16(info, &cur);
+        var p: usize = 0;
+        while (p < num_pairs) : (p += 1) {
+            _ = annoReadU16(info, &cur); // element_name_index
+            annoSkipElementValue(info, &cur);
+        }
+    }
+    return names.toOwnedSlice(arena);
+}
 pub const Class = struct {
     gpa: std.mem.Allocator,
     cp: ConstantPool,
@@ -677,6 +733,8 @@ pub const Class = struct {
     static_fields: []Field,
     bootstrap_methods: []const attribute_decode.BootstrapMethod,
     is_stub: bool = false,
+    /// Internal names of the class's RuntimeVisibleAnnotations (e.g. "jebena/MyAnno").
+    annotations: []const []const u8 = &.{},
 
     pub const Field = struct { name: []const u8, kind: Kind };
     pub const Param = struct { kind: Kind, slot: u16 };
@@ -767,13 +825,21 @@ pub const Class = struct {
                 .is_native = is_native,
             };
         }
+        var class_annos: []const []const u8 = &.{};
+        for (cf.attributes) |ai| {
+            const an = cf.constant_pool.utf8(ai.name_index) catch continue;
+            if (std.mem.eql(u8, an, "RuntimeVisibleAnnotations")) {
+                class_annos = decodeAnnotationTypeNames(arena, cf.constant_pool, ai.info) catch &.{};
+                break;
+            }
+        }
         var bootstrap: []const attribute_decode.BootstrapMethod = &.{};
         for (cf.attributes) |ai| {
             if (std.mem.eql(u8, try cf.constant_pool.utf8(ai.name_index), "BootstrapMethods")) {
                 bootstrap = (try attribute_decode.decode(arena, cf.constant_pool, ai)).bootstrap_methods;
             }
         }
-        return .{ .gpa = gpa, .cp = cf.constant_pool, .name = cls_name, .super = super, .super_name = super_name, .interfaces = interfaces, .methods = methods, .instance_fields = instance_fields, .static_fields = static_fields, .bootstrap_methods = bootstrap };
+        return .{ .gpa = gpa, .cp = cf.constant_pool, .name = cls_name, .super = super, .super_name = super_name, .interfaces = interfaces, .methods = methods, .instance_fields = instance_fields, .static_fields = static_fields, .bootstrap_methods = bootstrap, .annotations = class_annos };
     }
 
     fn findField(self: *const Class, name: []const u8) ?usize {
@@ -2726,6 +2792,17 @@ fn nativeInvoke(f: *Frame, owner: *const Class, method: *const Class.Method, slo
         if (eq2(mn, md, "getDeclaredMethods", "()[Ljava/lang/reflect/Method;")) return reflectGetMembers(f, recv, .methods);
         if (eq2(mn, md, "getDeclaredFields", "()[Ljava/lang/reflect/Field;")) return reflectGetMembers(f, recv, .fields);
         if (eq2(mn, md, "getDeclaredConstructors", "()[Ljava/lang/reflect/Constructor;")) return reflectGetMembers(f, recv, .ctors);
+        if (eq2(mn, md, "isAnnotationPresent", "(Ljava/lang/Class;)Z")) {
+            const arg = switch (slots[method.params[0].slot]) {
+                .reference => |r| r orelse return error.NullPointer,
+                else => return error.TypeMismatch,
+            };
+            const anno_cls = try mirrorClass(f, arg);
+            for (rc.annotations) |an| {
+                if (std.mem.eql(u8, an, anno_cls.name)) return f.pushInt(1);
+            }
+            return f.pushInt(0);
+        }
     }
     if (std.mem.eql(u8, on, "java/lang/reflect/Method")) {
         const self = switch (slots[0]) {
@@ -2878,6 +2955,11 @@ fn loadConstant(f: *Frame, class: ?*const Class, index: u16) RunError!void {
         .integer => |v| try f.pushInt(v),
         .float => |v| try f.pushFloat(v),
         .string => |si| try createString(f, cls.cp.utf8(si) catch return error.LinkError),
+        .class => {
+            const name = cls.cp.classNameOf(index) catch return error.LinkError;
+            const target = f.loader.find(name) orelse return error.LinkError;
+            try f.push(.{ .reference = try getMirror(f, target) });
+        },
         else => return error.UnsupportedOpcode,
     }
 }

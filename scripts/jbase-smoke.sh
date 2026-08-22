@@ -12,12 +12,13 @@ JAVAC="$(command -v javac || echo /usr/lib/jvm/java-17-openjdk-amd64/bin/javac)"
 OUT=/tmp/jebena-jbase-smoke
 rm -rf "$OUT"; mkdir -p "$OUT"
 bash "$ROOT/scripts/build-jbase.sh" >/dev/null
-"$JAVAC" -d "$OUT" "$ROOT/test/jbase/JBaseSmoke.java" "$ROOT/test/jbase/ReflectTarget.java" "$ROOT/test/diff/Driver.java"
+"$JAVAC" -d "$OUT" "$ROOT"/test/jbase/*.java "$ROOT/test/diff/Driver.java"
 "$ZIG" build --build-file "$ROOT/build.zig" >/dev/null 2>&1
 JEBENA="$ROOT/zig-out/bin/jebena"
 EXP=$("$JAVA" -cp "$OUT" Driver jebena.JBaseSmoke demo 2>/dev/null)
 JBASE_CLASSES=$(find "$ROOT/jbase/out" -name '*.class' | tr '\n' ' ')
-GOT=$("$JEBENA" run jebena/JBaseSmoke demo "$OUT/jebena/JBaseSmoke.class" "$OUT/jebena/ReflectTarget.class" $JBASE_CLASSES 2>&1 | sed -n 's/.*= \(-\?[0-9]*\).*/\1/p')
+APP_CLASSES=$(ls "$OUT"/jebena/*.class | tr '\n' ' ')
+GOT=$("$JEBENA" run jebena/JBaseSmoke demo $APP_CLASSES $JBASE_CLASSES 2>&1 | sed -n 's/.*= \(-\?[0-9]*\).*/\1/p')
 echo "jbase-smoke: jebena=$GOT  java=$EXP"
 [ "$GOT" = "$EXP" ] || { echo "JBASE SMOKE FAILED (mismatch)"; exit 1; }
 echo "jbase-smoke: OK — our clean-room java.base matches real java on Object/Math/Throwable/String"

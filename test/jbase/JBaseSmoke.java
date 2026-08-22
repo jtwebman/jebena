@@ -401,6 +401,12 @@ public class JBaseSmoke {
         }
         r += tssum;
 
+        // === Annotations: presence via RuntimeVisibleAnnotations decode ===
+        Annotated anx = new Annotated();
+        Class<?> ac = anx.getClass();
+        if (ac.isAnnotationPresent(MyAnno.class)) r += 1000;
+        if (!ac.isAnnotationPresent(OtherAnno.class)) r += 2000;
+
         // === Reflection: getClass -> methods/fields/ctors, invoke/get/set/newInstance ===
         ReflectTarget rt0 = new ReflectTarget(5, "hi");
         Class<?> rc = rt0.getClass();

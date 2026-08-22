@@ -20,6 +20,8 @@ public final class Class {
 
     public native java.lang.reflect.Constructor[] getDeclaredConstructors();
 
+    public native boolean isAnnotationPresent(Class annotationClass);
+
     public String toString() {
         return "class " + getName();
     }
