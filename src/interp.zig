@@ -75,6 +75,7 @@ const Frame = struct {
     heap: ?*Heap = null,
     loader: *Loader = undefined,
     parent: ?*Frame = null,
+    code: []const u8 = &.{},
 
     fn push(f: *Frame, v: Value) RunError!void {
         if (f.sp >= f.stack.len) return error.StackOverflow;
@@ -569,10 +570,10 @@ fn opAt(code: []const u8, pc: usize) RunError!Op {
     if (pc >= code.len) return error.Truncated;
     return std.enums.fromInt(Op, code[pc]) orelse error.BadOpcode;
 }
-fn step(f: *Frame, code: []const u8) RunError!Op {
+fn step(f: *Frame) RunError!Op {
     f.budget.steps += 1;
     if (f.budget.steps > f.budget.max_steps) return error.StepLimitExceeded;
-    return opAt(code, f.pc);
+    return opAt(f.code, f.pc);
 }
 fn s8(code: []const u8, off: usize) RunError!i32 {
     if (off >= code.len) return error.Truncated;
@@ -3675,153 +3676,153 @@ fn exec(alloc: std.mem.Allocator, class: ?*const Class, heap: ?*Heap, loader: *L
     for (locals) |*l| l.* = .{ .int = 0 };
     for (arg_slots, 0..) |v, i| locals[i] = v;
 
-    var f = Frame{ .stack = stack, .locals = locals, .budget = budget, .heap = heap, .loader = loader, .parent = parent };
+    var f = Frame{ .stack = stack, .locals = locals, .budget = budget, .heap = heap, .loader = loader, .parent = parent, .code = code };
 
     sw: switch (try opAt(code, f.pc)) {
         .nop => {
             f.pc += 1;
-            continue :sw try step(&f, code);
+            continue :sw try step(&f);
         },
         // ---- constants ----
         .iconst_m1, .iconst_0, .iconst_1, .iconst_2, .iconst_3, .iconst_4, .iconst_5 => |o| {
             try f.pushInt(@as(i32, @intFromEnum(o)) - @intFromEnum(Op.iconst_0));
             f.pc += 1;
-            continue :sw try step(&f, code);
+            continue :sw try step(&f);
         },
         .lconst_0, .lconst_1 => |o| {
             try f.pushLong(@intFromEnum(o) - @intFromEnum(Op.lconst_0));
             f.pc += 1;
-            continue :sw try step(&f, code);
+            continue :sw try step(&f);
         },
         .fconst_0, .fconst_1, .fconst_2 => |o| {
             try f.pushFloat(@floatFromInt(@intFromEnum(o) - @intFromEnum(Op.fconst_0)));
             f.pc += 1;
-            continue :sw try step(&f, code);
+            continue :sw try step(&f);
         },
         .dconst_0, .dconst_1 => |o| {
             try f.pushDouble(@floatFromInt(@intFromEnum(o) - @intFromEnum(Op.dconst_0)));
             f.pc += 1;
-            continue :sw try step(&f, code);
+            continue :sw try step(&f);
         },
         .bipush => {
             try f.pushInt(try s8(code, f.pc + 1));
             f.pc += 2;
-            continue :sw try step(&f, code);
+            continue :sw try step(&f);
         },
         .sipush => {
             try f.pushInt(try s16(code, f.pc + 1));
             f.pc += 3;
-            continue :sw try step(&f, code);
+            continue :sw try step(&f);
         },
         .ldc => {
             try loadConstant(&f, class, @intCast(try u8At(code, f.pc + 1)));
             f.pc += 2;
-            continue :sw try step(&f, code);
+            continue :sw try step(&f);
         },
         .ldc_w => {
             try loadConstant(&f, class, try u16At(code, f.pc + 1));
             f.pc += 3;
-            continue :sw try step(&f, code);
+            continue :sw try step(&f);
         },
         .ldc2_w => {
             try loadConstant2(&f, class, try u16At(code, f.pc + 1));
             f.pc += 3;
-            continue :sw try step(&f, code);
+            continue :sw try step(&f);
         },
         // ---- loads ----
         .iload => {
             try f.pushInt(try f.localInt(try u8At(code, f.pc + 1)));
             f.pc += 2;
-            continue :sw try step(&f, code);
+            continue :sw try step(&f);
         },
         .iload_0, .iload_1, .iload_2, .iload_3 => |o| {
             try f.pushInt(try f.localInt(@intFromEnum(o) - @intFromEnum(Op.iload_0)));
             f.pc += 1;
-            continue :sw try step(&f, code);
+            continue :sw try step(&f);
         },
         .lload => {
             try f.pushLong(try f.localLong(try u8At(code, f.pc + 1)));
             f.pc += 2;
-            continue :sw try step(&f, code);
+            continue :sw try step(&f);
         },
         .lload_0, .lload_1, .lload_2, .lload_3 => |o| {
             try f.pushLong(try f.localLong(@intFromEnum(o) - @intFromEnum(Op.lload_0)));
             f.pc += 1;
-            continue :sw try step(&f, code);
+            continue :sw try step(&f);
         },
         .fload => {
             try f.pushFloat(try f.localFloat(try u8At(code, f.pc + 1)));
             f.pc += 2;
-            continue :sw try step(&f, code);
+            continue :sw try step(&f);
         },
         .fload_0, .fload_1, .fload_2, .fload_3 => |o| {
             try f.pushFloat(try f.localFloat(@intFromEnum(o) - @intFromEnum(Op.fload_0)));
             f.pc += 1;
-            continue :sw try step(&f, code);
+            continue :sw try step(&f);
         },
         .dload => {
             try f.pushDouble(try f.localDouble(try u8At(code, f.pc + 1)));
             f.pc += 2;
-            continue :sw try step(&f, code);
+            continue :sw try step(&f);
         },
         .dload_0, .dload_1, .dload_2, .dload_3 => |o| {
             try f.pushDouble(try f.localDouble(@intFromEnum(o) - @intFromEnum(Op.dload_0)));
             f.pc += 1;
-            continue :sw try step(&f, code);
+            continue :sw try step(&f);
         },
         // ---- stores ----
         .istore => {
             try f.setLocal1(try u8At(code, f.pc + 1), .{ .int = try f.popInt() });
             f.pc += 2;
-            continue :sw try step(&f, code);
+            continue :sw try step(&f);
         },
         .istore_0, .istore_1, .istore_2, .istore_3 => |o| {
             try f.setLocal1(@intFromEnum(o) - @intFromEnum(Op.istore_0), .{ .int = try f.popInt() });
             f.pc += 1;
-            continue :sw try step(&f, code);
+            continue :sw try step(&f);
         },
         .lstore => {
             try f.setLocal2(try u8At(code, f.pc + 1), .{ .long = try f.popLong() });
             f.pc += 2;
-            continue :sw try step(&f, code);
+            continue :sw try step(&f);
         },
         .lstore_0, .lstore_1, .lstore_2, .lstore_3 => |o| {
             try f.setLocal2(@intFromEnum(o) - @intFromEnum(Op.lstore_0), .{ .long = try f.popLong() });
             f.pc += 1;
-            continue :sw try step(&f, code);
+            continue :sw try step(&f);
         },
         .fstore => {
             try f.setLocal1(try u8At(code, f.pc + 1), .{ .float = try f.popFloat() });
             f.pc += 2;
-            continue :sw try step(&f, code);
+            continue :sw try step(&f);
         },
         .fstore_0, .fstore_1, .fstore_2, .fstore_3 => |o| {
             try f.setLocal1(@intFromEnum(o) - @intFromEnum(Op.fstore_0), .{ .float = try f.popFloat() });
             f.pc += 1;
-            continue :sw try step(&f, code);
+            continue :sw try step(&f);
         },
         .dstore => {
             try f.setLocal2(try u8At(code, f.pc + 1), .{ .double = try f.popDouble() });
             f.pc += 2;
-            continue :sw try step(&f, code);
+            continue :sw try step(&f);
         },
         .dstore_0, .dstore_1, .dstore_2, .dstore_3 => |o| {
             try f.setLocal2(@intFromEnum(o) - @intFromEnum(Op.dstore_0), .{ .double = try f.popDouble() });
             f.pc += 1;
-            continue :sw try step(&f, code);
+            continue :sw try step(&f);
         },
         // ---- stack ops ----
         .pop => {
             _ = try f.pop();
             f.pc += 1;
-            continue :sw try step(&f, code);
+            continue :sw try step(&f);
         },
         .dup => {
             const v = try f.pop();
             try f.push(v);
             try f.push(v);
             f.pc += 1;
-            continue :sw try step(&f, code);
+            continue :sw try step(&f);
         },
         .swap => {
             const b = try f.pop();
@@ -3829,13 +3830,13 @@ fn exec(alloc: std.mem.Allocator, class: ?*const Class, heap: ?*Heap, loader: *L
             try f.push(b);
             try f.push(a2);
             f.pc += 1;
-            continue :sw try step(&f, code);
+            continue :sw try step(&f);
         },
         .pop2 => {
             if (f.sp < 2) return error.StackUnderflow;
             f.sp -= 2;
             f.pc += 1;
-            continue :sw try step(&f, code);
+            continue :sw try step(&f);
         },
         .dup_x1 => {
             if (f.sp < 2) return error.StackUnderflow;
@@ -3847,7 +3848,7 @@ fn exec(alloc: std.mem.Allocator, class: ?*const Class, heap: ?*Heap, loader: *L
             f.stack[f.sp] = a;
             f.sp += 1;
             f.pc += 1;
-            continue :sw try step(&f, code);
+            continue :sw try step(&f);
         },
         .dup_x2 => {
             if (f.sp < 3) return error.StackUnderflow;
@@ -3861,7 +3862,7 @@ fn exec(alloc: std.mem.Allocator, class: ?*const Class, heap: ?*Heap, loader: *L
             f.stack[f.sp] = a;
             f.sp += 1;
             f.pc += 1;
-            continue :sw try step(&f, code);
+            continue :sw try step(&f);
         },
         .dup2 => {
             if (f.sp < 2) return error.StackUnderflow;
@@ -3872,7 +3873,7 @@ fn exec(alloc: std.mem.Allocator, class: ?*const Class, heap: ?*Heap, loader: *L
             f.stack[f.sp + 1] = a;
             f.sp += 2;
             f.pc += 1;
-            continue :sw try step(&f, code);
+            continue :sw try step(&f);
         },
         .dup2_x1 => {
             if (f.sp < 3) return error.StackUnderflow;
@@ -3887,7 +3888,7 @@ fn exec(alloc: std.mem.Allocator, class: ?*const Class, heap: ?*Heap, loader: *L
             f.stack[f.sp + 1] = a;
             f.sp += 2;
             f.pc += 1;
-            continue :sw try step(&f, code);
+            continue :sw try step(&f);
         },
         .dup2_x2 => {
             if (f.sp < 4) return error.StackUnderflow;
@@ -3904,7 +3905,7 @@ fn exec(alloc: std.mem.Allocator, class: ?*const Class, heap: ?*Heap, loader: *L
             f.stack[f.sp + 1] = a;
             f.sp += 2;
             f.pc += 1;
-            continue :sw try step(&f, code);
+            continue :sw try step(&f);
         },
         // ---- int arithmetic ----
         .iadd, .isub, .imul, .idiv, .irem, .iand, .ior, .ixor, .ishl, .ishr, .iushr => |o| {
@@ -3913,18 +3914,18 @@ fn exec(alloc: std.mem.Allocator, class: ?*const Class, heap: ?*Heap, loader: *L
             const res = intBinary(o, x, y) catch |e| {
                 if (e == error.ArithmeticException) {
                     try raise(&f, class, exceptions, "java/lang/ArithmeticException", e);
-                    continue :sw try step(&f, code);
+                    continue :sw try step(&f);
                 }
                 return e;
             };
             try f.pushInt(res);
             f.pc += 1;
-            continue :sw try step(&f, code);
+            continue :sw try step(&f);
         },
         .ineg => {
             try f.pushInt(0 -% try f.popInt());
             f.pc += 1;
-            continue :sw try step(&f, code);
+            continue :sw try step(&f);
         },
         // ---- long arithmetic ----
         .ladd, .lsub, .lmul, .ldiv, .lrem, .land, .lor, .lxor => |o| {
@@ -3933,25 +3934,25 @@ fn exec(alloc: std.mem.Allocator, class: ?*const Class, heap: ?*Heap, loader: *L
             const res = longBinary(o, x, y) catch |e| {
                 if (e == error.ArithmeticException) {
                     try raise(&f, class, exceptions, "java/lang/ArithmeticException", e);
-                    continue :sw try step(&f, code);
+                    continue :sw try step(&f);
                 }
                 return e;
             };
             try f.pushLong(res);
             f.pc += 1;
-            continue :sw try step(&f, code);
+            continue :sw try step(&f);
         },
         .lshl, .lshr, .lushr => |o| {
             const s = try f.popInt();
             const x = try f.popLong();
             try f.pushLong(longShift(o, x, s));
             f.pc += 1;
-            continue :sw try step(&f, code);
+            continue :sw try step(&f);
         },
         .lneg => {
             try f.pushLong(0 -% try f.popLong());
             f.pc += 1;
-            continue :sw try step(&f, code);
+            continue :sw try step(&f);
         },
         // ---- float arithmetic ----
         .fadd, .fsub, .fmul, .fdiv, .frem => |o| {
@@ -3959,12 +3960,12 @@ fn exec(alloc: std.mem.Allocator, class: ?*const Class, heap: ?*Heap, loader: *L
             const x = try f.popFloat();
             try f.pushFloat(floatBinary(o, x, y));
             f.pc += 1;
-            continue :sw try step(&f, code);
+            continue :sw try step(&f);
         },
         .fneg => {
             try f.pushFloat(-try f.popFloat());
             f.pc += 1;
-            continue :sw try step(&f, code);
+            continue :sw try step(&f);
         },
         // ---- double arithmetic ----
         .dadd, .dsub, .dmul, .ddiv, .drem => |o| {
@@ -3972,88 +3973,88 @@ fn exec(alloc: std.mem.Allocator, class: ?*const Class, heap: ?*Heap, loader: *L
             const x = try f.popDouble();
             try f.pushDouble(doubleBinary(o, x, y));
             f.pc += 1;
-            continue :sw try step(&f, code);
+            continue :sw try step(&f);
         },
         .dneg => {
             try f.pushDouble(-try f.popDouble());
             f.pc += 1;
-            continue :sw try step(&f, code);
+            continue :sw try step(&f);
         },
         // ---- conversions ----
         .i2l => {
             try f.pushLong(try f.popInt());
             f.pc += 1;
-            continue :sw try step(&f, code);
+            continue :sw try step(&f);
         },
         .i2f => {
             try f.pushFloat(@floatFromInt(try f.popInt()));
             f.pc += 1;
-            continue :sw try step(&f, code);
+            continue :sw try step(&f);
         },
         .i2d => {
             try f.pushDouble(@floatFromInt(try f.popInt()));
             f.pc += 1;
-            continue :sw try step(&f, code);
+            continue :sw try step(&f);
         },
         .l2i => {
             try f.pushInt(@truncate(try f.popLong()));
             f.pc += 1;
-            continue :sw try step(&f, code);
+            continue :sw try step(&f);
         },
         .l2f => {
             try f.pushFloat(@floatFromInt(try f.popLong()));
             f.pc += 1;
-            continue :sw try step(&f, code);
+            continue :sw try step(&f);
         },
         .l2d => {
             try f.pushDouble(@floatFromInt(try f.popLong()));
             f.pc += 1;
-            continue :sw try step(&f, code);
+            continue :sw try step(&f);
         },
         .f2i => {
             try f.pushInt(f2i(try f.popFloat()));
             f.pc += 1;
-            continue :sw try step(&f, code);
+            continue :sw try step(&f);
         },
         .f2l => {
             try f.pushLong(f2l(try f.popFloat()));
             f.pc += 1;
-            continue :sw try step(&f, code);
+            continue :sw try step(&f);
         },
         .f2d => {
             try f.pushDouble(try f.popFloat());
             f.pc += 1;
-            continue :sw try step(&f, code);
+            continue :sw try step(&f);
         },
         .d2i => {
             try f.pushInt(f2i(try f.popDouble()));
             f.pc += 1;
-            continue :sw try step(&f, code);
+            continue :sw try step(&f);
         },
         .d2l => {
             try f.pushLong(f2l(try f.popDouble()));
             f.pc += 1;
-            continue :sw try step(&f, code);
+            continue :sw try step(&f);
         },
         .d2f => {
             try f.pushFloat(@floatCast(try f.popDouble()));
             f.pc += 1;
-            continue :sw try step(&f, code);
+            continue :sw try step(&f);
         },
         .i2b => {
             try f.pushInt(@as(i8, @truncate(try f.popInt())));
             f.pc += 1;
-            continue :sw try step(&f, code);
+            continue :sw try step(&f);
         },
         .i2c => {
             try f.pushInt(@as(u16, @truncate(@as(u32, @bitCast(try f.popInt())))));
             f.pc += 1;
-            continue :sw try step(&f, code);
+            continue :sw try step(&f);
         },
         .i2s => {
             try f.pushInt(@as(i16, @truncate(try f.popInt())));
             f.pc += 1;
-            continue :sw try step(&f, code);
+            continue :sw try step(&f);
         },
         // ---- comparisons ----
         .lcmp => {
@@ -4061,21 +4062,21 @@ fn exec(alloc: std.mem.Allocator, class: ?*const Class, heap: ?*Heap, loader: *L
             const x = try f.popLong();
             try f.pushInt(if (x > y) @as(i32, 1) else if (x < y) @as(i32, -1) else 0);
             f.pc += 1;
-            continue :sw try step(&f, code);
+            continue :sw try step(&f);
         },
         .fcmpl, .fcmpg => |o| {
             const y = try f.popFloat();
             const x = try f.popFloat();
             try f.pushInt(fcmp(o == .fcmpg, x, y));
             f.pc += 1;
-            continue :sw try step(&f, code);
+            continue :sw try step(&f);
         },
         .dcmpl, .dcmpg => |o| {
             const y = try f.popDouble();
             const x = try f.popDouble();
             try f.pushInt(dcmp(o == .dcmpg, x, y));
             f.pc += 1;
-            continue :sw try step(&f, code);
+            continue :sw try step(&f);
         },
         // ---- iinc ----
         .iinc => {
@@ -4083,7 +4084,7 @@ fn exec(alloc: std.mem.Allocator, class: ?*const Class, heap: ?*Heap, loader: *L
             const c = try s8(code, f.pc + 2);
             try f.setLocal1(idx, .{ .int = (try f.localInt(idx)) +% c });
             f.pc += 3;
-            continue :sw try step(&f, code);
+            continue :sw try step(&f);
         },
         // ---- branches ----
         .ifeq, .ifne, .iflt, .ifge, .ifgt, .ifle => |o| {
@@ -4091,7 +4092,7 @@ fn exec(alloc: std.mem.Allocator, class: ?*const Class, heap: ?*Heap, loader: *L
             if (compareZero(o, x)) {
                 f.pc = try branch(f.pc, try s16(code, f.pc + 1), code.len);
             } else f.pc += 3;
-            continue :sw try step(&f, code);
+            continue :sw try step(&f);
         },
         .if_icmpeq, .if_icmpne, .if_icmplt, .if_icmpge, .if_icmpgt, .if_icmple => |o| {
             const y = try f.popInt();
@@ -4099,11 +4100,11 @@ fn exec(alloc: std.mem.Allocator, class: ?*const Class, heap: ?*Heap, loader: *L
             if (compareInt(o, x, y)) {
                 f.pc = try branch(f.pc, try s16(code, f.pc + 1), code.len);
             } else f.pc += 3;
-            continue :sw try step(&f, code);
+            continue :sw try step(&f);
         },
         .goto => {
             f.pc = try branch(f.pc, try s16(code, f.pc + 1), code.len);
-            continue :sw try step(&f, code);
+            continue :sw try step(&f);
         },
         .ifnull, .ifnonnull => |o| {
             const r = try f.popRef();
@@ -4111,7 +4112,7 @@ fn exec(alloc: std.mem.Allocator, class: ?*const Class, heap: ?*Heap, loader: *L
             if (take) {
                 f.pc = try branch(f.pc, try s16(code, f.pc + 1), code.len);
             } else f.pc += 3;
-            continue :sw try step(&f, code);
+            continue :sw try step(&f);
         },
         .if_acmpeq, .if_acmpne => |o| {
             const b = try f.popRef();
@@ -4121,7 +4122,7 @@ fn exec(alloc: std.mem.Allocator, class: ?*const Class, heap: ?*Heap, loader: *L
             if (take) {
                 f.pc = try branch(f.pc, try s16(code, f.pc + 1), code.len);
             } else f.pc += 3;
-            continue :sw try step(&f, code);
+            continue :sw try step(&f);
         },
         .tableswitch => {
             const key = try f.popInt();
@@ -4135,7 +4136,7 @@ fn exec(alloc: std.mem.Allocator, class: ?*const Class, heap: ?*Heap, loader: *L
                 off = try i32At(code, p + 12 + i * 4);
             }
             f.pc = try branch(f.pc, off, code.len);
-            continue :sw try step(&f, code);
+            continue :sw try step(&f);
         },
         .lookupswitch => {
             const key = try f.popInt();
@@ -4152,7 +4153,7 @@ fn exec(alloc: std.mem.Allocator, class: ?*const Class, heap: ?*Heap, loader: *L
                 }
             }
             f.pc = try branch(f.pc, off, code.len);
-            continue :sw try step(&f, code);
+            continue :sw try step(&f);
         },
         .wide => {
             const w = try opAt(code, f.pc + 1);
@@ -4170,219 +4171,219 @@ fn exec(alloc: std.mem.Allocator, class: ?*const Class, heap: ?*Heap, loader: *L
                     const c = try s16(code, f.pc + 4);
                     try f.setLocal1(idx, .{ .int = (try f.localInt(idx)) +% c });
                     f.pc += 6;
-                    continue :sw try step(&f, code);
+                    continue :sw try step(&f);
                 },
                 else => return error.UnsupportedOpcode,
             }
             f.pc += 4;
-            continue :sw try step(&f, code);
+            continue :sw try step(&f);
         },
         // ---- calls / returns ----
         .aconst_null => {
             try f.push(.{ .reference = null });
             f.pc += 1;
-            continue :sw try step(&f, code);
+            continue :sw try step(&f);
         },
         .aload => {
             try f.push(try f.localRaw(try u8At(code, f.pc + 1)));
             f.pc += 2;
-            continue :sw try step(&f, code);
+            continue :sw try step(&f);
         },
         .aload_0, .aload_1, .aload_2, .aload_3 => |o| {
             try f.push(try f.localRaw(@intFromEnum(o) - @intFromEnum(Op.aload_0)));
             f.pc += 1;
-            continue :sw try step(&f, code);
+            continue :sw try step(&f);
         },
         .astore => {
             try f.setLocal1(try u8At(code, f.pc + 1), try f.pop());
             f.pc += 2;
-            continue :sw try step(&f, code);
+            continue :sw try step(&f);
         },
         .astore_0, .astore_1, .astore_2, .astore_3 => |o| {
             try f.setLocal1(@intFromEnum(o) - @intFromEnum(Op.astore_0), try f.pop());
             f.pc += 1;
-            continue :sw try step(&f, code);
+            continue :sw try step(&f);
         },
         .areturn => return try f.pop(),
         .newarray => {
             doNewArray(&f, code) catch |e| {
                 try mapTrap(&f, class, exceptions, e);
-                continue :sw try step(&f, code);
+                continue :sw try step(&f);
             };
             f.pc += 2;
-            continue :sw try step(&f, code);
+            continue :sw try step(&f);
         },
         .anewarray => {
             doANewArray(&f, code) catch |e| {
                 try mapTrap(&f, class, exceptions, e);
-                continue :sw try step(&f, code);
+                continue :sw try step(&f);
             };
             f.pc += 3;
-            continue :sw try step(&f, code);
+            continue :sw try step(&f);
         },
         .multianewarray => {
             const cls = class orelse return error.UnsupportedOpcode;
             try doMultiANewArray(&f, cls, code);
             f.pc += 4;
-            continue :sw try step(&f, code);
+            continue :sw try step(&f);
         },
         .arraylength => {
             doArrayLength(&f) catch |e| {
                 try mapTrap(&f, class, exceptions, e);
-                continue :sw try step(&f, code);
+                continue :sw try step(&f);
             };
             f.pc += 1;
-            continue :sw try step(&f, code);
+            continue :sw try step(&f);
         },
         .iaload, .baload, .caload, .saload => {
             const ai = arrayIndex(&f) catch |e| {
                 try mapTrap(&f, class, exceptions, e);
-                continue :sw try step(&f, code);
+                continue :sw try step(&f);
             };
             try f.pushInt(ai.arr.data[ai.i].int);
             f.pc += 1;
-            continue :sw try step(&f, code);
+            continue :sw try step(&f);
         },
         .laload => {
             const ai = arrayIndex(&f) catch |e| {
                 try mapTrap(&f, class, exceptions, e);
-                continue :sw try step(&f, code);
+                continue :sw try step(&f);
             };
             try f.pushLong(ai.arr.data[ai.i].long);
             f.pc += 1;
-            continue :sw try step(&f, code);
+            continue :sw try step(&f);
         },
         .faload => {
             const ai = arrayIndex(&f) catch |e| {
                 try mapTrap(&f, class, exceptions, e);
-                continue :sw try step(&f, code);
+                continue :sw try step(&f);
             };
             try f.pushFloat(ai.arr.data[ai.i].float);
             f.pc += 1;
-            continue :sw try step(&f, code);
+            continue :sw try step(&f);
         },
         .daload => {
             const ai = arrayIndex(&f) catch |e| {
                 try mapTrap(&f, class, exceptions, e);
-                continue :sw try step(&f, code);
+                continue :sw try step(&f);
             };
             try f.pushDouble(ai.arr.data[ai.i].double);
             f.pc += 1;
-            continue :sw try step(&f, code);
+            continue :sw try step(&f);
         },
         .aaload => {
             const ai = arrayIndex(&f) catch |e| {
                 try mapTrap(&f, class, exceptions, e);
-                continue :sw try step(&f, code);
+                continue :sw try step(&f);
             };
             try f.push(ai.arr.data[ai.i]);
             f.pc += 1;
-            continue :sw try step(&f, code);
+            continue :sw try step(&f);
         },
         .iastore => {
             const v = try f.popInt();
             const ai = arrayIndex(&f) catch |e| {
                 try mapTrap(&f, class, exceptions, e);
-                continue :sw try step(&f, code);
+                continue :sw try step(&f);
             };
             ai.arr.data[ai.i] = .{ .int = v };
             f.pc += 1;
-            continue :sw try step(&f, code);
+            continue :sw try step(&f);
         },
         .bastore => {
             const v = try f.popInt();
             const ai = arrayIndex(&f) catch |e| {
                 try mapTrap(&f, class, exceptions, e);
-                continue :sw try step(&f, code);
+                continue :sw try step(&f);
             };
             ai.arr.data[ai.i] = .{ .int = @as(i8, @truncate(v)) };
             f.pc += 1;
-            continue :sw try step(&f, code);
+            continue :sw try step(&f);
         },
         .castore => {
             const v = try f.popInt();
             const ai = arrayIndex(&f) catch |e| {
                 try mapTrap(&f, class, exceptions, e);
-                continue :sw try step(&f, code);
+                continue :sw try step(&f);
             };
             ai.arr.data[ai.i] = .{ .int = @as(u16, @truncate(@as(u32, @bitCast(v)))) };
             f.pc += 1;
-            continue :sw try step(&f, code);
+            continue :sw try step(&f);
         },
         .sastore => {
             const v = try f.popInt();
             const ai = arrayIndex(&f) catch |e| {
                 try mapTrap(&f, class, exceptions, e);
-                continue :sw try step(&f, code);
+                continue :sw try step(&f);
             };
             ai.arr.data[ai.i] = .{ .int = @as(i16, @truncate(v)) };
             f.pc += 1;
-            continue :sw try step(&f, code);
+            continue :sw try step(&f);
         },
         .lastore => {
             const v = try f.popLong();
             const ai = arrayIndex(&f) catch |e| {
                 try mapTrap(&f, class, exceptions, e);
-                continue :sw try step(&f, code);
+                continue :sw try step(&f);
             };
             ai.arr.data[ai.i] = .{ .long = v };
             f.pc += 1;
-            continue :sw try step(&f, code);
+            continue :sw try step(&f);
         },
         .fastore => {
             const v = try f.popFloat();
             const ai = arrayIndex(&f) catch |e| {
                 try mapTrap(&f, class, exceptions, e);
-                continue :sw try step(&f, code);
+                continue :sw try step(&f);
             };
             ai.arr.data[ai.i] = .{ .float = v };
             f.pc += 1;
-            continue :sw try step(&f, code);
+            continue :sw try step(&f);
         },
         .dastore => {
             const v = try f.popDouble();
             const ai = arrayIndex(&f) catch |e| {
                 try mapTrap(&f, class, exceptions, e);
-                continue :sw try step(&f, code);
+                continue :sw try step(&f);
             };
             ai.arr.data[ai.i] = .{ .double = v };
             f.pc += 1;
-            continue :sw try step(&f, code);
+            continue :sw try step(&f);
         },
         .aastore => {
             const v = try f.pop();
             const ai = arrayIndex(&f) catch |e| {
                 try mapTrap(&f, class, exceptions, e);
-                continue :sw try step(&f, code);
+                continue :sw try step(&f);
             };
             ai.arr.data[ai.i] = v;
             if (f.heap) |hp| writeBarrier(hp, ai.oid, v);
             f.pc += 1;
-            continue :sw try step(&f, code);
+            continue :sw try step(&f);
         },
         .new => {
             const cls = class orelse return error.UnsupportedOpcode;
             try doNew(&f, cls, code);
             f.pc += 3;
-            continue :sw try step(&f, code);
+            continue :sw try step(&f);
         },
         .getfield => {
             const cls = class orelse return error.UnsupportedOpcode;
             doGetField(&f, cls, code) catch |e| {
                 try mapTrap(&f, class, exceptions, e);
-                continue :sw try step(&f, code);
+                continue :sw try step(&f);
             };
             f.pc += 3;
-            continue :sw try step(&f, code);
+            continue :sw try step(&f);
         },
         .putfield => {
             const cls = class orelse return error.UnsupportedOpcode;
             doPutField(&f, cls, code) catch |e| {
                 try mapTrap(&f, class, exceptions, e);
-                continue :sw try step(&f, code);
+                continue :sw try step(&f);
             };
             f.pc += 3;
-            continue :sw try step(&f, code);
+            continue :sw try step(&f);
         },
         .invokespecial => {
             const cls = class orelse return error.UnsupportedOpcode;
@@ -4390,15 +4391,15 @@ fn exec(alloc: std.mem.Allocator, class: ?*const Class, heap: ?*Heap, loader: *L
                 if (e == error.JavaException) {
                     if (try handleException(&f, class, exceptions, f.budget.pending.?)) {
                         f.budget.pending = null;
-                        continue :sw try step(&f, code);
+                        continue :sw try step(&f);
                     }
                     return e;
                 }
                 try mapTrap(&f, class, exceptions, e);
-                continue :sw try step(&f, code);
+                continue :sw try step(&f);
             };
             f.pc += 3;
-            continue :sw try step(&f, code);
+            continue :sw try step(&f);
         },
         .invokevirtual => {
             const cls = class orelse return error.UnsupportedOpcode;
@@ -4406,15 +4407,15 @@ fn exec(alloc: std.mem.Allocator, class: ?*const Class, heap: ?*Heap, loader: *L
                 if (e == error.JavaException) {
                     if (try handleException(&f, class, exceptions, f.budget.pending.?)) {
                         f.budget.pending = null;
-                        continue :sw try step(&f, code);
+                        continue :sw try step(&f);
                     }
                     return e;
                 }
                 try mapTrap(&f, class, exceptions, e);
-                continue :sw try step(&f, code);
+                continue :sw try step(&f);
             };
             f.pc += 3;
-            continue :sw try step(&f, code);
+            continue :sw try step(&f);
         },
         .invokeinterface => {
             const cls = class orelse return error.UnsupportedOpcode;
@@ -4422,15 +4423,15 @@ fn exec(alloc: std.mem.Allocator, class: ?*const Class, heap: ?*Heap, loader: *L
                 if (e == error.JavaException) {
                     if (try handleException(&f, class, exceptions, f.budget.pending.?)) {
                         f.budget.pending = null;
-                        continue :sw try step(&f, code);
+                        continue :sw try step(&f);
                     }
                     return e;
                 }
                 try mapTrap(&f, class, exceptions, e);
-                continue :sw try step(&f, code);
+                continue :sw try step(&f);
             };
             f.pc += 5;
-            continue :sw try step(&f, code);
+            continue :sw try step(&f);
         },
         .invokedynamic => {
             const cls = class orelse return error.UnsupportedOpcode;
@@ -4438,15 +4439,15 @@ fn exec(alloc: std.mem.Allocator, class: ?*const Class, heap: ?*Heap, loader: *L
                 if (e == error.JavaException) {
                     if (try handleException(&f, class, exceptions, f.budget.pending.?)) {
                         f.budget.pending = null;
-                        continue :sw try step(&f, code);
+                        continue :sw try step(&f);
                     }
                     return e;
                 }
                 try mapTrap(&f, class, exceptions, e);
-                continue :sw try step(&f, code);
+                continue :sw try step(&f);
             };
             f.pc += 5;
-            continue :sw try step(&f, code);
+            continue :sw try step(&f);
         },
         .instanceof => {
             const cls = class orelse return error.UnsupportedOpcode;
@@ -4464,7 +4465,7 @@ fn exec(alloc: std.mem.Allocator, class: ?*const Class, heap: ?*Heap, loader: *L
             };
             try f.pushInt(result);
             f.pc += 3;
-            continue :sw try step(&f, code);
+            continue :sw try step(&f);
         },
         .checkcast => {
             const cls = class orelse return error.UnsupportedOpcode;
@@ -4481,12 +4482,12 @@ fn exec(alloc: std.mem.Allocator, class: ?*const Class, heap: ?*Heap, loader: *L
             };
             try f.push(.{ .reference = r });
             f.pc += 3;
-            continue :sw try step(&f, code);
+            continue :sw try step(&f);
         },
         .monitorenter, .monitorexit => {
             _ = (try f.popRef()) orelse return error.NullPointer; // single-threaded: null-check only
             f.pc += 1;
-            continue :sw try step(&f, code);
+            continue :sw try step(&f);
         },
         .getstatic => {
             const cls = class orelse return error.UnsupportedOpcode;
@@ -4496,7 +4497,7 @@ fn exec(alloc: std.mem.Allocator, class: ?*const Class, heap: ?*Heap, loader: *L
             const si = dcls.findStatic(fr.field_name) orelse return error.LinkError;
             try f.pushKind((try f.loader.staticsOf(dcls))[si]);
             f.pc += 3;
-            continue :sw try step(&f, code);
+            continue :sw try step(&f);
         },
         .putstatic => {
             const cls = class orelse return error.UnsupportedOpcode;
@@ -4507,7 +4508,7 @@ fn exec(alloc: std.mem.Allocator, class: ?*const Class, heap: ?*Heap, loader: *L
             const kind = dcls.static_fields[si].kind;
             (try f.loader.staticsOf(dcls))[si] = try f.popKind(kind);
             f.pc += 3;
-            continue :sw try step(&f, code);
+            continue :sw try step(&f);
         },
         .invokestatic => {
             const cls = class orelse return error.UnsupportedOpcode;
@@ -4515,19 +4516,19 @@ fn exec(alloc: std.mem.Allocator, class: ?*const Class, heap: ?*Heap, loader: *L
                 if (e == error.JavaException) {
                     if (try handleException(&f, class, exceptions, f.budget.pending.?)) {
                         f.budget.pending = null;
-                        continue :sw try step(&f, code);
+                        continue :sw try step(&f);
                     }
                     return e;
                 }
                 try mapTrap(&f, class, exceptions, e);
-                continue :sw try step(&f, code);
+                continue :sw try step(&f);
             };
             f.pc += 3;
-            continue :sw try step(&f, code);
+            continue :sw try step(&f);
         },
         .athrow => {
             const eid = (try f.popRef()) orelse return error.NullPointer;
-            if (try handleException(&f, class, exceptions, eid)) continue :sw try step(&f, code);
+            if (try handleException(&f, class, exceptions, eid)) continue :sw try step(&f);
             f.budget.pending = eid;
             return error.JavaException;
         },
