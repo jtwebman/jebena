@@ -23,6 +23,7 @@ Each iteration is one small, verified, committed step. Never leave the tree red.
    - `bash scripts/join-stress.sh` — fiber parking: 16 joiners on 1 worker, 16 > carriers (1 & 4, +GC)
    - `bash scripts/queue-stress.sh` — ArrayDeque growth + LinkedBlockingQueue producer/consumer (carriers 1 & 4, +GC)
    - `bash scripts/coll-stress.sh` — LinkedList + ArrayDeque + nested-class instantiation (LinkedList$Node/ArrayDeque$Itr) via directory classpath (carriers 1 & 4, +GC)
+   - `bash scripts/net-stress.sh` — java.net loopback echo (Socket/ServerSocket over std.Io TCP), carriers 2 & 4 +GC, skips cleanly if sockets unavailable
    - `bash scripts/portability-check.sh` — VM cross-compiles for macOS/Linux (aarch64/x86_64)
    - `zig fmt --check src/ build.zig` — formatted
    If anything fails: fix it, or revert the change. Do not commit red.

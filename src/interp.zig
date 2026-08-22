@@ -919,7 +919,12 @@ const JarBytes = struct { path: []const u8, bytes: []u8 };
 
 pub const Loader = struct {
     gpa: std.mem.Allocator,
-    classes: std.ArrayList(*const Class) = .empty,
+    // Stable-page registry (like the heap object table): append publishes the
+    // count LAST and pages never move, so find()/indexOf() can iterate lock-free
+    // on the invoke hot path while another carrier loads a class under load_lock.
+    // (An ArrayList here race-crashed: a reallocating append freed the slice a
+    // concurrent find() was iterating -> GP fault at c.name.)
+    classes: Pages(*const Class) = .{},
     statics: std.ArrayList([]Value) = .empty,
     initialized: std.ArrayList(bool) = .empty,
     /// java.lang.Class mirror id per class (lazy, one per class). A GC root:
@@ -1034,19 +1039,24 @@ pub const Loader = struct {
     pub fn register(self: *Loader, class: *const Class) !void {
         const st = try self.gpa.alloc(Value, class.static_fields.len);
         for (st, class.static_fields) |*sv, sf| sv.* = defaultValue(sf.kind);
-        try self.classes.append(self.gpa, class);
+        _ = try self.classes.append(self.gpa, class);
         try self.statics.append(self.gpa, st);
         try self.initialized.append(self.gpa, false);
         try self.mirrors.append(self.gpa, null);
     }
     fn indexOf(self: *const Loader, class: *const Class) ?usize {
-        for (self.classes.items, 0..) |c, i| {
-            if (c == class) return i;
+        const n = self.classes.count();
+        var i: usize = 0;
+        while (i < n) : (i += 1) {
+            if (self.classes.get(i).* == class) return i;
         }
         return null;
     }
     pub fn find(self: *const Loader, name: []const u8) ?*const Class {
-        for (self.classes.items) |c| {
+        const n = self.classes.count();
+        var i: usize = 0;
+        while (i < n) : (i += 1) {
+            const c = self.classes.get(i).*;
             if (std.mem.eql(u8, c.name, name)) return c;
         }
         return null;
@@ -1729,7 +1739,7 @@ pub fn runInLoader(loader: *Loader, class: *const Class, name: []const u8, desc:
 
 /// Like runInLoader but with a caller-provided heap (to configure GC / inspect it).
 pub fn runInLoaderWithHeap(loader: *Loader, class: *const Class, name: []const u8, desc: []const u8, args: []const Value, budget: *Budget, heap: *Heap) RunError!?Value {
-    for (loader.classes.items) |c| try loader.ensureInit(c, heap, budget);
+    for (0..loader.classes.count()) |i| try loader.ensureInit(loader.classes.get(i).*, heap, budget);
     const rr = class.resolve(name, desc) orelse return error.MethodNotFound;
     const m = rr.method;
     const c = m.code orelse return error.LinkError;
@@ -3062,8 +3072,8 @@ fn mirrorClass(f: *Frame, mirror_id: u32) RunError!*const Class {
         .instance => |inst| @intCast(inst.fields[vi].int),
         else => return error.LinkError,
     };
-    if (idx >= f.loader.classes.items.len) return error.LinkError;
-    return f.loader.classes.items[idx];
+    if (idx >= f.loader.classes.count()) return error.LinkError;
+    return f.loader.classes.get(idx).*;
 }
 fn pushDottedName(f: *Frame, internal: []const u8, simple: bool) RunError!void {
     // internal form uses '/'; Java getName uses '.'. simple=last component only.
@@ -3246,7 +3256,7 @@ fn reflectGetMembers(f: *Frame, class_mirror: u32, comptime kind: enum { methods
 }
 fn reflectInvoke(f: *Frame, method_mirror: u32, slots: []const Value) RunError!void {
     const ref = try memberIndices(f, method_mirror);
-    const owner = f.loader.classes.items[ref.class_idx];
+    const owner = f.loader.classes.get(ref.class_idx).*;
     const method = &owner.methods[ref.member_idx];
     const cc = method.code orelse return error.LinkError;
     const islots = owner.gpa.alloc(Value, method.arg_slots) catch return error.OutOfMemory;
@@ -3274,7 +3284,7 @@ fn reflectInvoke(f: *Frame, method_mirror: u32, slots: []const Value) RunError!v
 fn reflectFieldGet(f: *Frame, field_mirror: u32, slots: []const Value) RunError!void {
     const heap = f.heap orelse return error.UnsupportedOpcode;
     const ref = try memberIndices(f, field_mirror);
-    const dcls = f.loader.classes.items[ref.class_idx];
+    const dcls = f.loader.classes.get(ref.class_idx).*;
     const fld = dcls.instance_fields[ref.member_idx];
     const obj = switch (slots[1]) {
         .reference => |r| r orelse return error.NullPointer,
@@ -3299,7 +3309,7 @@ fn reflectFieldGet(f: *Frame, field_mirror: u32, slots: []const Value) RunError!
 fn reflectFieldSet(f: *Frame, field_mirror: u32, slots: []const Value) RunError!void {
     const heap = f.heap orelse return error.UnsupportedOpcode;
     const ref = try memberIndices(f, field_mirror);
-    const dcls = f.loader.classes.items[ref.class_idx];
+    const dcls = f.loader.classes.get(ref.class_idx).*;
     const fld = dcls.instance_fields[ref.member_idx];
     const obj = switch (slots[1]) {
         .reference => |r| r orelse return error.NullPointer,
@@ -3318,7 +3328,7 @@ fn reflectFieldSet(f: *Frame, field_mirror: u32, slots: []const Value) RunError!
 fn reflectNewInstance(f: *Frame, ctor_mirror: u32, slots: []const Value) RunError!void {
     const heap = f.heap orelse return error.UnsupportedOpcode;
     const ref = try memberIndices(f, ctor_mirror);
-    const owner = f.loader.classes.items[ref.class_idx];
+    const owner = f.loader.classes.get(ref.class_idx).*;
     const ctor = &owner.methods[ref.member_idx];
     const cc = ctor.code orelse return error.LinkError;
     const id = try heap.allocInstance(owner);
@@ -3402,7 +3412,7 @@ fn makeProxyClass(f: *Frame, iface_names: [][]const u8) RunError!*const Class {
     };
     const fields = gpa.alloc(Class.Field, 1) catch return error.OutOfMemory;
     fields[0] = .{ .name = "h", .kind = .reference };
-    const name = std.fmt.allocPrint(gpa, "$Proxy{d}", .{f.loader.classes.items.len}) catch return error.OutOfMemory;
+    const name = std.fmt.allocPrint(gpa, "$Proxy{d}", .{f.loader.classes.count()}) catch return error.OutOfMemory;
     const pc = gpa.create(Class) catch return error.OutOfMemory;
     pc.* = Class{
         .gpa = gpa,
@@ -3498,10 +3508,152 @@ fn proxyDispatch(f: *Frame, proxy_id: u32, iface_name: []const u8, mname: []cons
     if (rc == 'L' or rc == '[') return f.push(result);
     return f.pushKind(try convertArgToValue(f, result, kindFromDescChar(rc)));
 }
+/// java.net natives over the portable std.Io TCP layer. Handles are raw
+/// std.posix.fd_t (an i32) carried as Java longs. bind0 packs the resolved port
+/// in the high 32 bits. Blocking calls (connect/accept/read/write) run inside
+/// enterBlockingSyscall/exitBlockingSyscall so a concurrent GC is not stalled;
+/// read/write copy through a stack buffer and re-fetch the byte[] by id AFTER the
+/// blocking call, because GC may relocate it while we are in the kernel. This
+/// occupies the OS carrier for the syscall's duration (no fiber parking yet) --
+/// see docs/THREADING.md "networking".
+fn netNative(f: *Frame, mn: []const u8, md: []const u8, slots: []const Value, method: *const Class.Method) RunError!void {
+    const net = std.Io.net;
+    const heap = f.heap orelse return error.UnsupportedOpcode;
+    const io = f.loader.io orelse return error.UnsupportedOpcode;
+    const sched = &f.loader.scheduler;
+    const P = method.params;
+
+    // ---- ServerSocket.bind0(int port) -> long  ((port<<32)|fd, or -1)
+    if (eq2(mn, md, "bind0", "(I)J")) {
+        const port: u16 = @truncate(@as(u32, @bitCast(slots[P[0].slot].int)));
+        var addr: net.IpAddress = .{ .ip4 = net.Ip4Address.loopback(port) };
+        var server = addr.listen(io, .{ .reuse_address = true }) catch return f.pushLong(-1);
+        const resolved: u32 = server.socket.address.getPort();
+        const fd: u32 = @bitCast(@as(i32, @intCast(server.socket.handle)));
+        return f.pushLong((@as(i64, resolved) << 32) | @as(i64, fd));
+    }
+    // ---- ServerSocket.accept0(long fd) -> long  (client fd, or -1)
+    if (eq2(mn, md, "accept0", "(J)J")) {
+        const fd: net.Socket.Handle = @intCast(slots[P[0].slot].long & 0xffffffff);
+        var server: net.Server = .{ .socket = .{ .handle = fd, .address = undefined }, .options = if (net.Server.AcceptOptions == void) {} else undefined };
+        sched.enterBlockingSyscall();
+        const stream = server.accept(io) catch {
+            sched.exitBlockingSyscall();
+            return f.pushLong(-1);
+        };
+        sched.exitBlockingSyscall();
+        return f.pushLong(@intCast(stream.socket.handle));
+    }
+    // ---- Socket.connect0(String host, int port) -> long  (fd, or -1)
+    if (eq2(mn, md, "connect0", "(Ljava/lang/String;I)J")) {
+        const host_id = switch (slots[P[0].slot]) {
+            .reference => |r| r orelse return error.NullPointer,
+            else => return error.TypeMismatch,
+        };
+        const port: u16 = @truncate(@as(u32, @bitCast(slots[P[1].slot].int)));
+        var chars: std.ArrayList(i32) = .empty;
+        defer chars.deinit(heap.gpa);
+        try appendStringObj(&chars, heap, host_id);
+        var hostbuf: [256]u8 = undefined;
+        var hlen: usize = 0;
+        for (chars.items) |c| {
+            if (hlen >= hostbuf.len) break;
+            hostbuf[hlen] = @truncate(@as(u32, @bitCast(c)));
+            hlen += 1;
+        }
+        var addr = net.IpAddress.parse(hostbuf[0..hlen], port) catch return f.pushLong(-1);
+        sched.enterBlockingSyscall();
+        const stream = addr.connect(io, .{ .mode = .stream, .protocol = .tcp }) catch {
+            sched.exitBlockingSyscall();
+            return f.pushLong(-1);
+        };
+        sched.exitBlockingSyscall();
+        return f.pushLong(@intCast(stream.socket.handle));
+    }
+    // ---- read0(long fd, byte[] b, int off, int len) -> int  (n, or -1 at EOF/err)
+    if (eq2(mn, md, "read0", "(J[BII)I")) {
+        const fd: net.Socket.Handle = @intCast(slots[P[0].slot].long & 0xffffffff);
+        const aid = switch (slots[P[1].slot]) {
+            .reference => |r| r orelse return error.NullPointer,
+            else => return error.TypeMismatch,
+        };
+        const off: usize = @intCast(slots[P[2].slot].int);
+        const want: usize = @intCast(slots[P[3].slot].int);
+        var tmp: [8192]u8 = undefined;
+        const cap = @min(want, tmp.len);
+        if (cap == 0) return f.pushInt(0);
+        var iov: [1][]u8 = .{tmp[0..cap]};
+        sched.enterBlockingSyscall();
+        const n = io.vtable.netRead(io.userdata, fd, &iov) catch {
+            sched.exitBlockingSyscall();
+            return f.pushInt(-1);
+        };
+        sched.exitBlockingSyscall();
+        if (n == 0) return f.pushInt(-1); // orderly EOF
+        const arr = switch (heap.get(aid).*) {
+            .array => |*a| a,
+            else => return error.LinkError,
+        };
+        var i: usize = 0;
+        while (i < n) : (i += 1) arr.data[off + i] = .{ .int = @as(i32, @as(i8, @bitCast(tmp[i]))) };
+        return f.pushInt(@intCast(n));
+    }
+    // ---- write0(long fd, byte[] b, int off, int len) -> int  (written, or -1)
+    if (eq2(mn, md, "write0", "(J[BII)I")) {
+        const fd: net.Socket.Handle = @intCast(slots[P[0].slot].long & 0xffffffff);
+        const aid = switch (slots[P[1].slot]) {
+            .reference => |r| r orelse return error.NullPointer,
+            else => return error.TypeMismatch,
+        };
+        const off: usize = @intCast(slots[P[2].slot].int);
+        const len: usize = @intCast(slots[P[3].slot].int);
+        var tmp: [8192]u8 = undefined;
+        var done: usize = 0;
+        while (done < len) {
+            const arr = switch (heap.get(aid).*) {
+                .array => |*a| a,
+                else => return error.LinkError,
+            };
+            const chunk = @min(len - done, tmp.len);
+            var i: usize = 0;
+            while (i < chunk) : (i += 1) tmp[i] = @truncate(@as(u32, @bitCast(arr.data[off + done + i].int)));
+            sched.enterBlockingSyscall();
+            var w: usize = 0;
+            var ok = true;
+            while (w < chunk) {
+                const n = io.vtable.netWrite(io.userdata, fd, tmp[w..chunk], &.{""}, 0) catch {
+                    ok = false;
+                    break;
+                };
+                if (n == 0) {
+                    ok = false;
+                    break;
+                }
+                w += n;
+            }
+            sched.exitBlockingSyscall();
+            if (!ok) return f.pushInt(-1);
+            done += chunk;
+        }
+        return f.pushInt(@intCast(done));
+    }
+    // ---- close0(long fd) -> void  (Socket + ServerSocket)
+    if (eq2(mn, md, "close0", "(J)V")) {
+        const fd: net.Socket.Handle = @intCast(slots[P[0].slot].long & 0xffffffff);
+        var handles: [1]net.Socket.Handle = .{fd};
+        io.vtable.netClose(io.userdata, &handles);
+        return;
+    }
+    return error.UnsupportedOpcode;
+}
+
 fn nativeInvoke(f: *Frame, owner: *const Class, method: *const Class.Method, slots: []const Value) RunError!void {
     const on = owner.name;
     const mn = method.name;
     const md = method.descriptor;
+    if (std.mem.eql(u8, on, "java/net/Socket") or std.mem.eql(u8, on, "java/net/ServerSocket")) {
+        return netNative(f, mn, md, slots, method);
+    }
     if (std.mem.eql(u8, on, "java/util/concurrent/atomic/AtomicLong")) {
         const heap = f.heap orelse return error.UnsupportedOpcode;
         const recv = switch (slots[0]) {
@@ -4041,11 +4193,11 @@ fn nativeInvoke(f: *Frame, owner: *const Class, method: *const Class.Method, slo
         };
         if (eq2(mn, md, "getName", "()Ljava/lang/String;")) {
             const ref = try memberIndices(f, self);
-            return f.push(.{ .reference = try stringFromBytes(f, f.loader.classes.items[ref.class_idx].methods[ref.member_idx].name) });
+            return f.push(.{ .reference = try stringFromBytes(f, f.loader.classes.get(ref.class_idx).*.methods[ref.member_idx].name) });
         }
         if (eq2(mn, md, "getParameterCount", "()I")) {
             const ref = try memberIndices(f, self);
-            return f.pushInt(@intCast(f.loader.classes.items[ref.class_idx].methods[ref.member_idx].params.len));
+            return f.pushInt(@intCast(f.loader.classes.get(ref.class_idx).*.methods[ref.member_idx].params.len));
         }
         if (eq2(mn, md, "invoke", "(Ljava/lang/Object;[Ljava/lang/Object;)Ljava/lang/Object;")) return reflectInvoke(f, self, slots);
         if (eq2(mn, md, "getAnnotation", "(Ljava/lang/Class;)Ljava/lang/annotation/Annotation;")) {
@@ -4054,7 +4206,7 @@ fn nativeInvoke(f: *Frame, owner: *const Class, method: *const Class.Method, slo
                 .reference => |r| r orelse return error.NullPointer,
                 else => return error.TypeMismatch,
             };
-            return buildAnnotationProxy(f, f.loader.classes.items[ref.class_idx].methods[ref.member_idx].annotations, arg);
+            return buildAnnotationProxy(f, f.loader.classes.get(ref.class_idx).*.methods[ref.member_idx].annotations, arg);
         }
         if (eq2(mn, md, "isAnnotationPresent", "(Ljava/lang/Class;)Z")) {
             const ref = try memberIndices(f, self);
@@ -4063,7 +4215,7 @@ fn nativeInvoke(f: *Frame, owner: *const Class, method: *const Class.Method, slo
                 else => return error.TypeMismatch,
             };
             const anno_cls = try mirrorClass(f, arg);
-            for (f.loader.classes.items[ref.class_idx].methods[ref.member_idx].annotations) |an| {
+            for (f.loader.classes.get(ref.class_idx).*.methods[ref.member_idx].annotations) |an| {
                 if (std.mem.eql(u8, an.name, anno_cls.name)) return f.pushInt(1);
             }
             return f.pushInt(0);
@@ -4076,7 +4228,7 @@ fn nativeInvoke(f: *Frame, owner: *const Class, method: *const Class.Method, slo
         };
         if (eq2(mn, md, "getName", "()Ljava/lang/String;")) {
             const ref = try memberIndices(f, self);
-            return f.push(.{ .reference = try stringFromBytes(f, f.loader.classes.items[ref.class_idx].instance_fields[ref.member_idx].name) });
+            return f.push(.{ .reference = try stringFromBytes(f, f.loader.classes.get(ref.class_idx).*.instance_fields[ref.member_idx].name) });
         }
         if (eq2(mn, md, "get", "(Ljava/lang/Object;)Ljava/lang/Object;")) return reflectFieldGet(f, self, slots);
         if (eq2(mn, md, "set", "(Ljava/lang/Object;Ljava/lang/Object;)V")) return reflectFieldSet(f, self, slots);
@@ -4086,7 +4238,7 @@ fn nativeInvoke(f: *Frame, owner: *const Class, method: *const Class.Method, slo
                 .reference => |r| r orelse return error.NullPointer,
                 else => return error.TypeMismatch,
             };
-            return buildAnnotationProxy(f, f.loader.classes.items[ref.class_idx].instance_fields[ref.member_idx].annotations, arg);
+            return buildAnnotationProxy(f, f.loader.classes.get(ref.class_idx).*.instance_fields[ref.member_idx].annotations, arg);
         }
         if (eq2(mn, md, "isAnnotationPresent", "(Ljava/lang/Class;)Z")) {
             const ref = try memberIndices(f, self);
@@ -4095,7 +4247,7 @@ fn nativeInvoke(f: *Frame, owner: *const Class, method: *const Class.Method, slo
                 else => return error.TypeMismatch,
             };
             const anno_cls = try mirrorClass(f, arg);
-            for (f.loader.classes.items[ref.class_idx].instance_fields[ref.member_idx].annotations) |an| {
+            for (f.loader.classes.get(ref.class_idx).*.instance_fields[ref.member_idx].annotations) |an| {
                 if (std.mem.eql(u8, an.name, anno_cls.name)) return f.pushInt(1);
             }
             return f.pushInt(0);
@@ -4108,7 +4260,7 @@ fn nativeInvoke(f: *Frame, owner: *const Class, method: *const Class.Method, slo
         };
         if (eq2(mn, md, "getParameterCount", "()I")) {
             const ref = try memberIndices(f, self);
-            return f.pushInt(@intCast(f.loader.classes.items[ref.class_idx].methods[ref.member_idx].params.len));
+            return f.pushInt(@intCast(f.loader.classes.get(ref.class_idx).*.methods[ref.member_idx].params.len));
         }
         if (eq2(mn, md, "newInstance", "([Ljava/lang/Object;)Ljava/lang/Object;")) return reflectNewInstance(f, self, slots);
     }
@@ -4693,6 +4845,25 @@ const Scheduler = struct {
 
     fn releaseSafepoint(self: *Scheduler) void {
         self.safepoint_requested.store(false, .release);
+    }
+
+    /// Bracket a BLOCKING OS syscall (socket accept/connect/read/write) so a
+    /// concurrent stop-the-world GC is not stalled waiting for this carrier to
+    /// reach a safepoint: while blocked in the kernel we touch no heap, so we
+    /// count ourselves as parked (like waitForSafepointRelease) for the duration.
+    /// The caller MUST NOT hold any live heap pointer across the pair (GC may move
+    /// objects) -- re-fetch by id after exitBlockingSyscall. NOTE: this frees the
+    /// GC, not the fiber: the syscall still occupies this OS carrier, so blocking
+    /// socket I/O needs another carrier to make progress (no fiber parking yet).
+    fn enterBlockingSyscall(self: *Scheduler) void {
+        _ = self.parked.fetchAdd(1, .acq_rel);
+    }
+
+    fn exitBlockingSyscall(self: *Scheduler) void {
+        // Wait out any in-flight safepoint before resuming heap access, then
+        // stop counting as parked.
+        while (self.safepoint_requested.load(.acquire)) std.atomic.spinLoopHint();
+        _ = self.parked.fetchSub(1, .acq_rel);
     }
 
     fn registerNested(self: *Scheduler, fib: *Fiber) void {

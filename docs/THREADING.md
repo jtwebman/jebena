@@ -378,6 +378,58 @@ harden next:**
   every other lazily-built class. `alloc-gc-stress.sh` asserts a clean run reports
   0 leaks.
 
+### FIX (2026-08-22): class-registry data race — lock-free find() vs reallocating append
+
+The Loader's class registry was a `std.ArrayList(*const Class)`. `find()` and
+`indexOf()` iterate it LOCK-FREE on the invoke hot path (invokeInstance's
+`recv_is_real` check runs `find(cname)` on every instance call), while another
+carrier loading a class (`loadFromClasspath`) appended under `load_lock`. A
+reallocating append frees the slice the lock-free reader is mid-iteration on →
+the reader dereferences a dangling `*Class` → GP fault at `find()`'s `c.name`.
+Rare per call (~5-10%) but ~75% across coll-stress's 21 reps (8 fibers loading
+many distinct classes at once); it hid until coll-stress existed, and the commit
+that added coll-stress passed it by luck.
+
+Fix: the registry is now `Pages(*const Class)` — the same stable-page table the
+heap object table uses. Pages never move and `append` publishes the committed
+count LAST, so a lock-free reader iterating `0..count()` always sees fully-written,
+stable slots (a stale-but-smaller count just misses a just-added class, which the
+under-lock loader path re-checks). No lock added to the invoke hot path. Validated:
+coll-stress 6/6 green, 40 direct CollFuzz @carriers=4 +GC all correct (was crashing
+3-4 of 5 before).
+
+## Networking (2026-08-22, iter 90): java.net over std.Io TCP — step 1 LANDED
+
+First slice of the arc toward a Postgres-backed HTTP API. `java.net.Socket`,
+`ServerSocket`, `InetAddress`, and `SocketInputStream`/`SocketOutputStream` are
+clean-room jbase classes; the OS work is a small native layer (`netNative` in
+interp.zig) over the PORTABLE `std.Io.net` vtable (`netListenIp`/`netConnectIp`/
+`netAccept`/`netRead`/`netWrite`/`netClose`) — no raw syscalls, and it
+cross-compiles for macOS/Linux (portability-check green). Socket handles are raw
+`std.posix.fd_t` carried as Java longs; `bind0` packs the resolved ephemeral port
+(from std.Io's bound address, no getsockname) in the high 32 bits. Proven by
+`net-stress.sh`: a loopback echo (server fiber accepts+echoes, client fiber
+round-trips "PINGpong123" = byte-sum 888) at carriers 2 & 4 (+GC), matching real
+java; it skips cleanly if the sandbox forbids sockets.
+
+**Blocking model (known limits, to be lifted later):** the blocking OS calls
+(connect/accept/read/write) run inside `Scheduler.enterBlockingSyscall` /
+`exitBlockingSyscall`, which count the carrier as parked-at-safepoint for the
+syscall's duration so a concurrent stop-the-world GC is NOT stalled (validated:
+loopback echo stays green with GC forced every 150 allocations). read/write copy
+through a stack buffer and re-fetch the `byte[]` by its (stable) id AFTER the
+call, because GC may relocate it while we are in the kernel. What this does NOT
+yet do is PARK THE FIBER: the syscall occupies its OS carrier until it returns,
+so a blocking accept monopolizes a lone carrier — a server-fiber + client-fiber
+pattern needs **carriers >= 2** (c=1 deadlocks; net-stress runs c=2 & c=4). The
+proper fix (poll/epoll integration so a blocked fiber yields its carrier, like
+the join/monitor/wait parking) is future work; step 1 is correct where tested and
+documents the limit, per the incremental plan.
+
+Next: (2) a hand-written HTTP/1.1 server in Java + test client; (3) a minimal
+Postgres wire-protocol client (opt-in behind JEBENA_PGTEST); (4) an HTTP endpoint
+backed by Postgres.
+
 ## Policy (2026-08-21, from the user): thread-safety is now non-negotiable
 
 Every feature added from here on MUST:
