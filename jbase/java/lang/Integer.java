@@ -137,7 +137,7 @@ public final class Integer extends Number implements Comparable<Integer> {
         return valueOf(parseInt(s));
     }
 
-    private static String toUnsignedString(int i, int shift) {
+    private static String toUnsignedStringShift(int i, int shift) {
         if (i == 0) {
             return "0";
         }
@@ -159,15 +159,15 @@ public final class Integer extends Number implements Comparable<Integer> {
     }
 
     public static String toHexString(int i) {
-        return toUnsignedString(i, 4);
+        return toUnsignedStringShift(i, 4);
     }
 
     public static String toOctalString(int i) {
-        return toUnsignedString(i, 3);
+        return toUnsignedStringShift(i, 3);
     }
 
     public static String toBinaryString(int i) {
-        return toUnsignedString(i, 1);
+        return toUnsignedStringShift(i, 1);
     }
 
     public static int signum(int i) {
@@ -317,12 +317,36 @@ public final class Integer extends Number implements Comparable<Integer> {
         return (int) l;
     }
 
+    public static int parseUnsignedInt(String s, int radix) {
+        if (s == null) {
+            throw new NumberFormatException("null");
+        }
+        int len = s.length();
+        if (len == 0) {
+            throw new NumberFormatException(s);
+        }
+        if (s.charAt(0) == '-') {
+            throw new NumberFormatException(
+                "Illegal leading minus sign on unsigned string " + s);
+        }
+        long l = Long.parseLong(s, radix);
+        if ((l & 0xffffffff00000000L) != 0) {
+            throw new NumberFormatException(
+                "String value " + s + " exceeds range of unsigned int");
+        }
+        return (int) l;
+    }
+
     public static long toUnsignedLong(int i) {
         return ((long) i) & 0xffffffffL;
     }
 
     public static String toUnsignedString(int i) {
         return Long.toString(toUnsignedLong(i));
+    }
+
+    public static String toUnsignedString(int i, int radix) {
+        return Long.toUnsignedString(toUnsignedLong(i), radix);
     }
 
     public static int divideUnsigned(int dividend, int divisor) {

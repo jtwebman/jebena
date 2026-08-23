@@ -379,6 +379,29 @@ public class BitSet {
         }
     }
 
+    public int previousClearBit(int fromIndex) {
+        if (fromIndex < 0) {
+            if (fromIndex == -1) {
+                return -1;
+            }
+            throw new IndexOutOfBoundsException("fromIndex < -1: " + fromIndex);
+        }
+        int u = wordIndex(fromIndex);
+        if (u >= wordsInUse) {
+            return fromIndex;
+        }
+        long word = ~words[u] & ((-1L) >>> -(fromIndex + 1));
+        while (true) {
+            if (word != 0) {
+                return (u + 1) * BITS_PER_WORD - 1 - numberOfLeadingZerosLong(word);
+            }
+            if (u-- == 0) {
+                return -1;
+            }
+            word = ~words[u];
+        }
+    }
+
     public void and(BitSet set) {
         if (this == set) {
             return;

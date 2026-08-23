@@ -99,7 +99,7 @@ public final class Long extends Number implements Comparable<Long> {
         return valueOf(parseLong(s));
     }
 
-    private static String toUnsignedString(long i, int shift) {
+    private static String toUnsignedStringShift(long i, int shift) {
         if (i == 0) {
             return "0";
         }
@@ -121,15 +121,15 @@ public final class Long extends Number implements Comparable<Long> {
     }
 
     public static String toHexString(long i) {
-        return toUnsignedString(i, 4);
+        return toUnsignedStringShift(i, 4);
     }
 
     public static String toOctalString(long i) {
-        return toUnsignedString(i, 3);
+        return toUnsignedStringShift(i, 3);
     }
 
     public static String toBinaryString(long i) {
-        return toUnsignedString(i, 1);
+        return toUnsignedStringShift(i, 1);
     }
 
     public static int signum(long i) {
@@ -239,6 +239,69 @@ public final class Long extends Number implements Comparable<Long> {
         long quot = divideUnsigned(i, 10L);
         long rem = i - quot * 10L;
         return String.valueOf(quot) + rem;
+    }
+
+    public static String toUnsignedString(long i, int radix) {
+        if (radix < 2 || radix > 36) {
+            radix = 10;
+        }
+        if (i == 0L) {
+            return "0";
+        }
+        char[] buf = new char[64];
+        int p = 64;
+        long v = i;
+        long r = radix;
+        while (v != 0L) {
+            int d = (int) remainderUnsigned(v, r);
+            buf[--p] = (char) (d < 10 ? ('0' + d) : ('a' + d - 10));
+            v = divideUnsigned(v, r);
+        }
+        int len = 64 - p;
+        char[] out = new char[len];
+        for (int k = 0; k < len; k++) {
+            out[k] = buf[p + k];
+        }
+        return new String(out);
+    }
+
+    public static long parseUnsignedLong(String s) {
+        return parseUnsignedLong(s, 10);
+    }
+
+    public static long parseUnsignedLong(String s, int radix) {
+        if (s == null) {
+            throw new NumberFormatException("null");
+        }
+        if (radix < 2 || radix > 36) {
+            throw new NumberFormatException("radix " + radix + " out of range");
+        }
+        int len = s.length();
+        if (len == 0) {
+            throw new NumberFormatException(s);
+        }
+        if (s.charAt(0) == '-') {
+            throw new NumberFormatException(
+                "Illegal leading minus sign on unsigned string " + s);
+        }
+        if (len <= 12 || (radix == 10 && len <= 18)) {
+            return parseLong(s, radix);
+        }
+        long result = 0L;
+        long r = radix;
+        for (int i = 0; i < len; i++) {
+            int digit = Character.digit(s.charAt(i), radix);
+            if (digit < 0) {
+                throw new NumberFormatException(s);
+            }
+            long limit = divideUnsigned(-1L - digit, r);
+            if (compareUnsigned(result, limit) > 0) {
+                throw new NumberFormatException(
+                    "String value " + s + " exceeds range of unsigned long");
+            }
+            result = result * r + digit;
+        }
+        return result;
     }
 
     public static long rotateLeft(long i, int distance) {

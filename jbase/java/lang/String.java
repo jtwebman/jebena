@@ -552,6 +552,131 @@ public final class String implements CharSequence, Comparable<String> {
         return java.util.stream.Stream.ofList(list);
     }
 
+    /** An IntStream of the Unicode code points of this string (surrogate pairs combined). */
+    public java.util.stream.IntStream codePoints() {
+        int[] tmp = new int[value.length];
+        int n = 0;
+        int i = 0;
+        while (i < value.length) {
+            char c1 = value[i];
+            if (c1 >= '\uD800' && c1 <= '\uDBFF' && i + 1 < value.length) {
+                char c2 = value[i + 1];
+                if (c2 >= '\uDC00' && c2 <= '\uDFFF') {
+                    tmp[n++] = ((c1 - 0xD800) << 10) + (c2 - 0xDC00) + 0x10000;
+                    i += 2;
+                    continue;
+                }
+            }
+            tmp[n++] = c1;
+            i++;
+        }
+        int[] out = new int[n];
+        for (int k = 0; k < n; k++) {
+            out[k] = tmp[k];
+        }
+        return java.util.stream.IntStream.of(out);
+    }
+
+    // Index of the first non-whitespace char, or length() if all whitespace.
+    private int indexOfNonWhitespace() {
+        int i = 0;
+        while (i < value.length && isWs(value[i])) {
+            i++;
+        }
+        return i;
+    }
+
+    // Index just past the last non-whitespace char, or 0 if all whitespace.
+    private int lastIndexOfNonWhitespace() {
+        int i = value.length;
+        while (i > 0 && isWs(value[i - 1])) {
+            i--;
+        }
+        return i;
+    }
+
+    /** Adjusts each line's indentation by n and normalizes line terminators to \n. */
+    public String indent(int n) {
+        if (isEmpty()) {
+            return "";
+        }
+        java.util.List lines = lines().toList(); // raw jbase collection
+        StringBuilder sb = new StringBuilder();
+        for (int li = 0; li < lines.size(); li++) {
+            String line = (String) lines.get(li);
+            String adj;
+            if (n > 0) {
+                adj = " ".repeat(n) + line;
+            } else if (n == Integer.MIN_VALUE) {
+                adj = line.stripLeading();
+            } else if (n < 0) {
+                int rm = Math.min(-n, line.indexOfNonWhitespace());
+                adj = line.substring(rm);
+            } else {
+                adj = line;
+            }
+            sb.append(adj);
+            sb.append('\n');
+        }
+        return sb.toString();
+    }
+
+    // Minimum leading whitespace across all non-blank lines (and a trailing blank line).
+    private static int outdent(java.util.List lines) {
+        int outdent = Integer.MAX_VALUE;
+        for (int i = 0; i < lines.size(); i++) {
+            String line = (String) lines.get(i);
+            int lw = line.indexOfNonWhitespace();
+            if (lw != line.length()) {
+                outdent = Math.min(outdent, lw);
+            }
+        }
+        String lastLine = (String) lines.get(lines.size() - 1);
+        if (lastLine.isBlank()) {
+            outdent = Math.min(outdent, lastLine.length());
+        }
+        return outdent;
+    }
+
+    /** Removes incidental leading whitespace shared by every line (text-block style). */
+    public String stripIndent() {
+        int length = value.length;
+        if (length == 0) {
+            return "";
+        }
+        char lastChar = value[length - 1];
+        boolean optOut = lastChar == '\n' || lastChar == '\r';
+        java.util.List lines = lines().toList(); // raw jbase collection
+        int outdent = optOut ? 0 : outdent(lines);
+        StringBuilder sb = new StringBuilder();
+        int size = lines.size();
+        for (int li = 0; li < size; li++) {
+            String line = (String) lines.get(li);
+            int first = line.indexOfNonWhitespace();
+            int last = line.lastIndexOfNonWhitespace();
+            String r;
+            if (first > last) {
+                r = "";
+            } else {
+                int inc = Math.min(outdent, first);
+                r = line.substring(inc, last);
+            }
+            sb.append(r);
+            if (li < size - 1) {
+                sb.append('\n');
+            }
+        }
+        if (optOut) {
+            sb.append('\n');
+        }
+        return sb.toString();
+    }
+
+    /** Applies the given function to this string and returns its result. */
+    public Object transform(java.util.function.Function f) {
+        return f.apply(this);
+    }
+
     // Numeric valueOf reuse the VM's decimal/shortest-float formatting.
     public static native String valueOf(int i);
 

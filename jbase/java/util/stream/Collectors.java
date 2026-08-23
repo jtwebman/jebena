@@ -8,8 +8,12 @@ import java.util.IntSummaryStatistics;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.NavigableMap;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
 import java.util.function.BiFunction;
 import java.util.function.BinaryOperator;
 import java.util.function.Function;
@@ -302,6 +306,126 @@ public class Collectors {
                     result.put(key, downstream.collect(bucket));
                 }
                 return result;
+            }
+        };
+    }
+
+    public static Collector groupingBy(final Function classifier, final Supplier mapFactory,
+                                       final Collector downstream) {
+        return new Collector() {
+            public Object collect(ArrayList data) {
+                LinkedHashMap groups = new LinkedHashMap();
+                for (int i = 0; i < data.size(); i++) {
+                    Object element = data.get(i);
+                    Object key = classifier.apply(element);
+                    Object bucket = groups.get(key);
+                    if (bucket == null) {
+                        bucket = new ArrayList();
+                        groups.put(key, bucket);
+                    }
+                    ((ArrayList) bucket).add(element);
+                }
+                // Realize each bucket's downstream result up front, then copy
+                // into the caller's map. The map is narrowed to a DIRECTLY
+                // implemented interface (the VM's checkcast to a transitive
+                // super-interface such as Map-of-TreeMap is unreliable), so a
+                // TreeMap is filled through NavigableMap and a ConcurrentHashMap
+                // through ConcurrentMap, both of which inherit put from Map.
+                ArrayList keys = new ArrayList();
+                ArrayList vals = new ArrayList();
+                Iterator it = groups.keySet().iterator();
+                while (it.hasNext()) {
+                    Object key = it.next();
+                    ArrayList bucket = (ArrayList) groups.get(key);
+                    keys.add(key);
+                    vals.add(downstream.collect(bucket));
+                }
+                Object mapObj = mapFactory.get();
+                if (mapObj instanceof NavigableMap) {
+                    NavigableMap result = (NavigableMap) mapObj;
+                    for (int i = 0; i < keys.size(); i++) {
+                        result.put(keys.get(i), vals.get(i));
+                    }
+                    return result;
+                }
+                if (mapObj instanceof ConcurrentMap) {
+                    ConcurrentMap result = (ConcurrentMap) mapObj;
+                    for (int i = 0; i < keys.size(); i++) {
+                        result.put(keys.get(i), vals.get(i));
+                    }
+                    return result;
+                }
+                Map result = (Map) mapObj;
+                for (int i = 0; i < keys.size(); i++) {
+                    result.put(keys.get(i), vals.get(i));
+                }
+                return result;
+            }
+        };
+    }
+
+    public static Collector groupingByConcurrent(final Function classifier) {
+        return new Collector() {
+            public Object collect(ArrayList data) {
+                ConcurrentHashMap map = new ConcurrentHashMap();
+                for (int i = 0; i < data.size(); i++) {
+                    Object element = data.get(i);
+                    Object key = classifier.apply(element);
+                    Object bucket = map.get(key);
+                    if (bucket == null) {
+                        bucket = new ArrayList();
+                        map.put(key, bucket);
+                    }
+                    ((ArrayList) bucket).add(element);
+                }
+                return map;
+            }
+        };
+    }
+
+    public static Collector groupingByConcurrent(final Function classifier, final Collector downstream) {
+        return new Collector() {
+            public Object collect(ArrayList data) {
+                LinkedHashMap groups = new LinkedHashMap();
+                for (int i = 0; i < data.size(); i++) {
+                    Object element = data.get(i);
+                    Object key = classifier.apply(element);
+                    Object bucket = groups.get(key);
+                    if (bucket == null) {
+                        bucket = new ArrayList();
+                        groups.put(key, bucket);
+                    }
+                    ((ArrayList) bucket).add(element);
+                }
+                ConcurrentHashMap result = new ConcurrentHashMap();
+                Iterator it = groups.keySet().iterator();
+                while (it.hasNext()) {
+                    Object key = it.next();
+                    ArrayList bucket = (ArrayList) groups.get(key);
+                    result.put(key, downstream.collect(bucket));
+                }
+                return result;
+            }
+        };
+    }
+
+    public static Collector partitioningBy(final Predicate predicate, final Collector downstream) {
+        return new Collector() {
+            public Object collect(ArrayList data) {
+                ArrayList falses = new ArrayList();
+                ArrayList trues = new ArrayList();
+                for (int i = 0; i < data.size(); i++) {
+                    Object element = data.get(i);
+                    if (predicate.test(element)) {
+                        trues.add(element);
+                    } else {
+                        falses.add(element);
+                    }
+                }
+                HashMap map = new HashMap();
+                map.put(Boolean.FALSE, downstream.collect(falses));
+                map.put(Boolean.TRUE, downstream.collect(trues));
+                return map;
             }
         };
     }

@@ -60,6 +60,36 @@ public class Base64 {
         return MIME_ENCODER;
     }
 
+    public static Encoder getMimeEncoder(int lineLength, byte[] lineSeparator) {
+        if (lineSeparator == null) {
+            throw new NullPointerException();
+        }
+        for (int i = 0; i < lineSeparator.length; i++) {
+            int b = lineSeparator[i] & 0xff;
+            if (b == '=' || isBasicBase64Char(b)) {
+                throw new IllegalArgumentException(
+                        "Illegal base64 line separator character 0x" + Integer.toString(b, 16));
+            }
+        }
+        if (lineLength <= 0) {
+            return BASIC_ENCODER;
+        }
+        byte[] sep = new byte[lineSeparator.length];
+        for (int i = 0; i < lineSeparator.length; i++) {
+            sep[i] = lineSeparator[i];
+        }
+        return new Encoder(BASIC, true, (lineLength >> 2) << 2, sep);
+    }
+
+    private static boolean isBasicBase64Char(int b) {
+        for (int i = 0; i < BASIC.length; i++) {
+            if (BASIC[i] == b) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     public static Decoder getMimeDecoder() {
         return MIME_DECODER;
     }
