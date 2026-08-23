@@ -3,7 +3,8 @@ package java.util.concurrent.atomic;
 /**
  * Clean-room java.util.concurrent.atomic.AtomicReference for Jebena. The
  * referent lives in a plain Object field; compareAndSet uses reference identity
- * (==), matching the spec. Single-threaded, so plain updates are correct.
+ * (==), matching the spec. Mutators/accessors are synchronized on the instance
+ * so compareAndSet/getAndSet are atomic across carriers (reentrant monitor).
  */
 public class AtomicReference {
     private Object value;
@@ -16,21 +17,21 @@ public class AtomicReference {
         this.value = null;
     }
 
-    public final Object get() {
+    public final synchronized Object get() {
         return value;
     }
 
-    public final void set(Object newValue) {
+    public final synchronized void set(Object newValue) {
         this.value = newValue;
     }
 
-    public final Object getAndSet(Object newValue) {
+    public final synchronized Object getAndSet(Object newValue) {
         Object old = value;
         value = newValue;
         return old;
     }
 
-    public final boolean compareAndSet(Object expect, Object update) {
+    public final synchronized boolean compareAndSet(Object expect, Object update) {
         if (value == expect) {
             value = update;
             return true;
