@@ -30,7 +30,7 @@ rm -rf "$OUT"; mkdir -p "$OUT"
   "$ROOT"/test/diff/DiffCmp2.java "$ROOT"/test/diff/DiffCLQ.java "$ROOT"/test/diff/DiffCOW.java "$ROOT"/test/diff/DiffOffsetTime.java "$ROOT"/test/diff/DiffFmtSci.java "$ROOT"/test/diff/DiffRndStream.java "$ROOT"/test/diff/DiffStreamGen.java "$ROOT"/test/diff/DiffCollections3.java "$ROOT"/test/diff/DiffOptPrim.java "$ROOT"/test/diff/DiffIntStream3.java \
   "$ROOT"/test/diff/DiffLru.java "$ROOT"/test/diff/DiffArrays3.java "$ROOT"/test/diff/DiffFmtGrp.java "$ROOT"/test/diff/DiffRegex6.java "$ROOT"/test/diff/DiffB64Mime.java "$ROOT"/test/diff/DiffStr3.java "$ROOT"/test/diff/DiffMath5.java "$ROOT"/test/diff/DiffIntRadix.java "$ROOT"/test/diff/DiffColl5.java "$ROOT"/test/diff/DiffADq2.java \
   "$ROOT"/test/diff/DiffMref.java \
-  "$ROOT"/test/diff/DiffGbc.java "$ROOT"/test/diff/DiffCLD.java "$ROOT"/test/diff/DiffFmt2.java "$ROOT"/test/diff/DiffBitSet3.java "$ROOT"/test/diff/DiffArrays4.java "$ROOT"/test/diff/DiffRegex7.java "$ROOT"/test/diff/DiffB64b.java "$ROOT"/test/diff/DiffStr4.java "$ROOT"/test/diff/DiffIntU2.java \
+  "$ROOT"/test/diff/DiffGbc.java "$ROOT"/test/diff/DiffCLD.java "$ROOT"/test/diff/DiffFmt2.java "$ROOT"/test/diff/DiffBitSet3.java "$ROOT"/test/diff/DiffArrays4.java "$ROOT"/test/diff/DiffRegex7.java "$ROOT"/test/diff/DiffB64b.java "$ROOT"/test/diff/DiffStr4.java "$ROOT"/test/diff/DiffIntU2.java "$ROOT"/test/diff/DiffCast.java \
   "$ROOT"/test/diff/Driver.java || { echo "javac failed"; exit 1; }
 "$ZIG" build --build-file "$ROOT/build.zig" >/dev/null 2>&1
 JEBENA="$ROOT/zig-out/bin/jebena"
@@ -158,6 +158,7 @@ REGEX7="splitPosLimit splitPosLimitBig splitZeroLimit splitDefault splitNegLimit
 B64B="basicWithoutPad basicWithPad urlWithoutPad urlDefault mimeCustomLines mimeCustomChecksum mimeLineRounding mimeZeroLine mimeIllegalSeparator encodeBytesChecksum decodeNoPad roundTripBasic roundTripUrlNoPad"
 STR4="repeatLenHash repeatZero indentLenLines indentNegative indentEmpty stripIndentBasic stripIndentMixed stripIndentNoTrailing codePointsCount codePointsSum codePointsMapped transformLength transformUpper"
 INTU2="parseMaxAsBits parseMaxBitCount parseUnsignedRadixHex parseUnsignedRadixBin toUnsignedStringLenHash toUnsignedStringHex255 toUnsignedStringNeg1Hex divRemUnsignedInt toUnsignedLongLowBits toUnsignedLongHighZero parseUnsignedLongMax parseUnsignedLongBitCount parseUnsignedLongRadixHex parseUnsignedLongMid longToUnsignedStringLenHash longToUnsignedStringHex longToUnsignedStringOct longDivRemUnsigned roundTripLong parseMinusSentinel parseTooBigIntSentinel"
+CAST="treeMapInstanceof treeMapCastThenUse hashMapInstanceof concurrentHashMapInstanceof arrayListInstanceof arrayListCastThenUse falseCases nullInstanceof"
 CASES=""
 for m in $COLL; do CASES="$CASES DiffColl:$m"; done
 for m in $REGEX; do CASES="$CASES DiffRegex:$m"; done
@@ -272,6 +273,7 @@ for m in $REGEX7; do CASES="$CASES DiffRegex7:$m"; done
 for m in $B64B; do CASES="$CASES DiffB64b:$m"; done
 for m in $STR4; do CASES="$CASES DiffStr4:$m"; done
 for m in $INTU2; do CASES="$CASES DiffIntU2:$m"; done
+for m in $CAST; do CASES="$CASES DiffCast:$m"; done
 
 pass=0; fail=0
 printf "%-24s %12s %12s   %s\n" CASE JAVA JEBENA RESULT

@@ -5050,11 +5050,24 @@ fn loadConstant2(f: *Frame, index: u16) RunError!void {
     }
 }
 
-fn isInstanceOf(cls: *const Class, target_name: []const u8) bool {
+// True if interface `iface_name` is `target` or transitively extends it. Interface
+// super-interfaces are stored by name, so resolve each via the loader and recurse.
+fn ifaceIsOrExtends(loader: *const Loader, iface_name: []const u8, target: []const u8) bool {
+    if (std.mem.eql(u8, iface_name, target)) return true;
+    const ic = loader.find(iface_name) orelse return false;
+    for (ic.interfaces) |sup| {
+        if (ifaceIsOrExtends(loader, sup, target)) return true;
+    }
+    return false;
+}
+
+fn isInstanceOf(loader: *const Loader, cls: *const Class, target_name: []const u8) bool {
     var c: ?*const Class = cls;
     while (c) |cc| {
         if (std.mem.eql(u8, cc.name, target_name)) return true;
-        for (cc.interfaces) |iface| if (std.mem.eql(u8, iface, target_name)) return true;
+        // Each directly-declared interface matches the target if it IS the target or
+        // transitively extends it (e.g. TreeMap -> NavigableMap -> SortedMap -> Map).
+        for (cc.interfaces) |iface| if (ifaceIsOrExtends(loader, iface, target_name)) return true;
         c = cc.super;
     }
     return false;
@@ -5074,7 +5087,7 @@ fn handleException(f: *Frame, class: ?*const Class, exceptions: []const attribut
         if (f.pc < e.start_pc or f.pc >= e.end_pc) continue;
         const matches = if (e.catch_type == 0) true else blk: {
             const cn = cls.cp.classNameOf(e.catch_type) catch break :blk false;
-            break :blk isInstanceOf(exc_class, cn);
+            break :blk isInstanceOf(f.loader, exc_class, cn);
         };
         if (matches) {
             f.sp = 0;
@@ -6760,11 +6773,11 @@ fn runFrame(f: *Frame) RunError!FrameResult {
             const r = try f.popRef();
             var result: i32 = 0;
             if (r) |id| switch (hp.get(id).*) {
-                .instance => |x| result = if (isInstanceOf(x.class, target)) 1 else 0,
-                .string => |x| result = if (isInstanceOf(x.class, target)) 1 else 0,
+                .instance => |x| result = if (isInstanceOf(f.loader, x.class, target)) 1 else 0,
+                .string => |x| result = if (isInstanceOf(f.loader, x.class, target)) 1 else 0,
                 .lambda => |x| result = if (std.mem.eql(u8, x.iface, target)) 1 else 0,
-                .builder => |x| result = if (isInstanceOf(x.class, target)) 1 else 0,
-                .boxed => |x| result = if (isInstanceOf(x.class, target)) 1 else 0,
+                .builder => |x| result = if (isInstanceOf(f.loader, x.class, target)) 1 else 0,
+                .boxed => |x| result = if (isInstanceOf(f.loader, x.class, target)) 1 else 0,
                 .array => {}, // array instanceof: not modeled -> 0
             };
             try f.pushInt(result);
@@ -6777,8 +6790,8 @@ fn runFrame(f: *Frame) RunError!FrameResult {
             const target = try refClassName(cls, try u16At(code, f.pc + 1));
             const r = try f.popRef();
             if (r) |id| switch (hp.get(id).*) {
-                .instance => |x| if (!isInstanceOf(x.class, target)) return error.LinkError, // ClassCastException (no JDK class yet)
-                .string => |x| if (!isInstanceOf(x.class, target)) return error.LinkError,
+                .instance => |x| if (!isInstanceOf(f.loader, x.class, target)) return error.LinkError, // ClassCastException (no JDK class yet)
+                .string => |x| if (!isInstanceOf(f.loader, x.class, target)) return error.LinkError,
                 .lambda => {},
                 .builder => {},
                 .boxed => {},
