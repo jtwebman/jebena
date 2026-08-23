@@ -19,6 +19,16 @@ public class ArrayList implements List {
         size = 0;
     }
 
+    public ArrayList(Collection c) {
+        int n = c.size();
+        elements = new Object[n < 1 ? 1 : n];
+        size = 0;
+        Iterator it = c.iterator();
+        while (it.hasNext()) {
+            add(it.next());
+        }
+    }
+
     public int size() {
         return size;
     }
