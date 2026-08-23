@@ -27,6 +27,7 @@ rm -rf "$OUT"; mkdir -p "$OUT"
   "$ROOT"/test/diff/DiffOdt.java "$ROOT"/test/diff/DiffYear.java "$ROOT"/test/diff/DiffMonthDay.java "$ROOT"/test/diff/DiffAtomIntArr.java "$ROOT"/test/diff/DiffAtomLongArr.java "$ROOT"/test/diff/DiffColl3.java "$ROOT"/test/diff/DiffStream4.java "$ROOT"/test/diff/DiffMath3.java "$ROOT"/test/diff/DiffCollections2.java "$ROOT"/test/diff/DiffRegex4.java \
   "$ROOT"/test/diff/DiffScanner2.java "$ROOT"/test/diff/DiffDuration.java "$ROOT"/test/diff/DiffPeriod.java "$ROOT"/test/diff/DiffTreeNav.java "$ROOT"/test/diff/DiffNumFmt.java "$ROOT"/test/diff/DiffArrays2.java "$ROOT"/test/diff/DiffIntStream2.java "$ROOT"/test/diff/DiffOptional2.java "$ROOT"/test/diff/DiffRegex5.java "$ROOT"/test/diff/DiffUnsigned.java \
   "$ROOT"/test/diff/DiffInstant.java "$ROOT"/test/diff/DiffClock.java "$ROOT"/test/diff/DiffAtomRefArr.java "$ROOT"/test/diff/DiffColl4.java "$ROOT"/test/diff/DiffCollectorOf.java "$ROOT"/test/diff/DiffSplitRnd.java "$ROOT"/test/diff/DiffObjects.java "$ROOT"/test/diff/DiffAtomUpd.java "$ROOT"/test/diff/DiffMath4.java "$ROOT"/test/diff/DiffLDStream.java \
+  "$ROOT"/test/diff/DiffCmp2.java "$ROOT"/test/diff/DiffCLQ.java "$ROOT"/test/diff/DiffCOW.java "$ROOT"/test/diff/DiffOffsetTime.java "$ROOT"/test/diff/DiffFmtSci.java "$ROOT"/test/diff/DiffRndStream.java "$ROOT"/test/diff/DiffStreamGen.java "$ROOT"/test/diff/DiffCollections3.java "$ROOT"/test/diff/DiffOptPrim.java "$ROOT"/test/diff/DiffIntStream3.java \
   "$ROOT"/test/diff/Driver.java || { echo "javac failed"; exit 1; }
 "$ZIG" build --build-file "$ROOT/build.zig" >/dev/null 2>&1
 JEBENA="$ROOT/zig-out/bin/jebena"
@@ -123,6 +124,16 @@ OBJECTS="elseNull elseNonNull elseGetNull elseGetNonNull checkIdx checkFromTo ch
 ATOMUPD="updAndGet getAndUpd accAndGet getAndAcc refUpdAndGet refGetAndUpd refAccAndGet longGetAndUpd longGetAndAcc intAccMax"
 MATH4="mhMax mhShift mhNeg mhBothNeg mhZero mhMinMin mhMixed mhOne"
 LDSTREAM="mapToObjCount sortedLimitSum distinctSum doubleDistinctCount doubleSortedSkipSum asDoubleStreamSum mapToIntSum doubleSkipLimit doubleMapToLongSum longSkipSum"
+CMP2="nullsFirst nullsLast nullsFirstReversed nullsLastReversed byLengthDesc byLengthAsc thenComparingLongTie thenComparingDoubleTie allNulls"
+CLQ="fifoChecksum peekAfterOffers sizeIsEmptyTransitions removeMiddleThenOrder removeHeadAndTail containsHitMiss pollEmpty iteratorOrder toStringHash"
+COW="addGetFold setThenGet removeIntSizeChecksum addIfAbsentExisting addIfAbsentNew indexOfHitMiss containsCheck iteratorSnapshotSum addAtIndex removeObject"
+OFFTIME="toStringChecksum utcEndsWithZ utcChecksum hourMinute secondNano offsetTotalSeconds compareByInstant compareSameOffset equalsCheck hashConsistent"
+FMTSCI="sciE sciEPrec2 sciBigE sciNeg sciPlus sciWidth genG genSmall genPrec3 genUpper"
+RNDSTREAM="ints5sum ints8bounded intsNegRange intsZero longs4count longs4fold longsSum doubles5 doubles3"
+STREAMGEN="iterateDouble generateCount generateSum iterateAdd3 generateLimitZeroCount iterateLimitOne iterateMapSum generateCountTen iterateThree"
+COLLECTIONS3="rotateChecksum rotateNegative replaceAllChecksum replaceAllNoMatch copyChecksum binarySearchNatural binarySearchMissing shuffleChecksum reverseOrderSort"
+OPTPRIM="streamPresentSum streamEmptySum ifPresentSideEffect ifPresentOrElsePresent ifPresentOrElseEmpty orElseGetDoublePresent orElseGetDoubleEmpty orElseGetInt longStreamSum orElseThrowCatch"
+INTSTREAM3="anyMatchTrue anyMatchFalse allMatch allMatchFalse noneMatch findFirst findFirstEmpty peekSum forEachAcc"
 
 CASES=""
 for m in $COLL; do CASES="$CASES DiffColl:$m"; done
@@ -208,6 +219,16 @@ for m in $OBJECTS; do CASES="$CASES DiffObjects:$m"; done
 for m in $ATOMUPD; do CASES="$CASES DiffAtomUpd:$m"; done
 for m in $MATH4; do CASES="$CASES DiffMath4:$m"; done
 for m in $LDSTREAM; do CASES="$CASES DiffLDStream:$m"; done
+for m in $CMP2; do CASES="$CASES DiffCmp2:$m"; done
+for m in $CLQ; do CASES="$CASES DiffCLQ:$m"; done
+for m in $COW; do CASES="$CASES DiffCOW:$m"; done
+for m in $OFFTIME; do CASES="$CASES DiffOffsetTime:$m"; done
+for m in $FMTSCI; do CASES="$CASES DiffFmtSci:$m"; done
+for m in $RNDSTREAM; do CASES="$CASES DiffRndStream:$m"; done
+for m in $STREAMGEN; do CASES="$CASES DiffStreamGen:$m"; done
+for m in $COLLECTIONS3; do CASES="$CASES DiffCollections3:$m"; done
+for m in $OPTPRIM; do CASES="$CASES DiffOptPrim:$m"; done
+for m in $INTSTREAM3; do CASES="$CASES DiffIntStream3:$m"; done
 
 pass=0; fail=0
 printf "%-24s %12s %12s   %s\n" CASE JAVA JEBENA RESULT

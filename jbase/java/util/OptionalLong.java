@@ -1,5 +1,10 @@
 package java.util;
 
+import java.util.function.LongConsumer;
+import java.util.function.LongSupplier;
+import java.util.function.Supplier;
+import java.util.stream.LongStream;
+
 public final class OptionalLong {
 
     private static final OptionalLong EMPTY = new OptionalLong();
@@ -40,8 +45,34 @@ public final class OptionalLong {
         return !isPresent;
     }
 
+    public void ifPresent(LongConsumer action) {
+        if (isPresent) {
+            action.accept(value);
+        }
+    }
+
+    public void ifPresentOrElse(LongConsumer action, Runnable emptyAction) {
+        if (isPresent) {
+            action.accept(value);
+        } else {
+            emptyAction.run();
+        }
+    }
+
+    public LongStream stream() {
+        if (isPresent) {
+            return LongStream.of(value);
+        } else {
+            return LongStream.of();
+        }
+    }
+
     public long orElse(long other) {
         return isPresent ? value : other;
+    }
+
+    public long orElseGet(LongSupplier supplier) {
+        return isPresent ? value : supplier.getAsLong();
     }
 
     public long orElseThrow() {
@@ -49,6 +80,13 @@ public final class OptionalLong {
             throw new NoSuchElementException("No value present");
         }
         return value;
+    }
+
+    public long orElseThrow(Supplier exceptionSupplier) throws Throwable {
+        if (isPresent) {
+            return value;
+        }
+        throw (Throwable) exceptionSupplier.get();
     }
 
     @Override

@@ -215,6 +215,56 @@ public final class Formatter {
                 } else if (flagSpace) {
                     sign = " ";
                 }
+            } else if (conv == 'e' || conv == 'E') {
+                numeric = true;
+                double d = doubleValueOf(arg);
+                int p = (precision < 0) ? 6 : precision;
+                boolean neg = false;
+                if (d != d) {
+                    body = "NaN";
+                } else if (isInfinite(d)) {
+                    neg = d < 0;
+                    body = "Infinity";
+                } else {
+                    neg = (d < 0) || (d == 0.0 && 1.0 / d < 0);
+                    double mag = d < 0 ? -d : d;
+                    body = (mag == 0.0) ? zeroSci(p) : sciDigits(mag, p);
+                    if (conv == 'E') {
+                        body = body.toUpperCase();
+                    }
+                }
+                if (neg) {
+                    sign = "-";
+                } else if (flagPlus) {
+                    sign = "+";
+                } else if (flagSpace) {
+                    sign = " ";
+                }
+            } else if (conv == 'g' || conv == 'G') {
+                numeric = true;
+                double d = doubleValueOf(arg);
+                int prec = (precision < 0) ? 6 : (precision == 0 ? 1 : precision);
+                boolean neg = false;
+                if (d != d) {
+                    body = "NaN";
+                } else if (isInfinite(d)) {
+                    neg = d < 0;
+                    body = "Infinity";
+                } else {
+                    neg = (d < 0) || (d == 0.0 && 1.0 / d < 0);
+                    double mag = d < 0 ? -d : d;
+                    body = generalFmt(mag, prec, flagComma);
+                    if (conv == 'G') {
+                        body = body.toUpperCase();
+                    }
+                }
+                if (neg) {
+                    sign = "-";
+                } else if (flagPlus) {
+                    sign = "+";
+                } else if (flagSpace) {
+                    sign = " ";
+                }
             } else {
                 throw new IllegalArgumentException("unsupported conversion: " + conv);
             }
@@ -342,6 +392,76 @@ public final class Formatter {
         }
         sb.append(frac);
         return sb.toString();
+    }
+
+    /** Scientific rendering of a positive magnitude: "d.dddddde+xx" with p fraction digits. */
+    private static String sciDigits(double mag, int p) {
+        java.math.BigDecimal bd = java.math.BigDecimal.valueOf(mag);
+        int exp = bd.precision() - bd.scale() - 1;
+        java.math.BigDecimal mant = bd.movePointLeft(exp);
+        java.math.BigDecimal mantR = mant.setScale(p, java.math.RoundingMode.HALF_UP);
+        if (mantR.compareTo(java.math.BigDecimal.valueOf(10)) >= 0) {
+            exp = exp + 1;
+            mantR = mantR.movePointLeft(1).setScale(p, java.math.RoundingMode.HALF_UP);
+        }
+        return mantR.toPlainString() + expString(exp);
+    }
+
+    /** Scientific rendering of zero with p fraction digits: "0.000...e+00". */
+    private static String zeroSci(int p) {
+        StringBuilder sb = new StringBuilder();
+        sb.append('0');
+        if (p > 0) {
+            sb.append('.');
+            for (int k = 0; k < p; k++) {
+                sb.append('0');
+            }
+        }
+        sb.append(expString(0));
+        return sb.toString();
+    }
+
+    /** Exponent suffix "e" + sign + at least two digits. */
+    private static String expString(int exp) {
+        StringBuilder sb = new StringBuilder();
+        sb.append('e');
+        sb.append(exp < 0 ? '-' : '+');
+        int a = exp < 0 ? -exp : exp;
+        String d = String.valueOf(a);
+        if (d.length() < 2) {
+            sb.append('0');
+        }
+        sb.append(d);
+        return sb.toString();
+    }
+
+    /** General ('g') rendering of a positive magnitude with prec significant digits. */
+    private static String generalFmt(double mag, int prec, boolean comma) {
+        if (mag == 0.0) {
+            return fixedDigits(0.0, prec - 1, comma);
+        }
+        java.math.BigDecimal bd = java.math.BigDecimal.valueOf(mag);
+        java.math.BigDecimal rounded =
+                bd.round(new java.math.MathContext(prec, java.math.RoundingMode.HALF_UP));
+        int exp = rounded.precision() - rounded.scale() - 1;
+        if (exp >= -4 && exp < prec) {
+            return fixedDigits(mag, prec - 1 - exp, comma);
+        }
+        return sciDigits(mag, prec - 1);
+    }
+
+    /** Fixed-point rendering via BigDecimal (shortest-digit basis, half-up). */
+    private static String fixedDigits(double mag, int frac, boolean comma) {
+        java.math.BigDecimal bd =
+                java.math.BigDecimal.valueOf(mag).setScale(frac, java.math.RoundingMode.HALF_UP);
+        String s = bd.toPlainString();
+        if (!comma) {
+            return s;
+        }
+        int dot = s.indexOf('.');
+        String ip = (dot < 0) ? s : s.substring(0, dot);
+        String fp = (dot < 0) ? "" : s.substring(dot);
+        return group(ip) + fp;
     }
 
     private static String pad(String sign, String body, int width, boolean left, boolean zero) {

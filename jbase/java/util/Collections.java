@@ -188,6 +188,96 @@ public final class Collections {
         }
     }
 
+    public static void rotate(List list, int distance) {
+        int size = list.size();
+        if (size == 0) {
+            return;
+        }
+        int d = distance % size;
+        if (d < 0) {
+            d += size;
+        }
+        if (d == 0) {
+            return;
+        }
+        for (int cycleStart = 0, nMoved = 0; nMoved != size; cycleStart++) {
+            Object displaced = list.get(cycleStart);
+            int i = cycleStart;
+            do {
+                i += d;
+                if (i >= size) {
+                    i -= size;
+                }
+                displaced = list.set(i, displaced);
+                nMoved++;
+            } while (i != cycleStart);
+        }
+    }
+
+    public static boolean replaceAll(List list, Object oldVal, Object newVal) {
+        boolean result = false;
+        int size = list.size();
+        if (oldVal == null) {
+            for (int i = 0; i < size; i++) {
+                if (list.get(i) == null) {
+                    list.set(i, newVal);
+                    result = true;
+                }
+            }
+        } else {
+            for (int i = 0; i < size; i++) {
+                if (oldVal.equals(list.get(i))) {
+                    list.set(i, newVal);
+                    result = true;
+                }
+            }
+        }
+        return result;
+    }
+
+    public static void copy(List dest, List src) {
+        int srcSize = src.size();
+        if (srcSize > dest.size()) {
+            throw new IndexOutOfBoundsException("Source does not fit in dest");
+        }
+        for (int i = 0; i < srcSize; i++) {
+            dest.set(i, src.get(i));
+        }
+    }
+
+    public static int binarySearch(List list, Object key) {
+        int low = 0;
+        int high = list.size() - 1;
+        while (low <= high) {
+            int mid = (low + high) >>> 1;
+            Object midVal = list.get(mid);
+            int cmp = ((Comparable) midVal).compareTo(key);
+            if (cmp < 0) {
+                low = mid + 1;
+            } else if (cmp > 0) {
+                high = mid - 1;
+            } else {
+                return mid;
+            }
+        }
+        return -(low + 1);
+    }
+
+    public static void shuffle(List list, Random rnd) {
+        int size = list.size();
+        for (int i = size; i > 1; i--) {
+            swap(list, i - 1, rnd.nextInt(i));
+        }
+    }
+
+    public static Comparator reverseOrder() {
+        return new Comparator() {
+            public int compare(Object a, Object b) {
+                return ((Comparable) b).compareTo(a);
+            }
+        };
+    }
+
     public static List unmodifiableList(List list) {
         return new UnmodifiableList(list);
     }

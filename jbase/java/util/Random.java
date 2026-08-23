@@ -109,4 +109,67 @@ public class Random {
             return v1 * multiplier;
         }
     }
+
+    // Bounded int helper matching the specified stream behavior: for a
+    // representable range it draws nextInt(bound - origin) and shifts by
+    // origin; for a range too large to fit in an int it rejects samples
+    // outside [origin, bound).
+    private int internalNextInt(int origin, int bound) {
+        int n = bound - origin;
+        if (n > 0) {
+            return nextInt(n) + origin;
+        }
+        int r;
+        do {
+            r = nextInt();
+        } while (r < origin || r >= bound);
+        return r;
+    }
+
+    public java.util.stream.IntStream ints(long streamSize) {
+        if (streamSize < 0L) {
+            throw new IllegalArgumentException("size must be non-negative");
+        }
+        int[] out = new int[(int) streamSize];
+        for (int i = 0; i < out.length; i++) {
+            out[i] = nextInt();
+        }
+        return java.util.stream.IntStream.of(out);
+    }
+
+    public java.util.stream.IntStream ints(long streamSize, int randomNumberOrigin, int randomNumberBound) {
+        if (streamSize < 0L) {
+            throw new IllegalArgumentException("size must be non-negative");
+        }
+        if (randomNumberOrigin >= randomNumberBound) {
+            throw new IllegalArgumentException("bound must be greater than origin");
+        }
+        int[] out = new int[(int) streamSize];
+        for (int i = 0; i < out.length; i++) {
+            out[i] = internalNextInt(randomNumberOrigin, randomNumberBound);
+        }
+        return java.util.stream.IntStream.of(out);
+    }
+
+    public java.util.stream.LongStream longs(long streamSize) {
+        if (streamSize < 0L) {
+            throw new IllegalArgumentException("size must be non-negative");
+        }
+        long[] out = new long[(int) streamSize];
+        for (int i = 0; i < out.length; i++) {
+            out[i] = nextLong();
+        }
+        return java.util.stream.LongStream.of(out);
+    }
+
+    public java.util.stream.DoubleStream doubles(long streamSize) {
+        if (streamSize < 0L) {
+            throw new IllegalArgumentException("size must be non-negative");
+        }
+        double[] out = new double[(int) streamSize];
+        for (int i = 0; i < out.length; i++) {
+            out[i] = nextDouble();
+        }
+        return java.util.stream.DoubleStream.of(out);
+    }
 }

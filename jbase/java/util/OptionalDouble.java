@@ -1,5 +1,10 @@
 package java.util;
 
+import java.util.function.DoubleConsumer;
+import java.util.function.DoubleSupplier;
+import java.util.function.Supplier;
+import java.util.stream.DoubleStream;
+
 public final class OptionalDouble {
 
     private static final OptionalDouble EMPTY = new OptionalDouble();
@@ -40,8 +45,34 @@ public final class OptionalDouble {
         return !isPresent;
     }
 
+    public void ifPresent(DoubleConsumer action) {
+        if (isPresent) {
+            action.accept(value);
+        }
+    }
+
+    public void ifPresentOrElse(DoubleConsumer action, Runnable emptyAction) {
+        if (isPresent) {
+            action.accept(value);
+        } else {
+            emptyAction.run();
+        }
+    }
+
+    public DoubleStream stream() {
+        if (isPresent) {
+            return DoubleStream.of(value);
+        } else {
+            return DoubleStream.of();
+        }
+    }
+
     public double orElse(double other) {
         return isPresent ? value : other;
+    }
+
+    public double orElseGet(DoubleSupplier supplier) {
+        return isPresent ? value : supplier.getAsDouble();
     }
 
     public double orElseThrow() {
@@ -49,6 +80,13 @@ public final class OptionalDouble {
             throw new NoSuchElementException("No value present");
         }
         return value;
+    }
+
+    public double orElseThrow(Supplier exceptionSupplier) throws Throwable {
+        if (isPresent) {
+            return value;
+        }
+        throw (Throwable) exceptionSupplier.get();
     }
 
     @Override

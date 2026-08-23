@@ -4,6 +4,7 @@ import java.util.ArrayList;
 import java.util.OptionalDouble;
 import java.util.OptionalInt;
 import java.util.function.IntBinaryOperator;
+import java.util.function.IntConsumer;
 import java.util.function.IntFunction;
 import java.util.function.IntPredicate;
 import java.util.function.IntToDoubleFunction;
@@ -268,6 +269,63 @@ public class IntStream {
             list.add(Integer.valueOf(data[i]));
         }
         return new Stream(list);
+    }
+
+    public boolean anyMatch(IntPredicate predicate) {
+        for (int i = 0; i < data.length; i++) {
+            if (predicate.test(data[i])) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    public boolean allMatch(IntPredicate predicate) {
+        for (int i = 0; i < data.length; i++) {
+            if (!predicate.test(data[i])) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    public boolean noneMatch(IntPredicate predicate) {
+        for (int i = 0; i < data.length; i++) {
+            if (predicate.test(data[i])) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    public OptionalInt findFirst() {
+        if (data.length == 0) {
+            return OptionalInt.empty();
+        }
+        return OptionalInt.of(data[0]);
+    }
+
+    public OptionalInt findAny() {
+        return findFirst();
+    }
+
+    public IntStream peek(IntConsumer action) {
+        for (int i = 0; i < data.length; i++) {
+            action.accept(data[i]);
+        }
+        return new IntStream(data);
+    }
+
+    public void forEach(IntConsumer action) {
+        for (int i = 0; i < data.length; i++) {
+            action.accept(data[i]);
+        }
+    }
+
+    public void forEachOrdered(IntConsumer action) {
+        for (int i = 0; i < data.length; i++) {
+            action.accept(data[i]);
+        }
     }
 
     public int[] toArray() {

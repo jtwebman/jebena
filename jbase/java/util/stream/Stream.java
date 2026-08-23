@@ -28,9 +28,34 @@ public class Stream {
 
     private final ArrayList data;
 
+    /**
+     * When non-null, this Stream is an INFINITE generate() stream: elements are
+     * produced by calling the supplier once per requested element. Realized only
+     * when a downstream {@link #limit(long)} bounds it.
+     */
+    private final Supplier generateSupplier;
+
+    /** Seed for an INFINITE iterate() stream (meaningful only when {@link #iterateNext} is non-null). */
+    private final Object iterateSeed;
+
+    /**
+     * When non-null, this Stream is an INFINITE iterate() stream: it starts at
+     * {@link #iterateSeed} and advances with this operator. Realized only when a
+     * downstream {@link #limit(long)} bounds it.
+     */
+    private final UnaryOperator iterateNext;
+
     /** Copies the given backing list into a private ArrayList. */
     public Stream(List backing) {
-        this.data = copyList(backing);
+        this(copyList(backing), null, null, null);
+    }
+
+    /** Full-state constructor used internally for both finite and infinite streams. */
+    private Stream(ArrayList data, Supplier generateSupplier, Object iterateSeed, UnaryOperator iterateNext) {
+        this.data = data;
+        this.generateSupplier = generateSupplier;
+        this.iterateSeed = iterateSeed;
+        this.iterateNext = iterateNext;
     }
 
     /** Builds a fresh ArrayList holding the same elements as {@code src}. */
@@ -70,6 +95,23 @@ public class Stream {
             cur = next.apply(cur);
         }
         return new Stream(out);
+    }
+
+    /**
+     * Infinite stream whose elements are produced by repeatedly invoking
+     * {@code s}. Realized only when a downstream {@link #limit(long)} bounds it.
+     */
+    public static Stream generate(Supplier s) {
+        return new Stream(new ArrayList(), s, null, null);
+    }
+
+    /**
+     * Infinite stream produced by iterative application of {@code next} to
+     * {@code seed}: {@code seed, next(seed), next(next(seed)), ...}. Realized
+     * only when a downstream {@link #limit(long)} bounds it.
+     */
+    public static Stream iterate(Object seed, UnaryOperator next) {
+        return new Stream(new ArrayList(), null, seed, next);
     }
 
     // ---- Intermediate operations (return a new Stream) ----
@@ -120,6 +162,20 @@ public class Stream {
     public Stream limit(long maxSize) {
         ArrayList out = new ArrayList();
         long limit = maxSize < 0 ? 0 : maxSize;
+        if (generateSupplier != null) {
+            for (long i = 0; i < limit; i++) {
+                out.add(generateSupplier.get());
+            }
+            return new Stream(out);
+        }
+        if (iterateNext != null) {
+            Object cur = iterateSeed;
+            for (long i = 0; i < limit; i++) {
+                out.add(cur);
+                cur = iterateNext.apply(cur);
+            }
+            return new Stream(out);
+        }
         for (int i = 0; i < data.size() && i < limit; i++) {
             out.add(data.get(i));
         }

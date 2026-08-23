@@ -1,5 +1,10 @@
 package java.util;
 
+import java.util.function.IntConsumer;
+import java.util.function.IntSupplier;
+import java.util.function.Supplier;
+import java.util.stream.IntStream;
+
 public final class OptionalInt {
 
     private static final OptionalInt EMPTY = new OptionalInt();
@@ -40,8 +45,34 @@ public final class OptionalInt {
         return !isPresent;
     }
 
+    public void ifPresent(IntConsumer action) {
+        if (isPresent) {
+            action.accept(value);
+        }
+    }
+
+    public void ifPresentOrElse(IntConsumer action, Runnable emptyAction) {
+        if (isPresent) {
+            action.accept(value);
+        } else {
+            emptyAction.run();
+        }
+    }
+
+    public IntStream stream() {
+        if (isPresent) {
+            return IntStream.of(value);
+        } else {
+            return IntStream.of();
+        }
+    }
+
     public int orElse(int other) {
         return isPresent ? value : other;
+    }
+
+    public int orElseGet(IntSupplier supplier) {
+        return isPresent ? value : supplier.getAsInt();
     }
 
     public int orElseThrow() {
@@ -49,6 +80,13 @@ public final class OptionalInt {
             throw new NoSuchElementException("No value present");
         }
         return value;
+    }
+
+    public int orElseThrow(Supplier exceptionSupplier) throws Throwable {
+        if (isPresent) {
+            return value;
+        }
+        throw (Throwable) exceptionSupplier.get();
     }
 
     @Override

@@ -35,6 +35,14 @@ public interface Comparator<T> {
         return thenComparing(comparingInt(keyExtractor));
     }
 
+    default Comparator<T> thenComparingLong(ToLongFunction keyExtractor) {
+        return thenComparing(comparingLong(keyExtractor));
+    }
+
+    default Comparator<T> thenComparingDouble(ToDoubleFunction keyExtractor) {
+        return thenComparing(comparingDouble(keyExtractor));
+    }
+
     static Comparator naturalOrder() {
         return new Comparator() {
             public int compare(Object a, Object b) {
@@ -91,6 +99,46 @@ public interface Comparator<T> {
                 Comparable ka = (Comparable) ke.apply(a);
                 Object kb = ke.apply(b);
                 return ka.compareTo(kb);
+            }
+        };
+    }
+
+    static Comparator comparing(Function keyExtractor, Comparator keyComparator) {
+        final Function ke = keyExtractor;
+        final Comparator kc = keyComparator;
+        return new Comparator() {
+            public int compare(Object a, Object b) {
+                return kc.compare(ke.apply(a), ke.apply(b));
+            }
+        };
+    }
+
+    static Comparator nullsFirst(Comparator comparator) {
+        final Comparator real = comparator;
+        return new Comparator() {
+            public int compare(Object a, Object b) {
+                if (a == null) {
+                    return (b == null) ? 0 : -1;
+                } else if (b == null) {
+                    return 1;
+                } else {
+                    return (real == null) ? 0 : real.compare(a, b);
+                }
+            }
+        };
+    }
+
+    static Comparator nullsLast(Comparator comparator) {
+        final Comparator real = comparator;
+        return new Comparator() {
+            public int compare(Object a, Object b) {
+                if (a == null) {
+                    return (b == null) ? 0 : 1;
+                } else if (b == null) {
+                    return -1;
+                } else {
+                    return (real == null) ? 0 : real.compare(a, b);
+                }
             }
         };
     }
