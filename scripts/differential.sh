@@ -18,7 +18,17 @@ rm -rf "$OUT"; mkdir -p "$OUT"
 "$JAVAC" -d "$OUT" "$ROOT"/test/diff/*.java || { echo "javac failed"; exit 1; }
 "$ZIG" build --build-file "$ROOT/build.zig" >/dev/null 2>&1
 JEBENA="$ROOT/zig-out/bin/jebena"
-CLASSES=$(ls "$OUT"/*.class | grep -v '/Driver.class' | tr '\n' ' ')
+# Only the intrinsic-layer fixtures this script runs (DiffTest/DiffMore). Do NOT pass every
+# test/diff/*.class: the jbase-backed fixtures (DiffDow/DiffPath/DiffDate2/...) reference
+# java.* types absent on this no-jbase classpath, and jebena eagerly links classpath classes,
+# so including them aborts the run with a LinkError. Those belong to breadth-diff.sh.
+# Intrinsic-layer classpath: everything EXCEPT Driver and the jbase-backed breadth fixtures.
+# Those (owned by breadth-diff.sh) reference java.* types absent on this no-jbase classpath;
+# jebena eagerly links classpath classes, so including one (e.g. DiffDate2 -> ChronoLocalDate)
+# aborts the whole run with a LinkError. Excluding them keeps intrinsic fixtures + their helper
+# classes (Counter/Box/IntOp, inner $ classes) while dropping the breadth set.
+BREADTH='DiffColl|DiffRegex|DiffStream|DiffString|DiffTrace|DiffBits|DiffFmt|DiffBig|DiffNav|DiffList|DiffMath|DiffChar|DiffMap|DiffRandom|DiffPQ|DiffTok|DiffVec|DiffStk|DiffUuid|DiffOptInt|DiffADq|DiffBitSet|DiffScanner|DiffCmp|DiffBigDec|DiffBigDec2|DiffCollectors|DiffDow|DiffDecFmt|DiffPath|DiffIntStream|DiffDate2'
+CLASSES=$(ls "$OUT"/*.class | grep -vE "/Driver\.class|/($BREADTH)(\\\$[^/]*)?\.class" | tr '\n' ' ')
 
 CASES="DiffTest:arith DiffTest:loops DiffTest:rec DiffTest:longMath DiffTest:doubleMath \
 DiffTest:floatMath DiffTest:bits DiffTest:arrays DiffTest:sw DiffTest:gcd DiffTest:conv \

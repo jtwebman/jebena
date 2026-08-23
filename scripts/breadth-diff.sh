@@ -20,6 +20,7 @@ rm -rf "$OUT"; mkdir -p "$OUT"
   "$ROOT"/test/diff/DiffRandom.java "$ROOT"/test/diff/DiffPQ.java "$ROOT"/test/diff/DiffTok.java "$ROOT"/test/diff/DiffVec.java "$ROOT"/test/diff/DiffStk.java "$ROOT"/test/diff/DiffUuid.java "$ROOT"/test/diff/DiffOptInt.java "$ROOT"/test/diff/DiffADq.java \
   "$ROOT"/test/diff/DiffBitSet.java "$ROOT"/test/diff/DiffScanner.java "$ROOT"/test/diff/DiffCmp.java "$ROOT"/test/diff/DiffBigDec.java "$ROOT"/test/diff/DiffCollectors.java \
   "$ROOT"/test/diff/DiffDow.java "$ROOT"/test/diff/DiffDecFmt.java "$ROOT"/test/diff/DiffPath.java "$ROOT"/test/diff/DiffIntStream.java "$ROOT"/test/diff/DiffBigDec2.java \
+  "$ROOT"/test/diff/DiffDate2.java \
   "$ROOT"/test/diff/Driver.java || { echo "javac failed"; exit 1; }
 "$ZIG" build --build-file "$ROOT/build.zig" >/dev/null 2>&1
 JEBENA="$ROOT/zig-out/bin/jebena"
@@ -64,6 +65,7 @@ DECFMT="grouped2dpHalfEven grouped2dpNegative grouped2dpZero optionalFracRound o
 PATHC="fileName parent nameCount nameAt1 resolveRel resolveAbs normalizeDots normalizeRel joinMulti absAbsolute absRelative rootAbs rootRel"
 INTSTREAM="filterSum reduceSum minMax average distinctSum sortedChecksum limitSum skipSum mapToObjCount"
 BIGDEC2="div10by3Half div1by8Down divNeg10by3HalfEven div7by2Ceiling div7by2Floor pow25cubed pow2to10 strip movePointLeft2 movePointRight1"
+DATE2="cmpSign cmpEqual beforeAfter isEqualCase dowThursday dowSunday untilDays untilMonths"
 
 CASES=""
 for m in $COLL; do CASES="$CASES DiffColl:$m"; done
@@ -97,6 +99,7 @@ for m in $DECFMT; do CASES="$CASES DiffDecFmt:$m"; done
 for m in $PATHC; do CASES="$CASES DiffPath:$m"; done
 for m in $INTSTREAM; do CASES="$CASES DiffIntStream:$m"; done
 for m in $BIGDEC2; do CASES="$CASES DiffBigDec2:$m"; done
+for m in $DATE2; do CASES="$CASES DiffDate2:$m"; done
 
 pass=0; fail=0
 printf "%-24s %12s %12s   %s\n" CASE JAVA JEBENA RESULT

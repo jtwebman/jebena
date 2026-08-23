@@ -4,7 +4,7 @@ package java.time;
  * Clean-room immutable date in the proleptic Gregorian calendar.
  * Fields: year, month (1..12), day (1..lengthOfMonth).
  */
-public final class LocalDate implements Comparable<LocalDate> {
+public final class LocalDate implements java.time.chrono.ChronoLocalDate {
 
     // Days from year 0000-01-01 to 1970-01-01 (proleptic Gregorian).
     private static final long DAYS_0000_TO_1970 = (146097L * 5L) - (30L * 365L + 7L);
@@ -139,10 +139,15 @@ public final class LocalDate implements Comparable<LocalDate> {
         return total - DAYS_0000_TO_1970;
     }
 
-    /** Day of week: 1=Monday .. 7=Sunday. */
-    public int getDayOfWeek() {
+    /** ISO day of week (Monday..Sunday), matching real JDK's DayOfWeek return type. */
+    public DayOfWeek getDayOfWeek() {
         int dow0 = (int) floorMod(toEpochDay() + 3, 7);
-        return dow0 + 1;
+        return DayOfWeek.of(dow0 + 1);
+    }
+
+    /** Numeric ISO day of week (1=Monday .. 7=Sunday). */
+    public int getDayOfWeekValue() {
+        return (int) floorMod(toEpochDay() + 3, 7) + 1;
     }
 
     public LocalDate plusDays(long daysToAdd) {
@@ -198,7 +203,8 @@ public final class LocalDate implements Comparable<LocalDate> {
     }
 
     /** Period from this date (inclusive) to the end date (exclusive). */
-    public Period until(LocalDate end) {
+    public Period until(java.time.chrono.ChronoLocalDate endExclusive) {
+        LocalDate end = (LocalDate) endExclusive;
         long totalMonths = end.getProlepticMonth() - this.getProlepticMonth();
         int days = end.day - this.day;
         if (totalMonths > 0 && days < 0) {
@@ -222,7 +228,8 @@ public final class LocalDate implements Comparable<LocalDate> {
         return new LocalDate(year, month, day);
     }
 
-    public int compareTo(LocalDate other) {
+    public int compareTo(java.time.chrono.ChronoLocalDate otherDate) {
+        LocalDate other = (LocalDate) otherDate;
         int cmp = (year - other.year);
         if (cmp == 0) {
             cmp = (month - other.month);
@@ -233,15 +240,15 @@ public final class LocalDate implements Comparable<LocalDate> {
         return cmp;
     }
 
-    public boolean isBefore(LocalDate other) {
+    public boolean isBefore(java.time.chrono.ChronoLocalDate other) {
         return compareTo(other) < 0;
     }
 
-    public boolean isAfter(LocalDate other) {
+    public boolean isAfter(java.time.chrono.ChronoLocalDate other) {
         return compareTo(other) > 0;
     }
 
-    public boolean isEqual(LocalDate other) {
+    public boolean isEqual(java.time.chrono.ChronoLocalDate other) {
         return compareTo(other) == 0;
     }
 

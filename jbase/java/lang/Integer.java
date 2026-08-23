@@ -137,6 +137,10 @@ public final class Integer extends Number implements Comparable<Integer> {
         return toUnsignedString(i, 1);
     }
 
+    public static int signum(int i) {
+        return (i >> 31) | (-i >>> 31);
+    }
+
     public static int bitCount(int i) {
         i = i - ((i >>> 1) & 0x55555555);
         i = (i & 0x33333333) + ((i >>> 2) & 0x33333333);

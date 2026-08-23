@@ -132,6 +132,10 @@ public final class Long extends Number implements Comparable<Long> {
         return toUnsignedString(i, 1);
     }
 
+    public static int signum(long i) {
+        return (int) ((i >> 63) | (-i >>> 63));
+    }
+
     public static int bitCount(long i) {
         i = i - ((i >>> 1) & 0x5555555555555555L);
         i = (i & 0x3333333333333333L) + ((i >>> 2) & 0x3333333333333333L);
