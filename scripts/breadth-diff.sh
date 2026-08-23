@@ -15,13 +15,14 @@ OUT=/tmp/jebena-breadth-diff
 rm -rf "$OUT"; mkdir -p "$OUT"
 
 [ -d "$ROOT/jbase/out" ] || bash "$ROOT/scripts/build-jbase.sh" >/dev/null 2>&1
-"$JAVAC" -d "$OUT" "$ROOT"/test/diff/DiffColl.java "$ROOT"/test/diff/DiffRegex.java \
+"$JAVAC" -encoding UTF-8 -d "$OUT" "$ROOT"/test/diff/DiffColl.java "$ROOT"/test/diff/DiffRegex.java \
   "$ROOT"/test/diff/DiffStream.java "$ROOT"/test/diff/DiffString.java "$ROOT"/test/diff/DiffTrace.java "$ROOT"/test/diff/DiffBits.java "$ROOT"/test/diff/DiffFmt.java "$ROOT"/test/diff/DiffBig.java "$ROOT"/test/diff/DiffNav.java "$ROOT"/test/diff/DiffList.java "$ROOT"/test/diff/DiffMath.java "$ROOT"/test/diff/DiffChar.java "$ROOT"/test/diff/DiffMap.java \
   "$ROOT"/test/diff/DiffRandom.java "$ROOT"/test/diff/DiffPQ.java "$ROOT"/test/diff/DiffTok.java "$ROOT"/test/diff/DiffVec.java "$ROOT"/test/diff/DiffStk.java "$ROOT"/test/diff/DiffUuid.java "$ROOT"/test/diff/DiffOptInt.java "$ROOT"/test/diff/DiffADq.java \
   "$ROOT"/test/diff/DiffBitSet.java "$ROOT"/test/diff/DiffScanner.java "$ROOT"/test/diff/DiffCmp.java "$ROOT"/test/diff/DiffBigDec.java "$ROOT"/test/diff/DiffCollectors.java \
   "$ROOT"/test/diff/DiffDow.java "$ROOT"/test/diff/DiffDecFmt.java "$ROOT"/test/diff/DiffPath.java "$ROOT"/test/diff/DiffIntStream.java "$ROOT"/test/diff/DiffBigDec2.java \
   "$ROOT"/test/diff/DiffDate2.java \
   "$ROOT"/test/diff/DiffB64.java "$ROOT"/test/diff/DiffCrc.java "$ROOT"/test/diff/DiffLongStream.java "$ROOT"/test/diff/DiffDoubleStream.java "$ROOT"/test/diff/DiffRegex2.java "$ROOT"/test/diff/DiffStream2.java "$ROOT"/test/diff/DiffMath2.java "$ROOT"/test/diff/DiffBigDec3.java "$ROOT"/test/diff/DiffDtf.java "$ROOT"/test/diff/DiffGauss.java \
+  "$ROOT"/test/diff/DiffStrBytes.java \
   "$ROOT"/test/diff/Driver.java || { echo "javac failed"; exit 1; }
 "$ZIG" build --build-file "$ROOT/build.zig" >/dev/null 2>&1
 JEBENA="$ROOT/zig-out/bin/jebena"
@@ -77,6 +78,7 @@ MATH2="toRadians180 toDegreesPI copySign3neg1 copySignFloat signumNeg5 signumZer
 BIGDEC3="remainderBasic remainderFrac remainderNeg divToIntegral divToIntegralFrac maxOf minOf precisionOf precisionZero roundBasic roundCarry roundFloorMode"
 DTF="isoDate slashDate dateTime literalHeavy midnightTime endOfDay compactNoSep singleLetters fullDateTime"
 GAUSS="single42 single42Coarse sum3Seed7 sum3Seed7Coarse combineSeed1 combineSeed1Coarse cachedPairSecond reseedClearsCache"
+STRBYTES="asciiLen asciiBytes twoByteLen twoByteBytes threeByteLen threeByteBytes roundtripAscii roundtripUtf8 offsetDecode emptyBytes"
 
 CASES=""
 for m in $COLL; do CASES="$CASES DiffColl:$m"; done
@@ -121,6 +123,7 @@ for m in $MATH2; do CASES="$CASES DiffMath2:$m"; done
 for m in $BIGDEC3; do CASES="$CASES DiffBigDec3:$m"; done
 for m in $DTF; do CASES="$CASES DiffDtf:$m"; done
 for m in $GAUSS; do CASES="$CASES DiffGauss:$m"; done
+for m in $STRBYTES; do CASES="$CASES DiffStrBytes:$m"; done
 
 pass=0; fail=0
 printf "%-24s %12s %12s   %s\n" CASE JAVA JEBENA RESULT

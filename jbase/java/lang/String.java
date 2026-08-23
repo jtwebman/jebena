@@ -17,6 +17,97 @@ public final class String implements CharSequence, Comparable<String> {
         this.value = c;
     }
 
+    /** Decode UTF-8 bytes (the JDK default charset) into this String. */
+    public String(byte[] bytes) {
+        this.value = decodeUtf8(bytes, 0, bytes.length);
+    }
+
+    public String(byte[] bytes, int offset, int length) {
+        this.value = decodeUtf8(bytes, offset, length);
+    }
+
+    /** Encode this String as UTF-8 (the JDK default charset). */
+    public byte[] getBytes() {
+        int n = value.length;
+        byte[] tmp = new byte[n * 3 + 4];
+        int di = 0;
+        int i = 0;
+        while (i < n) {
+            int c = value[i] & 0xFFFF;
+            if (c < 0x80) {
+                tmp[di++] = (byte) c;
+                i++;
+            } else if (c < 0x800) {
+                tmp[di++] = (byte) (0xC0 | (c >> 6));
+                tmp[di++] = (byte) (0x80 | (c & 0x3F));
+                i++;
+            } else if (c >= 0xD800 && c <= 0xDBFF && i + 1 < n
+                    && (value[i + 1] & 0xFFFF) >= 0xDC00 && (value[i + 1] & 0xFFFF) <= 0xDFFF) {
+                int lo = value[i + 1] & 0xFFFF;
+                int cp = 0x10000 + ((c - 0xD800) << 10) + (lo - 0xDC00);
+                tmp[di++] = (byte) (0xF0 | (cp >> 18));
+                tmp[di++] = (byte) (0x80 | ((cp >> 12) & 0x3F));
+                tmp[di++] = (byte) (0x80 | ((cp >> 6) & 0x3F));
+                tmp[di++] = (byte) (0x80 | (cp & 0x3F));
+                i += 2;
+            } else if (c >= 0xD800 && c <= 0xDFFF) {
+                tmp[di++] = (byte) '?'; // unpaired surrogate -> '?' (matches JDK)
+                i++;
+            } else {
+                tmp[di++] = (byte) (0xE0 | (c >> 12));
+                tmp[di++] = (byte) (0x80 | ((c >> 6) & 0x3F));
+                tmp[di++] = (byte) (0x80 | (c & 0x3F));
+                i++;
+            }
+        }
+        byte[] out = new byte[di];
+        for (int k = 0; k < di; k++) {
+            out[k] = tmp[k];
+        }
+        return out;
+    }
+
+    private static char[] decodeUtf8(byte[] bytes, int offset, int length) {
+        char[] tmp = new char[length + 1];
+        int ci = 0;
+        int i = offset;
+        int end = offset + length;
+        while (i < end) {
+            int b0 = bytes[i] & 0xFF;
+            if (b0 < 0x80) {
+                tmp[ci++] = (char) b0;
+                i++;
+            } else if ((b0 & 0xE0) == 0xC0 && i + 1 < end) {
+                int b1 = bytes[i + 1] & 0xFF;
+                tmp[ci++] = (char) (((b0 & 0x1F) << 6) | (b1 & 0x3F));
+                i += 2;
+            } else if ((b0 & 0xF0) == 0xE0 && i + 2 < end) {
+                int b1 = bytes[i + 1] & 0xFF;
+                int b2 = bytes[i + 2] & 0xFF;
+                tmp[ci++] = (char) (((b0 & 0x0F) << 12) | ((b1 & 0x3F) << 6) | (b2 & 0x3F));
+                i += 3;
+            } else if ((b0 & 0xF8) == 0xF0 && i + 3 < end) {
+                int b1 = bytes[i + 1] & 0xFF;
+                int b2 = bytes[i + 2] & 0xFF;
+                int b3 = bytes[i + 3] & 0xFF;
+                int cp = ((b0 & 0x07) << 18) | ((b1 & 0x3F) << 12)
+                        | ((b2 & 0x3F) << 6) | (b3 & 0x3F);
+                cp -= 0x10000;
+                tmp[ci++] = (char) (0xD800 + (cp >> 10));
+                tmp[ci++] = (char) (0xDC00 + (cp & 0x3FF));
+                i += 4;
+            } else {
+                tmp[ci++] = '�'; // malformed -> replacement char (matches JDK)
+                i++;
+            }
+        }
+        char[] out = new char[ci];
+        for (int k = 0; k < ci; k++) {
+            out[k] = tmp[k];
+        }
+        return out;
+    }
+
     public int length() {
         return value.length;
     }

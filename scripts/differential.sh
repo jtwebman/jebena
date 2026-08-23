@@ -15,7 +15,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 OUT=/tmp/jebena-diff
 rm -rf "$OUT"; mkdir -p "$OUT"
 
-"$JAVAC" -d "$OUT" "$ROOT"/test/diff/*.java || { echo "javac failed"; exit 1; }
+"$JAVAC" -encoding UTF-8 -d "$OUT" "$ROOT"/test/diff/*.java || { echo "javac failed"; exit 1; }
 "$ZIG" build --build-file "$ROOT/build.zig" >/dev/null 2>&1
 JEBENA="$ROOT/zig-out/bin/jebena"
 # Only the intrinsic-layer fixtures this script runs (DiffTest/DiffMore). Do NOT pass every
