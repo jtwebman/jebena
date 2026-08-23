@@ -1,11 +1,14 @@
 package java.util.stream;
 
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.IntSummaryStatistics;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
+import java.util.Optional;
+import java.util.function.BiFunction;
 import java.util.function.BinaryOperator;
 import java.util.function.Function;
 import java.util.function.Predicate;
@@ -150,6 +153,73 @@ public class Collectors {
                     map.put(key, value);
                 }
                 return map;
+            }
+        };
+    }
+
+    public static Collector toMap(final Function keyMapper, final Function valueMapper,
+                                  final BinaryOperator mergeFunction) {
+        return new Collector() {
+            public Object collect(ArrayList data) {
+                HashMap map = new HashMap();
+                for (int i = 0; i < data.size(); i++) {
+                    Object element = data.get(i);
+                    Object key = keyMapper.apply(element);
+                    Object value = valueMapper.apply(element);
+                    if (map.containsKey(key)) {
+                        map.put(key, mergeFunction.apply(map.get(key), value));
+                    } else {
+                        map.put(key, value);
+                    }
+                }
+                return map;
+            }
+        };
+    }
+
+    public static Collector minBy(final Comparator comparator) {
+        return new Collector() {
+            public Object collect(ArrayList data) {
+                if (data.size() == 0) {
+                    return Optional.empty();
+                }
+                Object min = data.get(0);
+                for (int i = 1; i < data.size(); i++) {
+                    Object element = data.get(i);
+                    if (comparator.compare(element, min) < 0) {
+                        min = element;
+                    }
+                }
+                return Optional.of(min);
+            }
+        };
+    }
+
+    public static Collector maxBy(final Comparator comparator) {
+        return new Collector() {
+            public Object collect(ArrayList data) {
+                if (data.size() == 0) {
+                    return Optional.empty();
+                }
+                Object max = data.get(0);
+                for (int i = 1; i < data.size(); i++) {
+                    Object element = data.get(i);
+                    if (comparator.compare(element, max) > 0) {
+                        max = element;
+                    }
+                }
+                return Optional.of(max);
+            }
+        };
+    }
+
+    public static Collector teeing(final Collector downstream1, final Collector downstream2,
+                                   final BiFunction merger) {
+        return new Collector() {
+            public Object collect(ArrayList data) {
+                Object r1 = downstream1.collect(data);
+                Object r2 = downstream2.collect(data);
+                return merger.apply(r1, r2);
             }
         };
     }

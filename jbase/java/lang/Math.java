@@ -203,4 +203,88 @@ public final class Math {
         }
         return Double.longBitsToDouble(bits + 1L);
     }
+
+    public static double rint(double a) {
+        // Round to nearest, ties to even (round-half-to-even), returning a
+        // double. The "add/subtract 2^52" trick forces the FPU (which uses
+        // round-to-nearest-even) to drop the fractional bits for |a| < 2^52;
+        // values with magnitude >= 2^52 are already integral.
+        final double twoToThe52 = 4.503599627370496E15; // 2^52
+        double sign = copySign(1.0, a); // preserve sign of -0.0
+        double mag = abs(a);
+        if (mag < twoToThe52) {
+            mag = (twoToThe52 + mag) - twoToThe52;
+        }
+        return sign * mag;
+    }
+
+    public static int getExponent(double d) {
+        long bits = Double.doubleToRawLongBits(d);
+        // Extract the biased exponent and remove the 1023 bias. For subnormals
+        // and zero this yields MIN_EXPONENT-1 (-1023); for NaN/Infinity it
+        // yields MAX_EXPONENT+1 (1024), matching the spec.
+        return (int) (((bits >> 52) & 0x7ffL) - 1023L);
+    }
+
+    public static double scalb(double d, int scaleFactor) {
+        // Returns d * 2^scaleFactor with a single correct rounding. The scale is
+        // applied in chunks of at most 512 (each an exactly representable normal
+        // power of two, since 512 <= MAX_EXPONENT and -512 >= MIN_EXPONENT) so
+        // that under/overflow, if any, happens monotonically in the last steps.
+        final int MAX_SCALE = 1023 + 1022 + 53 + 1; // 2099: guarantees over/underflow
+        int scaleIncrement;
+        double expDelta;
+        if (scaleFactor < 0) {
+            scaleFactor = max(scaleFactor, -MAX_SCALE);
+            scaleIncrement = -512;
+            expDelta = Double.longBitsToDouble(0x1ff0000000000000L); // 2^-512
+        } else {
+            scaleFactor = min(scaleFactor, MAX_SCALE);
+            scaleIncrement = 512;
+            expDelta = Double.longBitsToDouble(0x5ff0000000000000L); // 2^512
+        }
+        // Remainder of scaleFactor modulo 512, same sign as scaleFactor, so that
+        // (scaleFactor - expAdjust) is a multiple of 512.
+        int expAdjust;
+        if (scaleFactor >= 0) {
+            expAdjust = scaleFactor & 511;
+        } else {
+            expAdjust = -((-scaleFactor) & 511);
+        }
+        d *= powerOfTwoD(expAdjust);
+        scaleFactor -= expAdjust;
+        while (scaleFactor != 0) {
+            d *= expDelta;
+            scaleFactor -= scaleIncrement;
+        }
+        return d;
+    }
+
+    // 2^n as a normal double; valid only for MIN_EXPONENT <= n <= MAX_EXPONENT.
+    private static double powerOfTwoD(int n) {
+        return Double.longBitsToDouble(((long) (n + 1023)) << 52);
+    }
+
+    public static double nextAfter(double start, double direction) {
+        if (start != start || direction != direction) {
+            return start + direction; // NaN
+        }
+        if (start == direction) {
+            return direction;
+        }
+        // Adding +0.0 collapses -0.0 to +0.0 so the zero case has bits == 0.
+        long transducer = Double.doubleToRawLongBits(start + 0.0d);
+        if (direction > start) { // ascending toward +infinity
+            transducer = transducer + (transducer >= 0L ? 1L : -1L);
+        } else { // descending toward -infinity (direction < start)
+            if (transducer > 0L) {
+                transducer = transducer - 1L;
+            } else if (transducer < 0L) {
+                transducer = transducer + 1L;
+            } else {
+                transducer = 0x8000000000000001L; // -Double.MIN_VALUE
+            }
+        }
+        return Double.longBitsToDouble(transducer);
+    }
 }

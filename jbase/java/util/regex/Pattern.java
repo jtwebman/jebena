@@ -94,6 +94,69 @@ public final class Pattern {
     }
 
     /**
+     * Splits {@code input} around matches of this pattern, with no limit; this
+     * is {@code split(input, 0)}: trailing empty strings are removed.
+     */
+    public String[] split(CharSequence input) {
+        return split(input, 0);
+    }
+
+    /**
+     * Splits {@code input} around matches of this pattern.
+     *
+     * <p>The {@code limit} controls the number of pieces and the treatment of
+     * trailing empty strings, matching the real engine: a positive limit yields
+     * at most {@code limit} pieces (the last one holding the unsplit remainder);
+     * a negative limit imposes no bound and keeps trailing empty strings; a zero
+     * limit imposes no bound but discards trailing empty strings. A zero-width
+     * match at the very start of the input never produces a leading empty piece.
+     */
+    public String[] split(CharSequence input, int limit) {
+        String in = input.toString();
+        int index = 0;
+        boolean matchLimited = limit > 0;
+        List matchList = new ArrayList();
+        Matcher m = matcher(input);
+
+        while (m.find()) {
+            if (!matchLimited || matchList.size() < limit - 1) {
+                if (index == 0 && index == m.start() && m.start() == m.end()) {
+                    // No empty leading piece for a zero-width match at the start.
+                    continue;
+                }
+                matchList.add(in.substring(index, m.start()));
+                index = m.end();
+            } else if (matchList.size() == limit - 1) {
+                // Last allowed piece: absorb the rest of the input.
+                matchList.add(in.substring(index, in.length()));
+                index = m.end();
+            }
+        }
+
+        // No match at all: the input is returned unchanged as a single piece.
+        if (index == 0) {
+            return new String[] { in };
+        }
+
+        if (!matchLimited || matchList.size() < limit) {
+            matchList.add(in.substring(index, in.length()));
+        }
+
+        int resultSize = matchList.size();
+        if (limit == 0) {
+            while (resultSize > 0
+                && ((String) matchList.get(resultSize - 1)).equals("")) {
+                resultSize--;
+            }
+        }
+        String[] result = new String[resultSize];
+        for (int k = 0; k < resultSize; k++) {
+            result[k] = (String) matchList.get(k);
+        }
+        return result;
+    }
+
+    /**
      * Returns a literal pattern string for the given string. The result compiles
      * to a pattern that matches {@code s} exactly, with every metacharacter
      * treated as an ordinary character. (Non-alphanumeric characters are escaped

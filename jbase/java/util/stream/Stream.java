@@ -6,8 +6,11 @@ import java.util.Comparator;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Optional;
+import java.util.function.BiConsumer;
 import java.util.function.BinaryOperator;
 import java.util.function.Consumer;
+import java.util.function.IntFunction;
+import java.util.function.Supplier;
 import java.util.function.Function;
 import java.util.function.Predicate;
 import java.util.function.ToIntFunction;
@@ -235,6 +238,22 @@ public class Stream {
 
     public Object collect(Collector collector) {
         return collector.collect(copyList(data));
+    }
+
+    public Object collect(Supplier supplier, BiConsumer accumulator, BiConsumer combiner) {
+        Object container = supplier.get();
+        for (int i = 0; i < data.size(); i++) {
+            accumulator.accept(container, data.get(i));
+        }
+        return container;
+    }
+
+    public Object[] toArray(IntFunction generator) {
+        Object[] array = (Object[]) generator.apply(data.size());
+        for (int i = 0; i < data.size(); i++) {
+            array[i] = data.get(i);
+        }
+        return array;
     }
 
     public List toList() {

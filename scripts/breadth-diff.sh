@@ -24,6 +24,7 @@ rm -rf "$OUT"; mkdir -p "$OUT"
   "$ROOT"/test/diff/DiffB64.java "$ROOT"/test/diff/DiffCrc.java "$ROOT"/test/diff/DiffLongStream.java "$ROOT"/test/diff/DiffDoubleStream.java "$ROOT"/test/diff/DiffRegex2.java "$ROOT"/test/diff/DiffStream2.java "$ROOT"/test/diff/DiffMath2.java "$ROOT"/test/diff/DiffBigDec3.java "$ROOT"/test/diff/DiffDtf.java "$ROOT"/test/diff/DiffGauss.java \
   "$ROOT"/test/diff/DiffStrBytes.java \
   "$ROOT"/test/diff/DiffHex.java "$ROOT"/test/diff/DiffTimeUnit.java "$ROOT"/test/diff/DiffColl2.java "$ROOT"/test/diff/DiffRegex3.java "$ROOT"/test/diff/DiffZoneOffset.java "$ROOT"/test/diff/DiffBitSet2.java "$ROOT"/test/diff/DiffSB2.java "$ROOT"/test/diff/DiffStream3.java "$ROOT"/test/diff/DiffChar2.java "$ROOT"/test/diff/DiffBigInt2.java \
+  "$ROOT"/test/diff/DiffOdt.java "$ROOT"/test/diff/DiffYear.java "$ROOT"/test/diff/DiffMonthDay.java "$ROOT"/test/diff/DiffAtomIntArr.java "$ROOT"/test/diff/DiffAtomLongArr.java "$ROOT"/test/diff/DiffColl3.java "$ROOT"/test/diff/DiffStream4.java "$ROOT"/test/diff/DiffMath3.java "$ROOT"/test/diff/DiffCollections2.java "$ROOT"/test/diff/DiffRegex4.java \
   "$ROOT"/test/diff/Driver.java || { echo "javac failed"; exit 1; }
 "$ZIG" build --build-file "$ROOT/build.zig" >/dev/null 2>&1
 JEBENA="$ROOT/zig-out/bin/jebena"
@@ -90,6 +91,16 @@ BITSET2="valueOfCardChecksum valueOfTrailingZero valueOfMultiWord toLongArrayChe
 STREAM3="iterateCount iterateSumInt iterateSumReduce iterateEmpty mapToLongSum mapToLongWide mapToDoubleSum mapToDoubleEmpty iterateMapToDouble"
 CHAR2="charCountA charCountEmoji toCharsLen toCharsChecksum codePointAtA codePointAtEmoji isSurrogateHigh isHighSurrogateTest isLowSurrogateTest isAlphabeticZ isAlphabetic5 toCodePointTest"
 BIGINT2="shiftLeft20 shiftRight3 testBit2 setBit0 clearBit1 flipBit1 bitLength255 bitCount255 negBitLength andCase orCase xorCase notCase modPowCase modInverseCase prime17 composite21 sqrt144 bigShiftChecksum"
+ODT="toStringOffset toStringUtc toStringHms offsetSeconds epochSecondUtc epochSecondOffset getters dateParts equalsCase nanoZero"
+YEAR="yearLeap2024 yearLeap2026 yearLen2026 yearLen2024 yearPlus yearMinus yearAtDay yearToString ymFebNormal ymFebLeap ymLenYear ymPlusRoll ymMonthValue ymMinusRoll ymEndOfMonth ymToString"
+MONTHDAY="toStringBasic monthValueDay febValidLeap febValidNonLeap compareSign atYearDayOfYear ofMonthEnum atYearFebNonLeap equalsHash getMonthName"
+ATOMINT="allZero setGet incTwice addGet getAndSetOld casSuccess casFail fromArrayCopy getAddIncDec lengthCase toStr"
+ATOMLONG="length fromArray addAndGetBig getAndAdd incrementAndGet decrementAndGet getAndSet casSuccess casFail getAndIncDec toStringCk"
+COLL3="toMapMergeSum toMapMergeKey1 toMapMergeKey2 toMapMergeCount minByInt maxByInt teeingSumCount teeingMinMax"
+STREAM4="collectSize collectChecksum collectEmpty collectStringBuilder collectMapped toArrayLength toArrayChecksum toArrayEmpty"
+MATH3="rintHalfEven rintNonTie getExponent scalbInt scalbFrac nextAfterLowBits nextAfterDown nextAfterZero floorDivMod"
+COLLECTIONS2="umListSizeGet umListMutateThrows umSetMutateThrows umMapMutateThrows binarySearchComparator maxReverse minReverse disjointTrueFalse emptySetMapSize addAllSize fillCheck singletonSize"
+REGEX4="splitDefaultJoin splitDefaultCount splitLimit2Join splitLimit2Count splitNegCount splitNegJoin splitRegexJoin appendReplaceResult appendReplaceLen appendReplaceGroupRef"
 
 CASES=""
 for m in $COLL; do CASES="$CASES DiffColl:$m"; done
@@ -145,6 +156,16 @@ for m in $BITSET2; do CASES="$CASES DiffBitSet2:$m"; done
 for m in $STREAM3; do CASES="$CASES DiffStream3:$m"; done
 for m in $CHAR2; do CASES="$CASES DiffChar2:$m"; done
 for m in $BIGINT2; do CASES="$CASES DiffBigInt2:$m"; done
+for m in $ODT; do CASES="$CASES DiffOdt:$m"; done
+for m in $YEAR; do CASES="$CASES DiffYear:$m"; done
+for m in $MONTHDAY; do CASES="$CASES DiffMonthDay:$m"; done
+for m in $ATOMINT; do CASES="$CASES DiffAtomIntArr:$m"; done
+for m in $ATOMLONG; do CASES="$CASES DiffAtomLongArr:$m"; done
+for m in $COLL3; do CASES="$CASES DiffColl3:$m"; done
+for m in $STREAM4; do CASES="$CASES DiffStream4:$m"; done
+for m in $MATH3; do CASES="$CASES DiffMath3:$m"; done
+for m in $COLLECTIONS2; do CASES="$CASES DiffCollections2:$m"; done
+for m in $REGEX4; do CASES="$CASES DiffRegex4:$m"; done
 
 pass=0; fail=0
 printf "%-24s %12s %12s   %s\n" CASE JAVA JEBENA RESULT

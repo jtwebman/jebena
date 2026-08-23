@@ -259,7 +259,7 @@ public final class Matcher {
      * replacement, to {@code sb}, then advances the append cursor to the end of
      * the current match.
      */
-    private void appendReplacement(StringBuilder sb, String replacement) {
+    public Matcher appendReplacement(StringBuilder sb, String replacement) {
         ensureMatch();
         sb.append(text.substring(lastAppendPosition, start()));
 
@@ -311,11 +311,13 @@ public final class Matcher {
             }
         }
         lastAppendPosition = end();
+        return this;
     }
 
     /** Appends the input following the last match to {@code sb}. */
-    private void appendTail(StringBuilder sb) {
+    public StringBuilder appendTail(StringBuilder sb) {
         sb.append(text.substring(lastAppendPosition, to));
+        return sb;
     }
 
     /**
