@@ -18,7 +18,7 @@ rm -rf "$OUT"; mkdir -p "$OUT"
 "$JAVAC" -d "$OUT" "$ROOT"/test/diff/DiffColl.java "$ROOT"/test/diff/DiffRegex.java \
   "$ROOT"/test/diff/DiffStream.java "$ROOT"/test/diff/DiffString.java "$ROOT"/test/diff/DiffTrace.java "$ROOT"/test/diff/DiffBits.java "$ROOT"/test/diff/DiffFmt.java "$ROOT"/test/diff/DiffBig.java "$ROOT"/test/diff/DiffNav.java "$ROOT"/test/diff/DiffList.java "$ROOT"/test/diff/DiffMath.java "$ROOT"/test/diff/DiffChar.java "$ROOT"/test/diff/DiffMap.java \
   "$ROOT"/test/diff/DiffRandom.java "$ROOT"/test/diff/DiffPQ.java "$ROOT"/test/diff/DiffTok.java "$ROOT"/test/diff/DiffVec.java "$ROOT"/test/diff/DiffStk.java "$ROOT"/test/diff/DiffUuid.java "$ROOT"/test/diff/DiffOptInt.java "$ROOT"/test/diff/DiffADq.java \
-  "$ROOT"/test/diff/DiffBitSet.java "$ROOT"/test/diff/DiffScanner.java "$ROOT"/test/diff/DiffCmp.java "$ROOT"/test/diff/DiffBigDec.java \
+  "$ROOT"/test/diff/DiffBitSet.java "$ROOT"/test/diff/DiffScanner.java "$ROOT"/test/diff/DiffCmp.java "$ROOT"/test/diff/DiffBigDec.java "$ROOT"/test/diff/DiffCollectors.java \
   "$ROOT"/test/diff/Driver.java || { echo "javac failed"; exit 1; }
 "$ZIG" build --build-file "$ROOT/build.zig" >/dev/null 2>&1
 JEBENA="$ROOT/zig-out/bin/jebena"
@@ -57,6 +57,7 @@ BITSET="setAndCardinality setRangeAndClear flipBehavior lengthAndSize nextSetAnd
 SCANNER="ints mixed lines emptyScanner longs doubles nextLineAfterToken whitespaceRuns negatives tabsAndNewlines"
 CMP="natural reverse reversedOfNatural byAbs byLength byLengthThenNatural thenComparingIntCase byLong byDouble emptyNatural"
 BIGDEC="addPlain subtractPlain multiplyPlain negativeAddPlain compareEqualValue compareGreater compareLess signumNeg scaleAfterMultiply setScaleHalfUp setScaleDown absPlain valueOfLong"
+COLLECTORS="summingIntCase summingLongCase averagingIntCase averagingEmptyCase toMapCase mappingCase partitioningByCase partitioningSumCase countingCase joiningPrefixCase"
 
 CASES=""
 for m in $COLL; do CASES="$CASES DiffColl:$m"; done
@@ -84,6 +85,7 @@ for m in $BITSET; do CASES="$CASES DiffBitSet:$m"; done
 for m in $SCANNER; do CASES="$CASES DiffScanner:$m"; done
 for m in $CMP; do CASES="$CASES DiffCmp:$m"; done
 for m in $BIGDEC; do CASES="$CASES DiffBigDec:$m"; done
+for m in $COLLECTORS; do CASES="$CASES DiffCollectors:$m"; done
 
 pass=0; fail=0
 printf "%-24s %12s %12s   %s\n" CASE JAVA JEBENA RESULT

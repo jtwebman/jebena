@@ -1,9 +1,14 @@
 package java.util.stream;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.function.Function;
+import java.util.function.Predicate;
+import java.util.function.ToDoubleFunction;
+import java.util.function.ToIntFunction;
+import java.util.function.ToLongFunction;
 
 /**
  * Clean-room factories for {@link Collector}. Each returned collector consumes
@@ -69,6 +74,113 @@ public class Collectors {
         return new Collector() {
             public Object collect(ArrayList data) {
                 return Long.valueOf(data.size());
+            }
+        };
+    }
+
+    public static Collector summingInt(final ToIntFunction mapper) {
+        return new Collector() {
+            public Object collect(ArrayList data) {
+                int sum = 0;
+                for (int i = 0; i < data.size(); i++) {
+                    sum += mapper.applyAsInt(data.get(i));
+                }
+                return Integer.valueOf(sum);
+            }
+        };
+    }
+
+    public static Collector summingLong(final ToLongFunction mapper) {
+        return new Collector() {
+            public Object collect(ArrayList data) {
+                long sum = 0L;
+                for (int i = 0; i < data.size(); i++) {
+                    sum += mapper.applyAsLong(data.get(i));
+                }
+                return Long.valueOf(sum);
+            }
+        };
+    }
+
+    public static Collector averagingInt(final ToIntFunction mapper) {
+        return new Collector() {
+            public Object collect(ArrayList data) {
+                double sum = 0.0d;
+                long count = 0L;
+                for (int i = 0; i < data.size(); i++) {
+                    sum += mapper.applyAsInt(data.get(i));
+                    count++;
+                }
+                return Double.valueOf(count == 0 ? 0.0d : sum / count);
+            }
+        };
+    }
+
+    public static Collector averagingLong(final ToLongFunction mapper) {
+        return new Collector() {
+            public Object collect(ArrayList data) {
+                double sum = 0.0d;
+                long count = 0L;
+                for (int i = 0; i < data.size(); i++) {
+                    sum += mapper.applyAsLong(data.get(i));
+                    count++;
+                }
+                return Double.valueOf(count == 0 ? 0.0d : sum / count);
+            }
+        };
+    }
+
+    public static Collector toMap(final Function keyMapper, final Function valueMapper) {
+        return new Collector() {
+            public Object collect(ArrayList data) {
+                HashMap map = new HashMap();
+                for (int i = 0; i < data.size(); i++) {
+                    Object element = data.get(i);
+                    Object key = keyMapper.apply(element);
+                    Object value = valueMapper.apply(element);
+                    if (map.containsKey(key)) {
+                        throw new IllegalStateException(
+                                "Duplicate key " + key
+                                        + " (attempted merging values " + map.get(key)
+                                        + " and " + value + ")");
+                    }
+                    map.put(key, value);
+                }
+                return map;
+            }
+        };
+    }
+
+    public static Collector mapping(final Function mapper, final Collector downstream) {
+        return new Collector() {
+            public Object collect(ArrayList data) {
+                ArrayList mapped = new ArrayList();
+                for (int i = 0; i < data.size(); i++) {
+                    mapped.add(mapper.apply(data.get(i)));
+                }
+                return downstream.collect(mapped);
+            }
+        };
+    }
+
+    public static Collector partitioningBy(final Predicate predicate) {
+        return new Collector() {
+            public Object collect(ArrayList data) {
+                ArrayList falses = new ArrayList();
+                ArrayList trues = new ArrayList();
+                for (int i = 0; i < data.size(); i++) {
+                    Object element = data.get(i);
+                    if (predicate.test(element)) {
+                        trues.add(element);
+                    } else {
+                        falses.add(element);
+                    }
+                }
+                // JDK's Partition is a Map with exactly {false=..., true=...}.
+                HashMap map = new HashMap();
+                map.put(Boolean.FALSE, falses);
+                map.put(Boolean.TRUE, trues);
+                return map;
             }
         };
     }
