@@ -4,7 +4,9 @@ import java.util.ArrayList;
 import java.util.OptionalDouble;
 import java.util.OptionalLong;
 import java.util.function.LongBinaryOperator;
+import java.util.function.LongFunction;
 import java.util.function.LongPredicate;
+import java.util.function.LongToIntFunction;
 import java.util.function.LongUnaryOperator;
 
 /**
@@ -128,6 +130,100 @@ public class LongStream {
             total += (double) data[i];
         }
         return OptionalDouble.of(total / (double) data.length);
+    }
+
+    public IntStream mapToInt(LongToIntFunction mapper) {
+        int[] out = new int[data.length];
+        for (int i = 0; i < data.length; i++) {
+            out[i] = mapper.applyAsInt(data[i]);
+        }
+        return IntStream.of(out);
+    }
+
+    public Stream mapToObj(LongFunction mapper) {
+        ArrayList list = new ArrayList();
+        for (int i = 0; i < data.length; i++) {
+            list.add(mapper.apply(data[i]));
+        }
+        return new Stream(list);
+    }
+
+    public DoubleStream asDoubleStream() {
+        double[] out = new double[data.length];
+        for (int i = 0; i < data.length; i++) {
+            out[i] = (double) data[i];
+        }
+        return DoubleStream.of(out);
+    }
+
+    public LongStream distinct() {
+        long[] tmp = new long[data.length];
+        int n = 0;
+        for (int i = 0; i < data.length; i++) {
+            boolean seen = false;
+            for (int j = 0; j < n; j++) {
+                if (tmp[j] == data[i]) {
+                    seen = true;
+                    break;
+                }
+            }
+            if (!seen) {
+                tmp[n++] = data[i];
+            }
+        }
+        long[] out = new long[n];
+        for (int i = 0; i < n; i++) {
+            out[i] = tmp[i];
+        }
+        return new LongStream(out);
+    }
+
+    public LongStream sorted() {
+        long[] out = new long[data.length];
+        for (int i = 0; i < data.length; i++) {
+            out[i] = data[i];
+        }
+        for (int i = 1; i < out.length; i++) {
+            long key = out[i];
+            int j = i - 1;
+            while (j >= 0 && out[j] > key) {
+                out[j + 1] = out[j];
+                j--;
+            }
+            out[j + 1] = key;
+        }
+        return new LongStream(out);
+    }
+
+    public LongStream limit(long maxSize) {
+        if (maxSize < 0) {
+            throw new IllegalArgumentException(Long.toString(maxSize));
+        }
+        int length = data.length;
+        if (maxSize < length) {
+            length = (int) maxSize;
+        }
+        long[] out = new long[length];
+        for (int i = 0; i < length; i++) {
+            out[i] = data[i];
+        }
+        return new LongStream(out);
+    }
+
+    public LongStream skip(long n) {
+        if (n < 0) {
+            throw new IllegalArgumentException(Long.toString(n));
+        }
+        int start = data.length;
+        if (n < start) {
+            start = (int) n;
+        }
+        int length = data.length - start;
+        long[] out = new long[length];
+        for (int i = 0; i < length; i++) {
+            out[i] = data[start + i];
+        }
+        return new LongStream(out);
     }
 
     /** Boxes each long into a Long and returns an object Stream. */

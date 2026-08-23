@@ -7,11 +7,14 @@ import java.util.HashSet;
 import java.util.IntSummaryStatistics;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 import java.util.function.BiFunction;
 import java.util.function.BinaryOperator;
 import java.util.function.Function;
 import java.util.function.Predicate;
+import java.util.function.Supplier;
 import java.util.function.ToDoubleFunction;
 import java.util.function.ToIntFunction;
 import java.util.function.ToLongFunction;
@@ -323,6 +326,70 @@ public class Collectors {
                     result = op.apply(result, data.get(i));
                 }
                 return result;
+            }
+        };
+    }
+
+    public static Collector collectingAndThen(final Collector downstream, final Function finisher) {
+        return new Collector() {
+            public Object collect(ArrayList data) {
+                return finisher.apply(downstream.collect(data));
+            }
+        };
+    }
+
+    public static Collector filtering(final Predicate predicate, final Collector downstream) {
+        return new Collector() {
+            public Object collect(ArrayList data) {
+                ArrayList filtered = new ArrayList();
+                for (int i = 0; i < data.size(); i++) {
+                    Object element = data.get(i);
+                    if (predicate.test(element)) {
+                        filtered.add(element);
+                    }
+                }
+                return downstream.collect(filtered);
+            }
+        };
+    }
+
+    public static Collector flatMapping(final Function mapperToStream, final Collector downstream) {
+        return new Collector() {
+            public Object collect(ArrayList data) {
+                ArrayList flattened = new ArrayList();
+                for (int i = 0; i < data.size(); i++) {
+                    Object mapped = mapperToStream.apply(data.get(i));
+                    if (mapped != null) {
+                        Stream sub = (Stream) mapped;
+                        Iterator it = sub.toList().iterator();
+                        while (it.hasNext()) {
+                            flattened.add(it.next());
+                        }
+                    }
+                }
+                return downstream.collect(flattened);
+            }
+        };
+    }
+
+    public static Collector toCollection(final Supplier collectionFactory) {
+        return new Collector() {
+            public Object collect(ArrayList data) {
+                Object out = collectionFactory.get();
+                // The VM's checkcast to Collection (a transitive super-interface)
+                // is unreliable, so narrow to the directly-implemented interface.
+                if (out instanceof List) {
+                    List list = (List) out;
+                    for (int i = 0; i < data.size(); i++) {
+                        list.add(data.get(i));
+                    }
+                } else if (out instanceof Set) {
+                    Set set = (Set) out;
+                    for (int i = 0; i < data.size(); i++) {
+                        set.add(data.get(i));
+                    }
+                }
+                return out;
             }
         };
     }

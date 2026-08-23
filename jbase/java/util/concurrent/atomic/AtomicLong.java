@@ -40,6 +40,28 @@ public class AtomicLong extends Number {
 
     public final native boolean compareAndSet(long expect, long update);
 
+    public final synchronized long getAndUpdate(java.util.function.LongUnaryOperator updateFunction) {
+        long old = value;
+        value = updateFunction.applyAsLong(old);
+        return old;
+    }
+
+    public final synchronized long updateAndGet(java.util.function.LongUnaryOperator updateFunction) {
+        value = updateFunction.applyAsLong(value);
+        return value;
+    }
+
+    public final synchronized long getAndAccumulate(long x, java.util.function.LongBinaryOperator accumulatorFunction) {
+        long old = value;
+        value = accumulatorFunction.applyAsLong(old, x);
+        return old;
+    }
+
+    public final synchronized long accumulateAndGet(long x, java.util.function.LongBinaryOperator accumulatorFunction) {
+        value = accumulatorFunction.applyAsLong(value, x);
+        return value;
+    }
+
     public int intValue() {
         return (int) value;
     }

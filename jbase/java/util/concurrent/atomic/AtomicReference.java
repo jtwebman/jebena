@@ -39,6 +39,28 @@ public class AtomicReference {
         return false;
     }
 
+    public final synchronized Object getAndUpdate(java.util.function.UnaryOperator updateFunction) {
+        Object old = value;
+        value = updateFunction.apply(old);
+        return old;
+    }
+
+    public final synchronized Object updateAndGet(java.util.function.UnaryOperator updateFunction) {
+        value = updateFunction.apply(value);
+        return value;
+    }
+
+    public final synchronized Object getAndAccumulate(Object x, java.util.function.BinaryOperator accumulatorFunction) {
+        Object old = value;
+        value = accumulatorFunction.apply(old, x);
+        return old;
+    }
+
+    public final synchronized Object accumulateAndGet(Object x, java.util.function.BinaryOperator accumulatorFunction) {
+        value = accumulatorFunction.apply(value, x);
+        return value;
+    }
+
     public String toString() {
         return String.valueOf(get());
     }

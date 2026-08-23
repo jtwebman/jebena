@@ -41,6 +41,28 @@ public class AtomicInteger extends Number {
 
     public final native boolean compareAndSet(int expect, int update);
 
+    public final synchronized int getAndUpdate(java.util.function.IntUnaryOperator updateFunction) {
+        int old = value;
+        value = updateFunction.applyAsInt(old);
+        return old;
+    }
+
+    public final synchronized int updateAndGet(java.util.function.IntUnaryOperator updateFunction) {
+        value = updateFunction.applyAsInt(value);
+        return value;
+    }
+
+    public final synchronized int getAndAccumulate(int x, java.util.function.IntBinaryOperator accumulatorFunction) {
+        int old = value;
+        value = accumulatorFunction.applyAsInt(old, x);
+        return old;
+    }
+
+    public final synchronized int accumulateAndGet(int x, java.util.function.IntBinaryOperator accumulatorFunction) {
+        value = accumulatorFunction.applyAsInt(value, x);
+        return value;
+    }
+
     public int intValue() {
         return value;
     }

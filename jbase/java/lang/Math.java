@@ -113,6 +113,85 @@ public final class Math {
         return x - floorDiv(x, y) * y;
     }
 
+    // High 64 bits of the 128-bit signed product x*y, via 32-bit limbs.
+    public static long multiplyHigh(long x, long y) {
+        long x1 = x >> 32;
+        long x2 = x & 0xFFFFFFFFL;
+        long y1 = y >> 32;
+        long y2 = y & 0xFFFFFFFFL;
+        long z2 = x2 * y2;
+        long t = x1 * y2 + (z2 >>> 32);
+        long z1 = t & 0xFFFFFFFFL;
+        long z0 = t >> 32;
+        z1 += x2 * y1;
+        return x1 * y1 + z0 + (z1 >> 32);
+    }
+
+    // floorDiv variants that throw on the single overflowing quotient (MIN/-1).
+    public static int floorDivExact(int x, int y) {
+        int q = x / y;
+        if ((x & y & q) >= 0) {
+            if ((x ^ y) < 0 && q * y != x) {
+                return q - 1;
+            }
+            return q;
+        }
+        throw new ArithmeticException("integer overflow");
+    }
+
+    public static long floorDivExact(long x, long y) {
+        long q = x / y;
+        if ((x & y & q) >= 0L) {
+            if ((x ^ y) < 0L && q * y != x) {
+                return q - 1L;
+            }
+            return q;
+        }
+        throw new ArithmeticException("long overflow");
+    }
+
+    // Division rounding the quotient toward positive infinity (ceiling).
+    public static int ceilDiv(int x, int y) {
+        int q = x / y;
+        if ((x ^ y) >= 0 && q * y != x) {
+            return q + 1;
+        }
+        return q;
+    }
+
+    public static long ceilDiv(long x, long y) {
+        long q = x / y;
+        if ((x ^ y) >= 0L && q * y != x) {
+            return q + 1L;
+        }
+        return q;
+    }
+
+    public static int ceilMod(int x, int y) {
+        return x - ceilDiv(x, y) * y;
+    }
+
+    public static long ceilMod(long x, long y) {
+        return x - ceilDiv(x, y) * y;
+    }
+
+    // abs that throws instead of returning MIN_VALUE unchanged.
+    public static int absExact(int a) {
+        if (a == Integer.MIN_VALUE) {
+            throw new ArithmeticException(
+                "Overflow to represent absolute value of Integer.MIN_VALUE");
+        }
+        return (a < 0) ? -a : a;
+    }
+
+    public static long absExact(long a) {
+        if (a == Long.MIN_VALUE) {
+            throw new ArithmeticException(
+                "Overflow to represent absolute value of Long.MIN_VALUE");
+        }
+        return (a < 0L) ? -a : a;
+    }
+
     // ---- Pure floating-point helpers (bit-exact, no libm needed) ----
 
     public static double toRadians(double angdeg) {

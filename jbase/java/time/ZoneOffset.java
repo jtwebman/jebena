@@ -6,7 +6,7 @@ package java.time;
  * Pure computation, no tzdata. Range is limited to {@code -18:00} through
  * {@code +18:00} inclusive.
  */
-public final class ZoneOffset {
+public final class ZoneOffset extends ZoneId {
 
     private static final int MAX_SECONDS = 18 * 3600;
 

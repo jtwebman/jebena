@@ -26,6 +26,7 @@ rm -rf "$OUT"; mkdir -p "$OUT"
   "$ROOT"/test/diff/DiffHex.java "$ROOT"/test/diff/DiffTimeUnit.java "$ROOT"/test/diff/DiffColl2.java "$ROOT"/test/diff/DiffRegex3.java "$ROOT"/test/diff/DiffZoneOffset.java "$ROOT"/test/diff/DiffBitSet2.java "$ROOT"/test/diff/DiffSB2.java "$ROOT"/test/diff/DiffStream3.java "$ROOT"/test/diff/DiffChar2.java "$ROOT"/test/diff/DiffBigInt2.java \
   "$ROOT"/test/diff/DiffOdt.java "$ROOT"/test/diff/DiffYear.java "$ROOT"/test/diff/DiffMonthDay.java "$ROOT"/test/diff/DiffAtomIntArr.java "$ROOT"/test/diff/DiffAtomLongArr.java "$ROOT"/test/diff/DiffColl3.java "$ROOT"/test/diff/DiffStream4.java "$ROOT"/test/diff/DiffMath3.java "$ROOT"/test/diff/DiffCollections2.java "$ROOT"/test/diff/DiffRegex4.java \
   "$ROOT"/test/diff/DiffScanner2.java "$ROOT"/test/diff/DiffDuration.java "$ROOT"/test/diff/DiffPeriod.java "$ROOT"/test/diff/DiffTreeNav.java "$ROOT"/test/diff/DiffNumFmt.java "$ROOT"/test/diff/DiffArrays2.java "$ROOT"/test/diff/DiffIntStream2.java "$ROOT"/test/diff/DiffOptional2.java "$ROOT"/test/diff/DiffRegex5.java "$ROOT"/test/diff/DiffUnsigned.java \
+  "$ROOT"/test/diff/DiffInstant.java "$ROOT"/test/diff/DiffClock.java "$ROOT"/test/diff/DiffAtomRefArr.java "$ROOT"/test/diff/DiffColl4.java "$ROOT"/test/diff/DiffCollectorOf.java "$ROOT"/test/diff/DiffSplitRnd.java "$ROOT"/test/diff/DiffObjects.java "$ROOT"/test/diff/DiffAtomUpd.java "$ROOT"/test/diff/DiffMath4.java "$ROOT"/test/diff/DiffLDStream.java \
   "$ROOT"/test/diff/Driver.java || { echo "javac failed"; exit 1; }
 "$ZIG" build --build-file "$ROOT/build.zig" >/dev/null 2>&1
 JEBENA="$ROOT/zig-out/bin/jebena"
@@ -112,6 +113,16 @@ INTSTREAM2="mapToObjCount asLongSum mapToDoubleSum flatMapSum asDoubleAvg mapToL
 OPTIONAL2="filterKeep filterDrop flatMapPresent flatMapEmpty orEmpty orPresent streamPresent streamEmpty"
 REGEX5="digitLengths wrapMatches usePosition useEnd swapGroups groupCountReplace noMatch"
 UNSIGNED="parseIntRadix parseUnsigned toUnsignedLongLow divideUnsignedInt remainderUnsignedInt compareUnsignedInt rotateLeftInt rotateRightInt toUnsignedStringInt parseLongRadix divideUnsignedLong remainderUnsignedLong compareUnsignedLong rotateLeftLong toUnsignedStringLong"
+INSTANT="parseEpochSec parseNano ofEpochSecondNano plusMillisSec plusMillisNano plusNanosCarry minusMillis toStringPlain toStringMillis toStringNanos roundTripEpoch isBeforeCheck"
+CLOCK="fixedMillisLowBits fixedInstantEpochSecond fixedZoneTotalSeconds smallFixedMillis fixedInstantSame nonUtcZone millisMatchesInstant negativeEpoch"
+ATOMREFARR="allNull setGet getAndSetOld casSuccessIdentity casFailIdentity casNullExpect lengthCase fromArrayCopy toStr toStrWithNull"
+COLLECTOROF="sbAbc sum1to5 sum3argIdentity listSize3arg emptySum product concatUpper totalChars"
+COLL4="collectingAndThenSize collectingAndThenSetSize filteringEvens filteringNone filteringToList flatMappingDouble flatMappingEmpty flatMappingToList toCollectionSize toCollectionDups toCollectionSet"
+SPLITRND="firstInt sumThreeLongs boundedFold doubleScaled boundedPow2 sameSeedEqual"
+OBJECTS="elseNull elseNonNull elseGetNull elseGetNonNull checkIdx checkFromTo checkFromSize hashInts hashMixed toStringNull toStringNonNull reqSupplier"
+ATOMUPD="updAndGet getAndUpd accAndGet getAndAcc refUpdAndGet refGetAndUpd refAccAndGet longGetAndUpd longGetAndAcc intAccMax"
+MATH4="mhMax mhShift mhNeg mhBothNeg mhZero mhMinMin mhMixed mhOne"
+LDSTREAM="mapToObjCount sortedLimitSum distinctSum doubleDistinctCount doubleSortedSkipSum asDoubleStreamSum mapToIntSum doubleSkipLimit doubleMapToLongSum longSkipSum"
 
 CASES=""
 for m in $COLL; do CASES="$CASES DiffColl:$m"; done
@@ -187,6 +198,16 @@ for m in $INTSTREAM2; do CASES="$CASES DiffIntStream2:$m"; done
 for m in $OPTIONAL2; do CASES="$CASES DiffOptional2:$m"; done
 for m in $REGEX5; do CASES="$CASES DiffRegex5:$m"; done
 for m in $UNSIGNED; do CASES="$CASES DiffUnsigned:$m"; done
+for m in $INSTANT; do CASES="$CASES DiffInstant:$m"; done
+for m in $CLOCK; do CASES="$CASES DiffClock:$m"; done
+for m in $ATOMREFARR; do CASES="$CASES DiffAtomRefArr:$m"; done
+for m in $COLLECTOROF; do CASES="$CASES DiffCollectorOf:$m"; done
+for m in $COLL4; do CASES="$CASES DiffColl4:$m"; done
+for m in $SPLITRND; do CASES="$CASES DiffSplitRnd:$m"; done
+for m in $OBJECTS; do CASES="$CASES DiffObjects:$m"; done
+for m in $ATOMUPD; do CASES="$CASES DiffAtomUpd:$m"; done
+for m in $MATH4; do CASES="$CASES DiffMath4:$m"; done
+for m in $LDSTREAM; do CASES="$CASES DiffLDStream:$m"; done
 
 pass=0; fail=0
 printf "%-24s %12s %12s   %s\n" CASE JAVA JEBENA RESULT
