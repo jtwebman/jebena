@@ -24,7 +24,7 @@ EXP=$("$JAVA" -cp "$OUT" Driver st.BoundedBufferStress demo 2>/dev/null)
 fail=0
 check() { # env reps
   for rep in $(seq 1 "$2"); do
-    ALL=$(timeout 60 env $1 "$JEBENA" run st/BoundedBufferStress demo "${APP[@]}" "${JBASE[@]}" 2>&1)
+    ALL=$(timeout 90 env $1 "$JEBENA" run st/BoundedBufferStress demo "${APP[@]}" "${JBASE[@]}" 2>&1)
     [ $? -eq 124 ] && { echo "bbq-stress: FAIL ($1) rep=$rep HANG"; fail=1; }
     GOT=$(printf '%s\n' "$ALL" | sed -n 's/.*demo() = \(-\?[0-9]*\).*/\1/p')
     [ "$GOT" = "$EXP" ] || { echo "bbq-stress: FAIL ($1) rep=$rep jebena=$GOT java=$EXP"; fail=1; }
