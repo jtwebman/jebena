@@ -29,6 +29,7 @@ rm -rf "$OUT"; mkdir -p "$OUT"
   "$ROOT"/test/diff/DiffInstant.java "$ROOT"/test/diff/DiffClock.java "$ROOT"/test/diff/DiffAtomRefArr.java "$ROOT"/test/diff/DiffColl4.java "$ROOT"/test/diff/DiffCollectorOf.java "$ROOT"/test/diff/DiffSplitRnd.java "$ROOT"/test/diff/DiffObjects.java "$ROOT"/test/diff/DiffAtomUpd.java "$ROOT"/test/diff/DiffMath4.java "$ROOT"/test/diff/DiffLDStream.java \
   "$ROOT"/test/diff/DiffCmp2.java "$ROOT"/test/diff/DiffCLQ.java "$ROOT"/test/diff/DiffCOW.java "$ROOT"/test/diff/DiffOffsetTime.java "$ROOT"/test/diff/DiffFmtSci.java "$ROOT"/test/diff/DiffRndStream.java "$ROOT"/test/diff/DiffStreamGen.java "$ROOT"/test/diff/DiffCollections3.java "$ROOT"/test/diff/DiffOptPrim.java "$ROOT"/test/diff/DiffIntStream3.java \
   "$ROOT"/test/diff/DiffLru.java "$ROOT"/test/diff/DiffArrays3.java "$ROOT"/test/diff/DiffFmtGrp.java "$ROOT"/test/diff/DiffRegex6.java "$ROOT"/test/diff/DiffB64Mime.java "$ROOT"/test/diff/DiffStr3.java "$ROOT"/test/diff/DiffMath5.java "$ROOT"/test/diff/DiffIntRadix.java "$ROOT"/test/diff/DiffColl5.java "$ROOT"/test/diff/DiffADq2.java \
+  "$ROOT"/test/diff/DiffMref.java \
   "$ROOT"/test/diff/Driver.java || { echo "javac failed"; exit 1; }
 "$ZIG" build --build-file "$ROOT/build.zig" >/dev/null 2>&1
 JEBENA="$ROOT/zig-out/bin/jebena"
@@ -146,6 +147,7 @@ MATH5="addExactInt addExactIntOverflow addExactLong addExactLongOverflow subtrac
 INTRADIX="parseHex parseBinNeg parseVariousRadix toStringRadix radixStringLengths radixStringHashes bitCounts highLowBits leadingTrailingZeros reverseOps longRadix parseErrors"
 COLL5="unmodListThrows unmodSetThrows unmodMapThrows frequencyCount disjointTrue disjointFalse nCopiesSum swapValues rotateChecksum rotateNegative fillList"
 ADQ2="descendingChecksum descendingCount removeFirstOccurrence removeLastOccurrence removeOccurrenceMiss peekAndGet peekEmptyVsGetEmpty addFirstGrowthOrder addFirstGrowthEndpoints offerInterleave offerInterleaveDescending removeLastOccurrenceAtHead"
+MREF="sumBinOp sumBiFunc maxBinOp minBinOp longSumBinOp longMaxBinOp longMinBinOp absFunc strLenToInt mergeSum mergeAccumulateValues"
 CASES=""
 for m in $COLL; do CASES="$CASES DiffColl:$m"; done
 for m in $REGEX; do CASES="$CASES DiffRegex:$m"; done
@@ -250,6 +252,7 @@ for m in $MATH5; do CASES="$CASES DiffMath5:$m"; done
 for m in $INTRADIX; do CASES="$CASES DiffIntRadix:$m"; done
 for m in $COLL5; do CASES="$CASES DiffColl5:$m"; done
 for m in $ADQ2; do CASES="$CASES DiffADq2:$m"; done
+for m in $MREF; do CASES="$CASES DiffMref:$m"; done
 
 pass=0; fail=0
 printf "%-24s %12s %12s   %s\n" CASE JAVA JEBENA RESULT

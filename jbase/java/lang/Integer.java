@@ -337,6 +337,18 @@ public final class Integer extends Number implements Comparable<Integer> {
         return (x < y) ? -1 : ((x == y) ? 0 : 1);
     }
 
+    public static int sum(int a, int b) {
+        return a + b;
+    }
+
+    public static int max(int a, int b) {
+        return Math.max(a, b);
+    }
+
+    public static int min(int a, int b) {
+        return Math.min(a, b);
+    }
+
     public static int compareUnsigned(int x, int y) {
         return compare(x + MIN_VALUE, y + MIN_VALUE);
     }

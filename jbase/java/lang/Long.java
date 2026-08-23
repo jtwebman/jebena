@@ -192,6 +192,18 @@ public final class Long extends Number implements Comparable<Long> {
         return (x < y) ? -1 : ((x == y) ? 0 : 1);
     }
 
+    public static long sum(long a, long b) {
+        return a + b;
+    }
+
+    public static long max(long a, long b) {
+        return Math.max(a, b);
+    }
+
+    public static long min(long a, long b) {
+        return Math.min(a, b);
+    }
+
     public static int compareUnsigned(long x, long y) {
         return compare(x + MIN_VALUE, y + MIN_VALUE);
     }

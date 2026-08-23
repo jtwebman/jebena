@@ -1752,7 +1752,7 @@ fn invokeInstance(f: *Frame, cls: *const Class, code: []const u8, is_special: bo
     const oid = (try f.popRef()) orelse return error.NullPointer;
     const heap = f.heap orelse return error.UnsupportedOpcode;
     switch (heap.get(oid).*) {
-        .lambda => |lam| return dispatchLambdaPending(f, lam, slots, pl.params, pending),
+        .lambda => |lam| return dispatchLambdaPending(f, lam, slots, pl.params, retKindFromDesc(mdesc), pending),
         .boxed => return boxedMethod(f, oid, slots, pl.params, mname, mdesc),
         .array => {
             // Arrays expose Object.clone() as a shallow copy (used by enum values()).
@@ -2539,7 +2539,59 @@ fn runImplInstance(f: *Frame, owner: *const Class, impl: *const Class.Method, re
     const ret = try exec(owner.gpa, owner, f.heap, f.loader, f.budget, cc.code, cc.max_stack, cc.max_locals, islots, cc.exception_table, f);
     if (ret) |rv| try f.pushKind(rv);
 }
-fn dispatchLambda(f: *Frame, lam: LambdaObj, sam_slots: []const Value, sam_params: []const Class.Param) RunError!void {
+fn valueKind(v: Value) Kind {
+    return switch (v) {
+        .int => .int,
+        .long => .long,
+        .float => .float,
+        .double => .double,
+        .reference => .reference,
+        .top => .reference,
+    };
+}
+
+fn retKindFromDesc(desc: []const u8) ?Kind {
+    return switch (returnDescChar(desc)) {
+        'V' => null,
+        'J' => .long,
+        'D' => .double,
+        'F' => .float,
+        'L', '[' => .reference,
+        else => .int, // I, Z, C, S, B
+    };
+}
+
+// Adapt a value produced at a functional-interface (SAM) call site to the kind the
+// implementation method actually expects, boxing/unboxing at the lambda-metafactory
+// boundary. Needed for method refs to primitive-signature methods bound to a reference
+// SAM, e.g. `Integer::sum` used as a BiFunction<Integer,Integer,Integer>. Boxing
+// allocates, but GC only fires at opcode boundaries (never inside allocInstance), so
+// reference ids held in caller-local arrays stay valid across this call.
+fn adaptValue(f: *Frame, v: Value, target: Kind) RunError!Value {
+    const vk = valueKind(v);
+    if (vk == target) return v;
+    if (target == .reference) return boxArg(f, v, vk); // primitive -> wrapper
+    return convertArgToValue(f, v, target); // wrapper -> primitive
+}
+
+// Adapt the value the impl method left on the stack to the SAM's declared return kind.
+fn adaptReturn(f: *Frame, impl_ret: ?Kind, sam_ret: ?Kind) RunError!void {
+    const ir = impl_ret orelse return; // impl returned void: nothing was pushed
+    const sr = sam_ret orelse {
+        _ = try f.popKind(ir); // SAM is void but impl returned a value: discard it
+        return;
+    };
+    if (ir == sr) return;
+    if (sr == .reference) {
+        const v = try f.popKind(ir);
+        try f.push(try boxArg(f, v, ir)); // primitive -> wrapper
+    } else {
+        const v = try f.popKind(.reference);
+        try f.pushKind(try convertArgToValue(f, v, sr)); // wrapper -> primitive
+    }
+}
+
+fn dispatchLambda(f: *Frame, lam: LambdaObj, sam_slots: []const Value, sam_params: []const Class.Param, sam_ret: ?Kind) RunError!void {
     var logical: [128]Value = undefined;
     var n: usize = 0;
     for (lam.captures) |c| {
@@ -2553,7 +2605,10 @@ fn dispatchLambda(f: *Frame, lam: LambdaObj, sam_slots: []const Value, sam_param
     if (lam.impl_kind == 6) {
         const impl_cls = f.loader.find(lam.impl_class) orelse return error.LinkError;
         const ir = impl_cls.resolve(lam.impl_name, lam.impl_desc) orelse return error.MethodNotFound;
-        return runImplStatic(f, ir.owner, ir.method, logical[0..n]);
+        if (ir.method.params.len != n) return error.LinkError;
+        for (ir.method.params, 0..) |p, k| logical[k] = try adaptValue(f, logical[k], p.kind);
+        try runImplStatic(f, ir.owner, ir.method, logical[0..n]);
+        return adaptReturn(f, ir.method.ret, sam_ret);
     }
     if (n == 0) return error.LinkError;
     const heap = f.heap orelse return error.UnsupportedOpcode;
@@ -2570,7 +2625,10 @@ fn dispatchLambda(f: *Frame, lam: LambdaObj, sam_slots: []const Value, sam_param
         else => return error.LinkError,
     };
     const ir = recv_class.resolve(lam.impl_name, lam.impl_desc) orelse return error.MethodNotFound;
-    return runImplInstance(f, ir.owner, ir.method, recv_id, logical[1..n]);
+    if (ir.method.params.len != n - 1) return error.LinkError;
+    for (ir.method.params, 0..) |p, k| logical[1 + k] = try adaptValue(f, logical[1 + k], p.kind);
+    try runImplInstance(f, ir.owner, ir.method, recv_id, logical[1..n]);
+    return adaptReturn(f, ir.method.ret, sam_ret);
 }
 
 /// Like dispatchLambda but for the invoke site: for a static-impl lambda (kind 6)
@@ -2578,8 +2636,8 @@ fn dispatchLambda(f: *Frame, lam: LambdaObj, sam_slots: []const Value, sam_param
 /// driver pushes a normal child frame) rather than a nested synchronous exec. This
 /// makes lambda bodies suspendable -> parkable. Other kinds fall back to the exec
 /// path (synchronous) for now. Semantics-preserving.
-fn dispatchLambdaPending(f: *Frame, lam: LambdaObj, sam_slots: []const Value, sam_params: []const Class.Param, pending: *?PendingCall) RunError!void {
-    if (lam.impl_kind != 6) return dispatchLambda(f, lam, sam_slots, sam_params);
+fn dispatchLambdaPending(f: *Frame, lam: LambdaObj, sam_slots: []const Value, sam_params: []const Class.Param, sam_ret: ?Kind, pending: *?PendingCall) RunError!void {
+    if (lam.impl_kind != 6) return dispatchLambda(f, lam, sam_slots, sam_params, sam_ret);
     var logical: [128]Value = undefined;
     var n: usize = 0;
     for (lam.captures) |c| {
@@ -2596,6 +2654,17 @@ fn dispatchLambdaPending(f: *Frame, lam: LambdaObj, sam_slots: []const Value, sa
     if (impl.is_native) return runImplStatic(f, ir.owner, impl, logical[0..n]); // natives keep exec path
     const cc = impl.code orelse return error.LinkError;
     if (n != impl.params.len) return error.LinkError;
+    // If the SAM boundary needs box/unbox adaptation (a method ref to a primitive-signature
+    // method bound to a reference SAM), take the synchronous adapting path instead of the
+    // fast pending path -- pending handles only exact-kind matches.
+    var needs_adapt = !std.meta.eql(impl.ret, sam_ret);
+    if (!needs_adapt) for (impl.params, 0..) |pp, k| {
+        if (valueKind(logical[k]) != pp.kind) {
+            needs_adapt = true;
+            break;
+        }
+    };
+    if (needs_adapt) return dispatchLambda(f, lam, sam_slots, sam_params, sam_ret);
     const buf = f.loader.gpa.alloc(Value, impl.arg_slots) catch return error.OutOfMemory;
     for (buf) |*b| b.* = .{ .int = 0 };
     for (impl.params, 0..) |pp, k| {
@@ -3124,7 +3193,7 @@ fn callComparator(f: *Frame, cmp_ref: u32, a: Value, b: Value) RunError!i32 {
         .{ .kind = .reference, .slot = 0 },
         .{ .kind = .reference, .slot = 1 },
     };
-    try dispatchLambda(f, lam, &slots, &params);
+    try dispatchLambda(f, lam, &slots, &params, .int);
     return f.popInt();
 }
 fn sortWithComparator(f: *Frame, arr: []Value, cmp_ref: u32) RunError!void {
@@ -3914,7 +3983,7 @@ fn invokeHandler(f: *Frame, handler_id: u32, proxy_val: Value, method_val: Value
                 .{ .kind = .reference, .slot = 1 },
                 .{ .kind = .reference, .slot = 2 },
             };
-            try dispatchLambda(f, lam, &ss, &pp);
+            try dispatchLambda(f, lam, &ss, &pp, .reference);
             return f.pop();
         },
         .instance => |inst| {
