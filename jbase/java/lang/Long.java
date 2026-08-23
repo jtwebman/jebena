@@ -2,6 +2,10 @@ package java.lang;
 
 public final class Long extends Number implements Comparable<Long> {
     public static final Class TYPE = Class.getPrimitiveClass("long");
+    public static final long MIN_VALUE = 0x8000000000000000L;
+    public static final long MAX_VALUE = 0x7fffffffffffffffL;
+    public static final int SIZE = 64;
+    public static final int BYTES = 8;
 
     private final long value;
 

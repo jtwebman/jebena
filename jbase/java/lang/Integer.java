@@ -7,6 +7,10 @@ package java.lang;
  */
 public final class Integer extends Number implements Comparable<Integer> {
     public static final Class TYPE = Class.getPrimitiveClass("int");
+    public static final int MIN_VALUE = 0x80000000;
+    public static final int MAX_VALUE = 0x7fffffff;
+    public static final int SIZE = 32;
+    public static final int BYTES = 4;
 
     private final int value;
 

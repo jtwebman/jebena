@@ -40,7 +40,7 @@ FMT="fmtD fmtWidth fmtZero fmtLeft fmtPlus fmtComma fmtCommaNeg fmtCommaLong fmt
 BIG="addSub multiply divMod powBig factorial gcd compare signNeg modArith negDivide"
 NAV="tmCeilFloor tmHigherLower tmEdges tmMisses tsNav tsEdges optMapFilter optOrElse optOrElseGet optFilterEmpty optIfPresentOrElse optOr"
 LIST="dequeOps llAsList iterRemove collReverseMaxMin collHelpers arraysOps arraysEqToStr"
-MATH="hypot round exactOk addOverflow mulOverflow floorLong setAddAll setRetainRemove setContainsAll"
+MATH="limits hypot round exactOk addOverflow mulOverflow floorLong setAddAll setRetainRemove setContainsAll"
 
 CASES=""
 for m in $COLL; do CASES="$CASES DiffColl:$m"; done

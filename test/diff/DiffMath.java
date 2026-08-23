@@ -13,6 +13,15 @@ public class DiffMath {
     }
 
 
+    static int limits() {
+        // Integer/Long MIN_VALUE/MAX_VALUE + wraparound semantics
+        int a = Integer.MAX_VALUE + 1 == Integer.MIN_VALUE ? 1 : 0; // 1 (int wrap)
+        int b = Integer.MAX_VALUE - Integer.MIN_VALUE; // -1
+        long c = Long.MAX_VALUE + 1L == Long.MIN_VALUE ? 1 : 0; // 1
+        return a * 1000 + (b + 10) * 10 + (int) c + Integer.SIZE + Long.SIZE / 8;
+        // 1*1000 + 9*10 + 1 + 32 + 8 = 1131
+    }
+
     static int hypot() {
         return dbits(Math.hypot(3.0, 4.0)) ^ dbits(Math.hypot(5.0, 12.0)); // 5.0, 13.0
     }
