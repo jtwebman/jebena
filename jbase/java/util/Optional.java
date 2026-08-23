@@ -54,6 +54,23 @@ public final class Optional<T> {
         }
     }
 
+    public void ifPresentOrElse(Consumer<? super T> action, Runnable emptyAction) {
+        if (value != null) {
+            action.accept(value);
+        } else {
+            emptyAction.run();
+        }
+    }
+
+    public Optional<T> or(Supplier<? extends Optional<? extends T>> supplier) {
+        if (value != null) {
+            return this;
+        }
+        @SuppressWarnings("unchecked")
+        Optional<T> r = (Optional<T>) supplier.get();
+        return r;
+    }
+
     public T orElse(T other) {
         return value != null ? value : other;
     }
