@@ -11,6 +11,9 @@ import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.function.Predicate;
 import java.util.function.ToIntFunction;
+import java.util.function.ToLongFunction;
+import java.util.function.ToDoubleFunction;
+import java.util.function.UnaryOperator;
 
 /**
  * Clean-room, EAGER java.util.stream.Stream. Every intermediate operation
@@ -50,6 +53,20 @@ public class Stream {
     /** Wraps an existing list (copied) into a new Stream. */
     public static Stream ofList(List list) {
         return new Stream(list);
+    }
+
+    /**
+     * Finite iterate: starting from {@code seed}, while {@code hasNext} holds,
+     * emit the current value and advance with {@code next}. Realized eagerly.
+     */
+    public static Stream iterate(Object seed, Predicate hasNext, UnaryOperator next) {
+        ArrayList out = new ArrayList();
+        Object cur = seed;
+        while (hasNext.test(cur)) {
+            out.add(cur);
+            cur = next.apply(cur);
+        }
+        return new Stream(out);
     }
 
     // ---- Intermediate operations (return a new Stream) ----
@@ -296,5 +313,21 @@ public class Stream {
             out[i] = mapper.applyAsInt(data.get(i));
         }
         return IntStream.of(out);
+    }
+
+    public LongStream mapToLong(ToLongFunction mapper) {
+        long[] out = new long[data.size()];
+        for (int i = 0; i < data.size(); i++) {
+            out[i] = mapper.applyAsLong(data.get(i));
+        }
+        return LongStream.of(out);
+    }
+
+    public DoubleStream mapToDouble(ToDoubleFunction mapper) {
+        double[] out = new double[data.size()];
+        for (int i = 0; i < data.size(); i++) {
+            out[i] = mapper.applyAsDouble(data.get(i));
+        }
+        return DoubleStream.of(out);
     }
 }

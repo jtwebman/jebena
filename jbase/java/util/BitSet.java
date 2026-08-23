@@ -56,6 +56,35 @@ public class BitSet {
         return bitIndex >> ADDRESS_BITS_PER_WORD;
     }
 
+    public static BitSet valueOf(long[] longs) {
+        int n = longs.length;
+        while (n > 0 && longs[n - 1] == 0) {
+            n--;
+        }
+        BitSet bs = new BitSet();
+        if (n > 0) {
+            bs.words = new long[n];
+            System.arraycopy(longs, 0, bs.words, 0, n);
+        }
+        bs.wordsInUse = n;
+        return bs;
+    }
+
+    public long[] toLongArray() {
+        long[] result = new long[wordsInUse];
+        System.arraycopy(words, 0, result, 0, wordsInUse);
+        return result;
+    }
+
+    public java.util.stream.IntStream stream() {
+        int[] indices = new int[cardinality()];
+        int p = 0;
+        for (int i = nextSetBit(0); i >= 0; i = nextSetBit(i + 1)) {
+            indices[p++] = i;
+        }
+        return java.util.stream.IntStream.of(indices);
+    }
+
     private void checkIndex(int bitIndex) {
         if (bitIndex < 0) {
             throw new IndexOutOfBoundsException("bitIndex < 0: " + bitIndex);

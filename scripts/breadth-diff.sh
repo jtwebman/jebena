@@ -23,6 +23,7 @@ rm -rf "$OUT"; mkdir -p "$OUT"
   "$ROOT"/test/diff/DiffDate2.java \
   "$ROOT"/test/diff/DiffB64.java "$ROOT"/test/diff/DiffCrc.java "$ROOT"/test/diff/DiffLongStream.java "$ROOT"/test/diff/DiffDoubleStream.java "$ROOT"/test/diff/DiffRegex2.java "$ROOT"/test/diff/DiffStream2.java "$ROOT"/test/diff/DiffMath2.java "$ROOT"/test/diff/DiffBigDec3.java "$ROOT"/test/diff/DiffDtf.java "$ROOT"/test/diff/DiffGauss.java \
   "$ROOT"/test/diff/DiffStrBytes.java \
+  "$ROOT"/test/diff/DiffHex.java "$ROOT"/test/diff/DiffTimeUnit.java "$ROOT"/test/diff/DiffColl2.java "$ROOT"/test/diff/DiffRegex3.java "$ROOT"/test/diff/DiffZoneOffset.java "$ROOT"/test/diff/DiffBitSet2.java "$ROOT"/test/diff/DiffSB2.java "$ROOT"/test/diff/DiffStream3.java "$ROOT"/test/diff/DiffChar2.java "$ROOT"/test/diff/DiffBigInt2.java \
   "$ROOT"/test/diff/Driver.java || { echo "javac failed"; exit 1; }
 "$ZIG" build --build-file "$ROOT/build.zig" >/dev/null 2>&1
 JEBENA="$ROOT/zig-out/bin/jebena"
@@ -79,6 +80,16 @@ BIGDEC3="remainderBasic remainderFrac remainderNeg divToIntegral divToIntegralFr
 DTF="isoDate slashDate dateTime literalHeavy midnightTime endOfDay compactNoSep singleLetters fullDateTime"
 GAUSS="single42 single42Coarse sum3Seed7 sum3Seed7Coarse combineSeed1 combineSeed1Coarse cachedPairSecond reseedClearsCache"
 STRBYTES="asciiLen asciiBytes twoByteLen twoByteBytes threeByteLen threeByteBytes roundtripAscii roundtripUtf8 offsetDecode emptyBytes"
+HEX="formatLower formatUpper parseRoundtrip parseFormatRoundtrip toHexDigitsInt255 toHexDigitsInt1234 toHexDigitsLong toHexDigitsByte delimiterFormat delimiterRoundtrip lowHighDigit"
+TIMEUNIT="secondsToMillis minutesToSeconds hoursToMinutes daysToHours millisToSeconds convertMillisToSeconds saturatingDaysToNanos minutesOrdinal negativeSaturation valueOfRoundTrip"
+COLL2="caseGroupCounts caseGroupSummingInt caseSummarizing caseReducingSum caseReducingMax caseUnmodifiableSize caseAveragingLong"
+REGEX3="namedY namedM namedD namedEqualsPositional startEndGroup2 startEndByName positionalStartEnd findNamed"
+ZONEOFF="utcId ofHoursPos ofHoursNeg ofHoursMinutes ofHoursMinutesNeg totalSecondsId negSecondsId totalSecondsValue utcTotal maxOffset equalsCheck"
+SB2="replaceMid replaceGrow replaceShrink indexOfCd indexOfFrom indexOfMiss lastIndexOfA lastIndexOfBc insertInt insertBool insertChar insertLong insertChars appendCp appendCpSupp capacityCheck"
+BITSET2="valueOfCardChecksum valueOfTrailingZero valueOfMultiWord toLongArrayCheck roundTrip emptyToLongArray streamSum streamCount streamFiltered"
+STREAM3="iterateCount iterateSumInt iterateSumReduce iterateEmpty mapToLongSum mapToLongWide mapToDoubleSum mapToDoubleEmpty iterateMapToDouble"
+CHAR2="charCountA charCountEmoji toCharsLen toCharsChecksum codePointAtA codePointAtEmoji isSurrogateHigh isHighSurrogateTest isLowSurrogateTest isAlphabeticZ isAlphabetic5 toCodePointTest"
+BIGINT2="shiftLeft20 shiftRight3 testBit2 setBit0 clearBit1 flipBit1 bitLength255 bitCount255 negBitLength andCase orCase xorCase notCase modPowCase modInverseCase prime17 composite21 sqrt144 bigShiftChecksum"
 
 CASES=""
 for m in $COLL; do CASES="$CASES DiffColl:$m"; done
@@ -124,6 +135,16 @@ for m in $BIGDEC3; do CASES="$CASES DiffBigDec3:$m"; done
 for m in $DTF; do CASES="$CASES DiffDtf:$m"; done
 for m in $GAUSS; do CASES="$CASES DiffGauss:$m"; done
 for m in $STRBYTES; do CASES="$CASES DiffStrBytes:$m"; done
+for m in $HEX; do CASES="$CASES DiffHex:$m"; done
+for m in $TIMEUNIT; do CASES="$CASES DiffTimeUnit:$m"; done
+for m in $COLL2; do CASES="$CASES DiffColl2:$m"; done
+for m in $REGEX3; do CASES="$CASES DiffRegex3:$m"; done
+for m in $ZONEOFF; do CASES="$CASES DiffZoneOffset:$m"; done
+for m in $SB2; do CASES="$CASES DiffSB2:$m"; done
+for m in $BITSET2; do CASES="$CASES DiffBitSet2:$m"; done
+for m in $STREAM3; do CASES="$CASES DiffStream3:$m"; done
+for m in $CHAR2; do CASES="$CASES DiffChar2:$m"; done
+for m in $BIGINT2; do CASES="$CASES DiffBigInt2:$m"; done
 
 pass=0; fail=0
 printf "%-24s %12s %12s   %s\n" CASE JAVA JEBENA RESULT

@@ -120,4 +120,73 @@ public final class Character implements Comparable<Character> {
         }
         return -1;
     }
+
+    public static final char MIN_HIGH_SURROGATE = '\uD800';
+    public static final char MAX_HIGH_SURROGATE = '\uDBFF';
+    public static final char MIN_LOW_SURROGATE = '\uDC00';
+    public static final char MAX_LOW_SURROGATE = '\uDFFF';
+    public static final char MIN_SURROGATE = MIN_HIGH_SURROGATE;
+    public static final char MAX_SURROGATE = MAX_LOW_SURROGATE;
+    public static final int MIN_SUPPLEMENTARY_CODE_POINT = 0x010000;
+    public static final int MIN_CODE_POINT = 0x000000;
+    public static final int MAX_CODE_POINT = 0x10FFFF;
+
+    public static int charCount(int codePoint) {
+        return codePoint >= MIN_SUPPLEMENTARY_CODE_POINT ? 2 : 1;
+    }
+
+    public static boolean isHighSurrogate(char c) {
+        return c >= MIN_HIGH_SURROGATE && c <= MAX_HIGH_SURROGATE;
+    }
+
+    public static boolean isLowSurrogate(char c) {
+        return c >= MIN_LOW_SURROGATE && c <= MAX_LOW_SURROGATE;
+    }
+
+    public static boolean isSurrogate(char c) {
+        return c >= MIN_SURROGATE && c <= MAX_SURROGATE;
+    }
+
+    public static int toCodePoint(char high, char low) {
+        return ((high - MIN_HIGH_SURROGATE) << 10)
+            + (low - MIN_LOW_SURROGATE)
+            + MIN_SUPPLEMENTARY_CODE_POINT;
+    }
+
+    public static char[] toChars(int codePoint) {
+        if (codePoint < 0 || codePoint > MAX_CODE_POINT) {
+            throw new IllegalArgumentException(
+                "Not a valid Unicode code point: 0x" + Integer.toHexString(codePoint));
+        }
+        if (codePoint < MIN_SUPPLEMENTARY_CODE_POINT) {
+            char[] r = { (char) codePoint };
+            return r;
+        }
+        int offset = codePoint - MIN_SUPPLEMENTARY_CODE_POINT;
+        char high = (char) (MIN_HIGH_SURROGATE + (offset >> 10));
+        char low = (char) (MIN_LOW_SURROGATE + (offset & 0x3FF));
+        char[] r = { high, low };
+        return r;
+    }
+
+    public static int codePointAt(CharSequence seq, int index) {
+        char c1 = seq.charAt(index);
+        if (isHighSurrogate(c1) && (index + 1) < seq.length()) {
+            char c2 = seq.charAt(index + 1);
+            if (isLowSurrogate(c2)) {
+                return toCodePoint(c1, c2);
+            }
+        }
+        return c1;
+    }
+
+    public static boolean isAlphabetic(int codePoint) {
+        if (codePoint >= 'A' && codePoint <= 'Z') {
+            return true;
+        }
+        if (codePoint >= 'a' && codePoint <= 'z') {
+            return true;
+        }
+        return false;
+    }
 }

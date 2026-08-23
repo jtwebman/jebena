@@ -161,6 +161,159 @@ public final class StringBuilder implements CharSequence {
         return this;
     }
 
+    public StringBuilder insert(int offset, int i) {
+        return insert(offset, String.valueOf(i));
+    }
+
+    public StringBuilder insert(int offset, long l) {
+        return insert(offset, String.valueOf(l));
+    }
+
+    public StringBuilder insert(int offset, boolean b) {
+        return insert(offset, b ? "true" : "false");
+    }
+
+    public StringBuilder insert(int offset, char c) {
+        if (offset < 0 || offset > count) {
+            throw new StringIndexOutOfBoundsException();
+        }
+        ensure(count + 1);
+        for (int i = count - 1; i >= offset; i--) {
+            value[i + 1] = value[i];
+        }
+        value[offset] = c;
+        count++;
+        return this;
+    }
+
+    public StringBuilder insert(int offset, char[] str) {
+        if (offset < 0 || offset > count) {
+            throw new StringIndexOutOfBoundsException();
+        }
+        int len = str.length;
+        ensure(count + len);
+        for (int i = count - 1; i >= offset; i--) {
+            value[i + len] = value[i];
+        }
+        for (int i = 0; i < len; i++) {
+            value[offset + i] = str[i];
+        }
+        count += len;
+        return this;
+    }
+
+    public StringBuilder replace(int start, int end, String str) {
+        if (start < 0 || start > count || start > end) {
+            throw new StringIndexOutOfBoundsException();
+        }
+        if (end > count) {
+            end = count;
+        }
+        String s = (str == null) ? "null" : str;
+        int slen = s.length();
+        int rlen = end - start;
+        int diff = slen - rlen;
+        if (diff > 0) {
+            ensure(count + diff);
+            for (int i = count - 1; i >= end; i--) {
+                value[i + diff] = value[i];
+            }
+        } else if (diff < 0) {
+            for (int i = end; i < count; i++) {
+                value[i + diff] = value[i];
+            }
+        }
+        for (int i = 0; i < slen; i++) {
+            value[start + i] = s.charAt(i);
+        }
+        count += diff;
+        return this;
+    }
+
+    public int indexOf(String str) {
+        return indexOf(str, 0);
+    }
+
+    public int indexOf(String str, int fromIndex) {
+        int slen = str.length();
+        int from = fromIndex;
+        if (from < 0) {
+            from = 0;
+        }
+        if (slen == 0) {
+            return from > count ? count : from;
+        }
+        char first = str.charAt(0);
+        int max = count - slen;
+        for (int i = from; i <= max; i++) {
+            if (value[i] == first) {
+                int j = 1;
+                while (j < slen && value[i + j] == str.charAt(j)) {
+                    j++;
+                }
+                if (j == slen) {
+                    return i;
+                }
+            }
+        }
+        return -1;
+    }
+
+    public int lastIndexOf(String str) {
+        return lastIndexOf(str, count);
+    }
+
+    public int lastIndexOf(String str, int fromIndex) {
+        int slen = str.length();
+        int start = fromIndex;
+        int max = count - slen;
+        if (start > max) {
+            start = max;
+        }
+        if (slen == 0) {
+            return start < 0 ? -1 : start;
+        }
+        char first = str.charAt(0);
+        for (int i = start; i >= 0; i--) {
+            if (value[i] == first) {
+                int j = 1;
+                while (j < slen && value[i + j] == str.charAt(j)) {
+                    j++;
+                }
+                if (j == slen) {
+                    return i;
+                }
+            }
+        }
+        return -1;
+    }
+
+    public StringBuilder appendCodePoint(int codePoint) {
+        if (codePoint < 0 || codePoint > 0x10FFFF) {
+            throw new IllegalArgumentException();
+        }
+        if (codePoint <= 0xFFFF) {
+            return append((char) codePoint);
+        }
+        int cp = codePoint - 0x10000;
+        char high = (char) (0xD800 + (cp >> 10));
+        char low = (char) (0xDC00 + (cp & 0x3FF));
+        ensure(count + 2);
+        value[count++] = high;
+        value[count++] = low;
+        return this;
+    }
+
+    public int capacity() {
+        return value.length;
+    }
+
+    public void ensureCapacity(int minimumCapacity) {
+        if (minimumCapacity > 0) {
+            ensure(minimumCapacity);
+        }
+    }
+
     public void setLength(int newLength) {
         if (newLength < 0) {
             throw new StringIndexOutOfBoundsException();

@@ -352,6 +352,277 @@ public class BigInteger extends Number implements Comparable<BigInteger> {
         return sb.toString();
     }
 
+    // ---------------------------------------------------------------- shifts
+
+    public BigInteger shiftLeft(int n) {
+        if (n == 0 || signum == 0) {
+            return this;
+        }
+        if (n < 0) {
+            if (n == Integer.MIN_VALUE) {
+                throw new ArithmeticException("Shift distance of Integer.MIN_VALUE not supported.");
+            }
+            return shiftRight(-n);
+        }
+        return new BigInteger(signum, shiftLeftMag(mag, n));
+    }
+
+    public BigInteger shiftRight(int n) {
+        if (n == 0 || signum == 0) {
+            return this;
+        }
+        if (n < 0) {
+            if (n == Integer.MIN_VALUE) {
+                throw new ArithmeticException("Shift distance of Integer.MIN_VALUE not supported.");
+            }
+            return shiftLeft(-n);
+        }
+        if (signum > 0) {
+            int[] r = shiftRightMag(mag, n);
+            return r.length == 0 ? ZERO : new BigInteger(1, r);
+        }
+        // Negative: arithmetic shift rounds toward negative infinity, i.e. if
+        // any set bit is shifted out the magnitude is incremented.
+        int[] r = shiftRightMag(mag, n);
+        boolean lost = bitsShiftedOut(mag, n);
+        if (lost) {
+            r = addMag(r, new int[] { 1 });
+        }
+        return r.length == 0 ? ZERO : new BigInteger(-1, r);
+    }
+
+    // -------------------------------------------------------- bitwise (2's comp)
+
+    public BigInteger and(BigInteger val) {
+        int n = Math.max(mag.length, val.mag.length) + 1;
+        int[] result = new int[n];
+        for (int i = 0; i < n; i++) {
+            result[i] = getInt(n - 1 - i) & val.getInt(n - 1 - i);
+        }
+        return fromTwos(result);
+    }
+
+    public BigInteger or(BigInteger val) {
+        int n = Math.max(mag.length, val.mag.length) + 1;
+        int[] result = new int[n];
+        for (int i = 0; i < n; i++) {
+            result[i] = getInt(n - 1 - i) | val.getInt(n - 1 - i);
+        }
+        return fromTwos(result);
+    }
+
+    public BigInteger xor(BigInteger val) {
+        int n = Math.max(mag.length, val.mag.length) + 1;
+        int[] result = new int[n];
+        for (int i = 0; i < n; i++) {
+            result[i] = getInt(n - 1 - i) ^ val.getInt(n - 1 - i);
+        }
+        return fromTwos(result);
+    }
+
+    public BigInteger not() {
+        // ~x == -(x + 1)
+        return add(ONE).negate();
+    }
+
+    // ------------------------------------------------------------- single bits
+
+    public boolean testBit(int n) {
+        if (n < 0) {
+            throw new ArithmeticException("Negative bit address");
+        }
+        return (getInt(n >>> 5) & (1 << (n & 31))) != 0;
+    }
+
+    public BigInteger setBit(int n) {
+        return bitOp(n, 0);
+    }
+
+    public BigInteger clearBit(int n) {
+        return bitOp(n, 1);
+    }
+
+    public BigInteger flipBit(int n) {
+        return bitOp(n, 2);
+    }
+
+    private BigInteger bitOp(int n, int op) {
+        if (n < 0) {
+            throw new ArithmeticException("Negative bit address");
+        }
+        int word = n >>> 5;
+        int bit = n & 31;
+        int len = Math.max(mag.length, word + 1) + 1;
+        int[] result = new int[len];
+        for (int i = 0; i < len; i++) {
+            result[i] = getInt(len - 1 - i);
+        }
+        int idx = len - 1 - word;
+        if (op == 0) {
+            result[idx] |= (1 << bit);
+        } else if (op == 1) {
+            result[idx] &= ~(1 << bit);
+        } else {
+            result[idx] ^= (1 << bit);
+        }
+        return fromTwos(result);
+    }
+
+    // ---------------------------------------------------------- bit counts
+
+    public int bitLength() {
+        if (signum == 0) {
+            return 0;
+        }
+        int n = bitLength(mag);
+        if (signum < 0 && popcountMag(mag) == 1) {
+            // Negative powers of two need one fewer bit in two's complement.
+            n -= 1;
+        }
+        return n;
+    }
+
+    public int bitCount() {
+        if (signum >= 0) {
+            return popcountMag(mag);
+        }
+        // For negative x with magnitude m, the two's-complement bits differing
+        // from the sign bit equal popcount(m - 1).
+        return popcountMag(subMag(mag, new int[] { 1 }));
+    }
+
+    // -------------------------------------------------------------- modPow etc.
+
+    public BigInteger modPow(BigInteger exponent, BigInteger m) {
+        if (m.signum <= 0) {
+            throw new ArithmeticException("BigInteger: modulus not positive");
+        }
+        if (m.equals(ONE)) {
+            return ZERO;
+        }
+        BigInteger base;
+        BigInteger exp = exponent;
+        if (exponent.signum < 0) {
+            base = this.modInverse(m);
+            exp = exponent.negate();
+        } else {
+            base = this.mod(m);
+        }
+        BigInteger result = ONE;
+        BigInteger b = base;
+        int bl = exp.bitLength();
+        for (int i = 0; i < bl; i++) {
+            if (exp.testBit(i)) {
+                result = result.multiply(b).mod(m);
+            }
+            b = b.multiply(b).mod(m);
+        }
+        return result;
+    }
+
+    public BigInteger modInverse(BigInteger m) {
+        if (m.signum != 1) {
+            throw new ArithmeticException("BigInteger: modulus not positive");
+        }
+        if (m.equals(ONE)) {
+            return ZERO;
+        }
+        BigInteger a = this.mod(m);
+        BigInteger[] eg = extGcd(a, m);
+        if (!eg[0].equals(ONE)) {
+            throw new ArithmeticException("BigInteger not invertible.");
+        }
+        return eg[1].mod(m);
+    }
+
+    private static BigInteger[] extGcd(BigInteger a, BigInteger b) {
+        BigInteger oldR = a;
+        BigInteger r = b;
+        BigInteger oldS = ONE;
+        BigInteger s = ZERO;
+        while (r.signum != 0) {
+            BigInteger q = oldR.divide(r);
+            BigInteger tmp = oldR.subtract(q.multiply(r));
+            oldR = r;
+            r = tmp;
+            tmp = oldS.subtract(q.multiply(s));
+            oldS = s;
+            s = tmp;
+        }
+        return new BigInteger[] { oldR, oldS };
+    }
+
+    // -------------------------------------------------------------------- sqrt
+
+    public BigInteger sqrt() {
+        if (signum < 0) {
+            throw new ArithmeticException("negative BigInteger");
+        }
+        if (signum == 0) {
+            return ZERO;
+        }
+        int bl = bitLength(mag);
+        BigInteger x = ONE.shiftLeft((bl + 1) / 2);
+        while (true) {
+            BigInteger y = x.add(this.divide(x)).shiftRight(1);
+            if (y.compareTo(x) >= 0) {
+                break;
+            }
+            x = y;
+        }
+        return x;
+    }
+
+    // ------------------------------------------------------------- primality
+
+    public boolean isProbablePrime(int certainty) {
+        if (certainty <= 0) {
+            return true;
+        }
+        BigInteger w = this.abs();
+        if (w.equals(TWO)) {
+            return true;
+        }
+        if (w.signum == 0 || w.equals(ONE) || !w.testBit(0)) {
+            return false;
+        }
+        return millerRabin(w);
+    }
+
+    /** Deterministic Miller-Rabin over fixed strong bases; n is odd and > 2. */
+    private static boolean millerRabin(BigInteger n) {
+        BigInteger nm1 = n.subtract(ONE);
+        int r = 0;
+        BigInteger d = nm1;
+        while (!d.testBit(0)) {
+            d = d.shiftRight(1);
+            r++;
+        }
+        int[] bases = new int[] { 2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37 };
+        for (int bi = 0; bi < bases.length; bi++) {
+            BigInteger a = valueOf(bases[bi]);
+            if (a.compareTo(n) >= 0) {
+                continue;
+            }
+            BigInteger x = a.modPow(d, n);
+            if (x.equals(ONE) || x.equals(nm1)) {
+                continue;
+            }
+            boolean composite = true;
+            for (int i = 0; i < r - 1; i++) {
+                x = x.multiply(x).mod(n);
+                if (x.equals(nm1)) {
+                    composite = false;
+                    break;
+                }
+            }
+            if (composite) {
+                return false;
+            }
+        }
+        return true;
+    }
+
     // ================================================ magnitude helpers ====
 
     private static int[] stripLeadingZeros(int[] a) {
@@ -572,5 +843,118 @@ public class BigInteger extends Number implements Comparable<BigInteger> {
             rem = cur % d;
         }
         return new Object[] { stripLeadingZeros(q), Integer.valueOf((int) rem) };
+    }
+
+    /** Population count of a stripped magnitude. */
+    private static int popcountMag(int[] mag) {
+        int c = 0;
+        for (int i = 0; i < mag.length; i++) {
+            c += Integer.bitCount(mag[i]);
+        }
+        return c;
+    }
+
+    /** Left-shift a stripped magnitude by n >= 0 bits. Result is stripped. */
+    private static int[] shiftLeftMag(int[] mag, int n) {
+        int len = mag.length;
+        if (len == 0 || n == 0) {
+            return mag;
+        }
+        int wordShift = n >>> 5;
+        int bitShift = n & 31;
+        if (bitShift == 0) {
+            int[] r = new int[len + wordShift];
+            for (int i = 0; i < len; i++) {
+                r[i] = mag[i];
+            }
+            return stripLeadingZeros(r);
+        }
+        int nBits2 = 32 - bitShift;
+        int highBits = mag[0] >>> nBits2;
+        int[] r = new int[len + wordShift + (highBits != 0 ? 1 : 0)];
+        int idx = 0;
+        if (highBits != 0) {
+            r[idx++] = highBits;
+        }
+        for (int i = 0; i < len; i++) {
+            int cur = mag[i] << bitShift;
+            int next = (i + 1 < len) ? (mag[i + 1] >>> nBits2) : 0;
+            r[idx++] = cur | next;
+        }
+        return stripLeadingZeros(r);
+    }
+
+    /** Right-shift a stripped magnitude by n >= 0 bits (toward zero). Stripped. */
+    private static int[] shiftRightMag(int[] mag, int n) {
+        int len = mag.length;
+        int wordShift = n >>> 5;
+        int bitShift = n & 31;
+        if (wordShift >= len) {
+            return new int[0];
+        }
+        int newLen = len - wordShift;
+        if (bitShift == 0) {
+            int[] r = new int[newLen];
+            for (int i = 0; i < newLen; i++) {
+                r[i] = mag[i];
+            }
+            return stripLeadingZeros(r);
+        }
+        int nBits2 = 32 - bitShift;
+        int[] r = new int[newLen];
+        r[0] = mag[0] >>> bitShift;
+        for (int i = 1; i < newLen; i++) {
+            r[i] = (mag[i] >>> bitShift) | (mag[i - 1] << nBits2);
+        }
+        return stripLeadingZeros(r);
+    }
+
+    /** True if any set bit of the magnitude falls within the low n bits. */
+    private static boolean bitsShiftedOut(int[] mag, int n) {
+        int len = mag.length;
+        int wordShift = n >>> 5;
+        int bitShift = n & 31;
+        // Whole low words that are dropped.
+        int fullFrom = len - wordShift;
+        for (int i = len - 1; i >= fullFrom && i >= 0; i--) {
+            if (mag[i] != 0) {
+                return true;
+            }
+        }
+        if (bitShift != 0) {
+            int idx = len - wordShift - 1;
+            if (idx >= 0 && (mag[idx] << (32 - bitShift)) != 0) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** Interpret a big-endian two's-complement array as a BigInteger. */
+    private static BigInteger fromTwos(int[] words) {
+        if (words.length == 0) {
+            return ZERO;
+        }
+        if (words[0] < 0) {
+            return new BigInteger(-1, negateTwos(words));
+        }
+        int[] mag = stripLeadingZeros(words);
+        if (mag.length == 0) {
+            return ZERO;
+        }
+        return new BigInteger(1, mag);
+    }
+
+    /** Magnitude of the negative value held by a two's-complement array. */
+    private static int[] negateTwos(int[] a) {
+        int n = a.length;
+        int[] r = new int[n];
+        long carry = 1;
+        for (int i = n - 1; i >= 0; i--) {
+            long v = (~a[i] & MASK) + carry;
+            r[i] = (int) v;
+            carry = v >>> 32;
+        }
+        return stripLeadingZeros(r);
     }
 }

@@ -3,7 +3,10 @@ package java.util.stream;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.IntSummaryStatistics;
+import java.util.Iterator;
 import java.util.LinkedHashMap;
+import java.util.function.BinaryOperator;
 import java.util.function.Function;
 import java.util.function.Predicate;
 import java.util.function.ToDoubleFunction;
@@ -200,6 +203,68 @@ public class Collectors {
                     ((ArrayList) bucket).add(element);
                 }
                 return map;
+            }
+        };
+    }
+
+    public static Collector groupingBy(final Function classifier, final Collector downstream) {
+        return new Collector() {
+            public Object collect(ArrayList data) {
+                LinkedHashMap groups = new LinkedHashMap();
+                for (int i = 0; i < data.size(); i++) {
+                    Object element = data.get(i);
+                    Object key = classifier.apply(element);
+                    Object bucket = groups.get(key);
+                    if (bucket == null) {
+                        bucket = new ArrayList();
+                        groups.put(key, bucket);
+                    }
+                    ((ArrayList) bucket).add(element);
+                }
+                LinkedHashMap result = new LinkedHashMap();
+                Iterator it = groups.keySet().iterator();
+                while (it.hasNext()) {
+                    Object key = it.next();
+                    ArrayList bucket = (ArrayList) groups.get(key);
+                    result.put(key, downstream.collect(bucket));
+                }
+                return result;
+            }
+        };
+    }
+
+    public static Collector toUnmodifiableList() {
+        return new Collector() {
+            public Object collect(ArrayList data) {
+                ArrayList out = new ArrayList();
+                for (int i = 0; i < data.size(); i++) {
+                    out.add(data.get(i));
+                }
+                return out;
+            }
+        };
+    }
+
+    public static Collector reducing(final Object identity, final BinaryOperator op) {
+        return new Collector() {
+            public Object collect(ArrayList data) {
+                Object result = identity;
+                for (int i = 0; i < data.size(); i++) {
+                    result = op.apply(result, data.get(i));
+                }
+                return result;
+            }
+        };
+    }
+
+    public static Collector summarizingInt(final ToIntFunction mapper) {
+        return new Collector() {
+            public Object collect(ArrayList data) {
+                IntSummaryStatistics stats = new IntSummaryStatistics();
+                for (int i = 0; i < data.size(); i++) {
+                    stats.accept(mapper.applyAsInt(data.get(i)));
+                }
+                return stats;
             }
         };
     }

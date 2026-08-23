@@ -2,6 +2,8 @@ package java.util.regex;
 
 import java.util.List;
 import java.util.ArrayList;
+import java.util.Map;
+import java.util.HashMap;
 
 /**
  * Clean-room, minimal {@code java.util.regex.Pattern}.
@@ -31,9 +33,25 @@ public final class Pattern {
     Node root;
     int groupCount;
 
+    /** Maps a named-group name (from {@code (?<name>...)}) to its group number. */
+    final Map namedGroups;
+
     private Pattern(String patternString) {
         this.patternString = patternString;
         this.groupCount = 0;
+        this.namedGroups = new HashMap();
+    }
+
+    /**
+     * Returns the group number recorded for the given {@code (?<name>...)} name,
+     * throwing {@link IllegalArgumentException} if no such name exists.
+     */
+    int groupNumberForName(String name) {
+        Object v = namedGroups.get(name);
+        if (v == null) {
+            throw new IllegalArgumentException("No group with name <" + name + ">");
+        }
+        return ((Integer) v).intValue();
     }
 
     /** Compiles the given regular expression into a pattern. */
@@ -687,6 +705,19 @@ public final class Pattern {
                 pos++;
                 if (pos < len && peek() == ':') {
                     pos++; // non-capturing
+                } else if (pos < len && peek() == '<') {
+                    pos++; // consume '<'
+                    // (?<= ) and (?<! ) lookbehind are outside the supported
+                    // subset; only (?<name>...) named capturing groups are.
+                    if (pos < len && (peek() == '=' || peek() == '!')) {
+                        error("unsupported lookbehind construct");
+                    }
+                    String name = parseGroupName();
+                    groupNum = ++pat.groupCount;
+                    if (pat.namedGroups.get(name) != null) {
+                        error("duplicate group name '" + name + "'");
+                    }
+                    pat.namedGroups.put(name, Integer.valueOf(groupNum));
                 } else {
                     error("unsupported group construct");
                 }
@@ -699,6 +730,38 @@ public final class Pattern {
             }
             pos++; // consume ')'
             return new GroupAst(groupNum, body);
+        }
+
+        /**
+         * Parses the name of a {@code (?<name>...)} group: a letter followed by
+         * letters or digits, terminated by {@code '>'} (which is consumed).
+         */
+        private String parseGroupName() {
+            if (pos >= len) {
+                error("named capturing group has invalid name");
+            }
+            char c = peek();
+            if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'))) {
+                error("named capturing group has invalid name");
+            }
+            StringBuilder sb = new StringBuilder();
+            sb.append(c);
+            pos++;
+            while (pos < len) {
+                c = peek();
+                if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+                    || (c >= '0' && c <= '9')) {
+                    sb.append(c);
+                    pos++;
+                } else {
+                    break;
+                }
+            }
+            if (pos >= len || peek() != '>') {
+                error("named capturing group is missing trailing '>'");
+            }
+            pos++; // consume '>'
+            return sb.toString();
         }
 
         /** Parses an escape appearing outside a character class. */

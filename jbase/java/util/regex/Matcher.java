@@ -152,6 +152,36 @@ public final class Matcher {
         return text.substring(s, e);
     }
 
+    /**
+     * The text matched by the named group {@code (?<name>...)}, or {@code null}
+     * if that group did not participate in the match.
+     */
+    public String group(String name) {
+        if (name == null) {
+            throw new NullPointerException("Null group name");
+        }
+        ensureMatch();
+        return group(parent.groupNumberForName(name));
+    }
+
+    /** The start index of the named group, or {@code -1} if it did not match. */
+    public int start(String name) {
+        if (name == null) {
+            throw new NullPointerException("Null group name");
+        }
+        ensureMatch();
+        return start(parent.groupNumberForName(name));
+    }
+
+    /** The end index of the named group, or {@code -1} if it did not match. */
+    public int end(String name) {
+        if (name == null) {
+            throw new NullPointerException("Null group name");
+        }
+        ensureMatch();
+        return end(parent.groupNumberForName(name));
+    }
+
     /** The start index of the whole match (group 0). */
     public int start() {
         return start(0);
