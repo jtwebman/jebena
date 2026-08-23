@@ -52,4 +52,72 @@ public final class Character implements Comparable<Character> {
         char[] r = { c };
         return new String(r);
     }
+
+    // Classification for the ASCII range (matches java.lang.Character for ASCII;
+    // full Unicode tables are out of scope). Mirrors the VM's Character intrinsic.
+    private static boolean asciiLetter(char c) {
+        return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z');
+    }
+
+    public static boolean isDigit(char c) {
+        return c >= '0' && c <= '9';
+    }
+
+    public static boolean isLetter(char c) {
+        return asciiLetter(c);
+    }
+
+    public static boolean isLetterOrDigit(char c) {
+        return asciiLetter(c) || (c >= '0' && c <= '9');
+    }
+
+    public static boolean isUpperCase(char c) {
+        return c >= 'A' && c <= 'Z';
+    }
+
+    public static boolean isLowerCase(char c) {
+        return c >= 'a' && c <= 'z';
+    }
+
+    public static boolean isWhitespace(char c) {
+        return c == ' ' || (c >= '\t' && c <= '\r') || (c >= 0x1C && c <= 0x1F);
+    }
+
+    public static boolean isSpaceChar(char c) {
+        return c == ' ';
+    }
+
+    public static char toUpperCase(char c) {
+        return (c >= 'a' && c <= 'z') ? (char) (c - 32) : c;
+    }
+
+    public static char toLowerCase(char c) {
+        return (c >= 'A' && c <= 'Z') ? (char) (c + 32) : c;
+    }
+
+    public static int compare(char a, char b) {
+        return a - b;
+    }
+
+    public static int digit(char c, int radix) {
+        int d = -1;
+        if (c >= '0' && c <= '9') {
+            d = c - '0';
+        } else if (c >= 'a' && c <= 'z') {
+            d = c - 'a' + 10;
+        } else if (c >= 'A' && c <= 'Z') {
+            d = c - 'A' + 10;
+        }
+        return (d < radix) ? d : -1;
+    }
+
+    public static int getNumericValue(char c) {
+        if (c >= '0' && c <= '9') {
+            return c - '0';
+        }
+        if (asciiLetter(c)) {
+            return toLowerCase(c) - 'a' + 10;
+        }
+        return -1;
+    }
 }
