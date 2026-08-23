@@ -32,6 +32,9 @@ public final class Matcher {
     // Whether the most recent match attempt succeeded (gates the accessors).
     private boolean matched;
 
+    // Cursor of already-consumed input used by the replace* / append operations.
+    private int lastAppendPosition;
+
     Matcher(Pattern parent, CharSequence input) {
         this.parent = parent;
         this.text = input.toString();
@@ -42,6 +45,19 @@ public final class Matcher {
         this.groupEnds = new int[n];
         this.searchFrom = 0;
         this.matched = false;
+        this.lastAppendPosition = 0;
+    }
+
+    /**
+     * Resets this matcher, discarding all match state so that the next search
+     * begins at the start of the input.
+     */
+    public Matcher reset() {
+        searchFrom = 0;
+        matched = false;
+        lastAppendPosition = 0;
+        clearGroups();
+        return this;
     }
 
     // ------------------------------------------------------------------
@@ -163,6 +179,133 @@ public final class Matcher {
     /** The source pattern this matcher uses. */
     public Pattern pattern() {
         return parent;
+    }
+
+    // ------------------------------------------------------------------
+    // Replacement operations
+    // ------------------------------------------------------------------
+
+    /**
+     * Replaces every subsequence of the input that matches the pattern with the
+     * given replacement string. The replacement may reference captured groups
+     * with {@code $g} and may escape characters with a backslash.
+     */
+    public String replaceAll(String replacement) {
+        reset();
+        boolean result = find();
+        if (result) {
+            StringBuilder sb = new StringBuilder();
+            do {
+                appendReplacement(sb, replacement);
+                result = find();
+            } while (result);
+            appendTail(sb);
+            return sb.toString();
+        }
+        return text;
+    }
+
+    /**
+     * Replaces the first subsequence of the input that matches the pattern with
+     * the given replacement string, using the same {@code $g}/backslash syntax
+     * as {@link #replaceAll(String)}.
+     */
+    public String replaceFirst(String replacement) {
+        if (replacement == null) {
+            throw new NullPointerException("replacement");
+        }
+        reset();
+        if (!find()) {
+            return text;
+        }
+        StringBuilder sb = new StringBuilder();
+        appendReplacement(sb, replacement);
+        appendTail(sb);
+        return sb.toString();
+    }
+
+    /**
+     * Appends the input preceding the current match, followed by the expanded
+     * replacement, to {@code sb}, then advances the append cursor to the end of
+     * the current match.
+     */
+    private void appendReplacement(StringBuilder sb, String replacement) {
+        ensureMatch();
+        sb.append(text.substring(lastAppendPosition, start()));
+
+        int cursor = 0;
+        int n = replacement.length();
+        while (cursor < n) {
+            char c = replacement.charAt(cursor);
+            if (c == '\\') {
+                cursor++;
+                if (cursor >= n) {
+                    throw new IllegalArgumentException(
+                        "character to be escaped is missing");
+                }
+                sb.append(replacement.charAt(cursor));
+                cursor++;
+            } else if (c == '$') {
+                cursor++;
+                if (cursor >= n) {
+                    throw new IllegalArgumentException(
+                        "Illegal group reference: group index is missing");
+                }
+                char d = replacement.charAt(cursor);
+                if (d < '0' || d > '9') {
+                    throw new IllegalArgumentException("Illegal group reference");
+                }
+                // The first digit always begins a group reference; keep taking
+                // digits while the accumulated number stays a valid group.
+                int refNum = d - '0';
+                cursor++;
+                while (cursor < n) {
+                    char nd = replacement.charAt(cursor);
+                    if (nd < '0' || nd > '9') {
+                        break;
+                    }
+                    int candidate = refNum * 10 + (nd - '0');
+                    if (candidate > groupCount()) {
+                        break;
+                    }
+                    refNum = candidate;
+                    cursor++;
+                }
+                String g = group(refNum);
+                if (g != null) {
+                    sb.append(g);
+                }
+            } else {
+                sb.append(c);
+                cursor++;
+            }
+        }
+        lastAppendPosition = end();
+    }
+
+    /** Appends the input following the last match to {@code sb}. */
+    private void appendTail(StringBuilder sb) {
+        sb.append(text.substring(lastAppendPosition, to));
+    }
+
+    /**
+     * Returns a literal replacement string for the given string. Backslashes and
+     * dollar signs are escaped so the result carries no special meaning in
+     * {@link #replaceAll(String)} / {@link #replaceFirst(String)}.
+     */
+    public static String quoteReplacement(String s) {
+        if (s.indexOf('\\') < 0 && s.indexOf('$') < 0) {
+            return s;
+        }
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            if (c == '\\' || c == '$') {
+                sb.append('\\');
+            }
+            sb.append(c);
+        }
+        return sb.toString();
     }
 
     private void ensureMatch() {

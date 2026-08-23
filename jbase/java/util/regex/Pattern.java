@@ -75,6 +75,28 @@ public final class Pattern {
         return compile(regex).matcher(input).matches();
     }
 
+    /**
+     * Returns a literal pattern string for the given string. The result compiles
+     * to a pattern that matches {@code s} exactly, with every metacharacter
+     * treated as an ordinary character. (Non-alphanumeric characters are escaped
+     * with a backslash; this satisfies the public contract without relying on
+     * {@code \Q...\E} quoting, which this engine does not implement.)
+     */
+    public static String quote(String s) {
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            boolean alnum = (c >= 'a' && c <= 'z')
+                || (c >= 'A' && c <= 'Z')
+                || (c >= '0' && c <= '9');
+            if (!alnum) {
+                sb.append('\\');
+            }
+            sb.append(c);
+        }
+        return sb.toString();
+    }
+
     // ------------------------------------------------------------------
     // Character predicates
     // ------------------------------------------------------------------

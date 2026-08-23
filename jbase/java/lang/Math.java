@@ -9,6 +9,9 @@ package java.lang;
 public final class Math {
     private Math() {}
 
+    public static final double PI = 3.141592653589793;
+    public static final double E = 2.718281828459045;
+
     public static int abs(int a) {
         return (a < 0) ? -a : a;
     }
@@ -108,5 +111,96 @@ public final class Math {
 
     public static long floorMod(long x, long y) {
         return x - floorDiv(x, y) * y;
+    }
+
+    // ---- Pure floating-point helpers (bit-exact, no libm needed) ----
+
+    public static double toRadians(double angdeg) {
+        return angdeg / 180.0 * PI;
+    }
+
+    public static double toDegrees(double angrad) {
+        return angrad * 180.0 / PI;
+    }
+
+    public static double copySign(double magnitude, double sign) {
+        long m = Double.doubleToRawLongBits(magnitude);
+        long s = Double.doubleToRawLongBits(sign);
+        return Double.longBitsToDouble((m & 0x7fffffffffffffffL) | (s & 0x8000000000000000L));
+    }
+
+    public static float copySign(float magnitude, float sign) {
+        int m = Float.floatToRawIntBits(magnitude);
+        int s = Float.floatToRawIntBits(sign);
+        return Float.intBitsToFloat((m & 0x7fffffff) | (s & 0x80000000));
+    }
+
+    public static double signum(double d) {
+        // NaN and +/-0.0 return the argument unchanged.
+        if (d != d || d == 0.0) {
+            return d;
+        }
+        return copySign(1.0, d);
+    }
+
+    public static float signum(float f) {
+        if (f != f || f == 0.0f) {
+            return f;
+        }
+        return copySign(1.0f, f);
+    }
+
+    public static double ulp(double d) {
+        long bits = Double.doubleToRawLongBits(d);
+        long biasedExp = (bits >> 52) & 0x7ffL;
+        if (biasedExp == 0x7ffL) {
+            // NaN or infinity -> abs(d)
+            return Double.longBitsToDouble(bits & 0x7fffffffffffffffL);
+        }
+        if (biasedExp == 0L) {
+            // zero or subnormal -> smallest positive double (2^-1074)
+            return Double.longBitsToDouble(1L);
+        }
+        // normal: unbiased exponent e, ulp exponent = e - 52
+        long ulpExp = (biasedExp - 1023L) - 52L;
+        if (ulpExp >= -1022L) {
+            // representable as a normal number
+            return Double.longBitsToDouble((ulpExp + 1023L) << 52);
+        }
+        // ulp itself is subnormal: 2^ulpExp = longBitsToDouble(1L << (ulpExp + 1074))
+        return Double.longBitsToDouble(1L << (int) (ulpExp + 1074L));
+    }
+
+    public static double nextUp(double d) {
+        if (d != d) {
+            return d; // NaN
+        }
+        long bits = Double.doubleToRawLongBits(d);
+        if (bits == 0x7ff0000000000000L) {
+            return d; // positive infinity
+        }
+        d = d + 0.0; // collapse -0.0 to +0.0
+        bits = Double.doubleToRawLongBits(d);
+        if (d >= 0.0) {
+            return Double.longBitsToDouble(bits + 1L);
+        }
+        return Double.longBitsToDouble(bits - 1L);
+    }
+
+    public static double nextDown(double d) {
+        if (d != d) {
+            return d; // NaN
+        }
+        long bits = Double.doubleToRawLongBits(d);
+        if (bits == 0xfff0000000000000L) {
+            return d; // negative infinity
+        }
+        if (d == 0.0) {
+            return Double.longBitsToDouble(0x8000000000000001L); // -MIN_VALUE
+        }
+        if (d > 0.0) {
+            return Double.longBitsToDouble(bits - 1L);
+        }
+        return Double.longBitsToDouble(bits + 1L);
     }
 }

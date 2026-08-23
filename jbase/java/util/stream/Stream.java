@@ -127,6 +127,64 @@ public class Stream {
         return new Stream(out);
     }
 
+    /**
+     * Maps each element to a Stream and flattens the results into one Stream.
+     * A null mapping result contributes no elements.
+     */
+    public Stream flatMap(Function mapper) {
+        ArrayList out = new ArrayList();
+        for (int i = 0; i < data.size(); i++) {
+            Object mapped = mapper.apply(data.get(i));
+            if (mapped != null) {
+                Stream sub = (Stream) mapped;
+                for (int j = 0; j < sub.data.size(); j++) {
+                    out.add(sub.data.get(j));
+                }
+            }
+        }
+        return new Stream(out);
+    }
+
+    /** Elements from the front while the predicate holds; stops at first failure. */
+    public Stream takeWhile(Predicate predicate) {
+        ArrayList out = new ArrayList();
+        for (int i = 0; i < data.size(); i++) {
+            Object o = data.get(i);
+            if (!predicate.test(o)) {
+                break;
+            }
+            out.add(o);
+        }
+        return new Stream(out);
+    }
+
+    /** Drops elements from the front while the predicate holds; keeps the rest. */
+    public Stream dropWhile(Predicate predicate) {
+        ArrayList out = new ArrayList();
+        boolean dropping = true;
+        for (int i = 0; i < data.size(); i++) {
+            Object o = data.get(i);
+            if (dropping && predicate.test(o)) {
+                continue;
+            }
+            dropping = false;
+            out.add(o);
+        }
+        return new Stream(out);
+    }
+
+    /** Concatenates the elements of {@code a} followed by those of {@code b}. */
+    public static Stream concat(Stream a, Stream b) {
+        ArrayList out = new ArrayList();
+        for (int i = 0; i < a.data.size(); i++) {
+            out.add(a.data.get(i));
+        }
+        for (int i = 0; i < b.data.size(); i++) {
+            out.add(b.data.get(i));
+        }
+        return new Stream(out);
+    }
+
     // ---- Terminal operations ----
 
     public void forEach(Consumer action) {
@@ -195,6 +253,34 @@ public class Stream {
             }
         }
         return true;
+    }
+
+    public Optional min(Comparator comparator) {
+        if (data.isEmpty()) {
+            return Optional.empty();
+        }
+        Object result = data.get(0);
+        for (int i = 1; i < data.size(); i++) {
+            Object o = data.get(i);
+            if (comparator.compare(o, result) < 0) {
+                result = o;
+            }
+        }
+        return Optional.of(result);
+    }
+
+    public Optional max(Comparator comparator) {
+        if (data.isEmpty()) {
+            return Optional.empty();
+        }
+        Object result = data.get(0);
+        for (int i = 1; i < data.size(); i++) {
+            Object o = data.get(i);
+            if (comparator.compare(o, result) > 0) {
+                result = o;
+            }
+        }
+        return Optional.of(result);
     }
 
     public Optional findFirst() {

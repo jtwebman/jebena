@@ -14,6 +14,10 @@ public class Random {
 
     private long seed;
 
+    // Cached second Gaussian value produced by the Marsaglia polar method.
+    private double nextNextGaussian;
+    private boolean haveNextNextGaussian = false;
+
     private static final long MULTIPLIER = 0x5DEECE66DL;
     private static final long ADDEND = 0xBL;
     private static final long MASK = (1L << 48) - 1;
@@ -37,6 +41,7 @@ public class Random {
 
     public void setSeed(long seed) {
         this.seed = (seed ^ MULTIPLIER) & MASK;
+        this.haveNextNextGaussian = false;
     }
 
     protected int next(int bits) {
@@ -78,5 +83,30 @@ public class Random {
 
     public double nextDouble() {
         return (((long) (next(26)) << 27) + next(27)) * 0x1.0p-53;
+    }
+
+    /**
+     * Returns a Gaussian ("normally") distributed double with mean 0.0 and
+     * standard deviation 1.0, using the Marsaglia polar method exactly as
+     * specified by java.util.Random. A second value produced by each polar
+     * pair is cached and returned on the following call. Bit-exactness with
+     * the reference JDK depends on Math.sqrt/Math.log matching StrictMath.
+     */
+    public double nextGaussian() {
+        if (haveNextNextGaussian) {
+            haveNextNextGaussian = false;
+            return nextNextGaussian;
+        } else {
+            double v1, v2, s;
+            do {
+                v1 = 2 * nextDouble() - 1;
+                v2 = 2 * nextDouble() - 1;
+                s = v1 * v1 + v2 * v2;
+            } while (s >= 1 || s == 0);
+            double multiplier = Math.sqrt(-2 * Math.log(s) / s);
+            nextNextGaussian = v2 * multiplier;
+            haveNextNextGaussian = true;
+            return v1 * multiplier;
+        }
     }
 }

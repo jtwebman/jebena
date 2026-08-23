@@ -27,7 +27,7 @@ JEBENA="$ROOT/zig-out/bin/jebena"
 # jebena eagerly links classpath classes, so including one (e.g. DiffDate2 -> ChronoLocalDate)
 # aborts the whole run with a LinkError. Excluding them keeps intrinsic fixtures + their helper
 # classes (Counter/Box/IntOp, inner $ classes) while dropping the breadth set.
-BREADTH='DiffColl|DiffRegex|DiffStream|DiffString|DiffTrace|DiffBits|DiffFmt|DiffBig|DiffNav|DiffList|DiffMath|DiffChar|DiffMap|DiffRandom|DiffPQ|DiffTok|DiffVec|DiffStk|DiffUuid|DiffOptInt|DiffADq|DiffBitSet|DiffScanner|DiffCmp|DiffBigDec|DiffBigDec2|DiffCollectors|DiffDow|DiffDecFmt|DiffPath|DiffIntStream|DiffDate2'
+BREADTH='DiffColl|DiffRegex|DiffRegex2|DiffStream|DiffStream2|DiffString|DiffTrace|DiffBits|DiffFmt|DiffBig|DiffNav|DiffList|DiffMath|DiffMath2|DiffChar|DiffMap|DiffRandom|DiffPQ|DiffTok|DiffVec|DiffStk|DiffUuid|DiffOptInt|DiffADq|DiffBitSet|DiffScanner|DiffCmp|DiffBigDec|DiffBigDec2|DiffBigDec3|DiffCollectors|DiffDow|DiffDecFmt|DiffPath|DiffIntStream|DiffDate2|DiffB64|DiffCrc|DiffLongStream|DiffDoubleStream|DiffDtf|DiffGauss'
 CLASSES=$(ls "$OUT"/*.class | grep -vE "/Driver\.class|/($BREADTH)(\\\$[^/]*)?\.class" | tr '\n' ' ')
 
 CASES="DiffTest:arith DiffTest:loops DiffTest:rec DiffTest:longMath DiffTest:doubleMath \

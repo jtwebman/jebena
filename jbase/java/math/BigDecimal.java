@@ -250,6 +250,107 @@ public class BigDecimal extends Number implements Comparable<BigDecimal> {
         return q;
     }
 
+    /**
+     * Returns the integer part of {@code this / divisor}, truncated toward zero.
+     * The preferred scale of the result is {@code this.scale() - divisor.scale()}.
+     */
+    public BigDecimal divideToIntegralValue(BigDecimal divisor) {
+        if (divisor.signum() == 0) {
+            throw new ArithmeticException("Division by zero");
+        }
+        int preferredScale = this.scale - divisor.scale;
+        if (this.signum() == 0) {
+            return new BigDecimal(BigInteger.ZERO, preferredScale);
+        }
+        // this / divisor = (thisUnscaled * 10^shift) / divUnscaled ,
+        //   shift = divisor.scale - this.scale
+        int shift = divisor.scale - this.scale;
+        BigInteger dividend = this.intVal;
+        BigInteger divisorInt = divisor.intVal;
+        if (shift >= 0) {
+            dividend = dividend.multiply(BigInteger.TEN.pow(shift));
+        } else {
+            divisorInt = divisorInt.multiply(BigInteger.TEN.pow(-shift));
+        }
+        BigInteger q = dividend.divide(divisorInt); // truncated toward zero
+
+        // Express the integer value q at the preferred scale where possible.
+        if (preferredScale >= 0) {
+            if (preferredScale == 0) {
+                return new BigDecimal(q, 0);
+            }
+            return new BigDecimal(q.multiply(BigInteger.TEN.pow(preferredScale)), preferredScale);
+        }
+        // preferredScale < 0: strip trailing zeros from q, but not past preferredScale.
+        BigInteger u = q;
+        int s = 0;
+        while (s > preferredScale) {
+            BigInteger r = u.remainder(BigInteger.TEN);
+            if (r.signum() != 0) {
+                break;
+            }
+            u = u.divide(BigInteger.TEN);
+            s--;
+        }
+        return new BigDecimal(u, s);
+    }
+
+    /**
+     * Returns {@code this - (this.divideToIntegralValue(divisor) * divisor)}.
+     * The result carries the sign of {@code this}.
+     */
+    public BigDecimal remainder(BigDecimal divisor) {
+        BigDecimal quotient = this.divideToIntegralValue(divisor);
+        return this.subtract(quotient.multiply(divisor));
+    }
+
+    // --------------------------------------------------------------- min/max
+
+    public BigDecimal max(BigDecimal val) {
+        return compareTo(val) >= 0 ? this : val;
+    }
+
+    public BigDecimal min(BigDecimal val) {
+        return compareTo(val) <= 0 ? this : val;
+    }
+
+    // --------------------------------------------------------------- precision
+
+    /** Number of significant digits in the unscaled value; {@code 1} for zero. */
+    public int precision() {
+        if (intVal.signum() == 0) {
+            return 1;
+        }
+        return intVal.abs().toString().length();
+    }
+
+    // ------------------------------------------------------------- round
+
+    /**
+     * Rounds this value to {@code mc.getPrecision()} significant digits using
+     * {@code mc.getRoundingMode()}. A precision of {@code 0} returns {@code this}.
+     */
+    public BigDecimal round(MathContext mc) {
+        int mcp = mc.getPrecision();
+        if (mcp == 0) {
+            return this;
+        }
+        int p = this.precision();
+        if (p <= mcp) {
+            return this;
+        }
+        int drop = p - mcp;
+        int newScale = this.scale - drop;
+        BigInteger divisor = BigInteger.TEN.pow(drop);
+        BigInteger q = divideAndRound(this.intVal, divisor, mc.getRoundingMode());
+        BigDecimal result = new BigDecimal(q, newScale);
+        // Rounding may carry into an extra significant digit (e.g. 99.9 -> 100).
+        if (result.precision() > mcp) {
+            result = new BigDecimal(q.divide(BigInteger.TEN), newScale - 1);
+        }
+        return result;
+    }
+
     // --------------------------------------------------------------- powers
 
     public BigDecimal pow(int n) {

@@ -21,6 +21,7 @@ rm -rf "$OUT"; mkdir -p "$OUT"
   "$ROOT"/test/diff/DiffBitSet.java "$ROOT"/test/diff/DiffScanner.java "$ROOT"/test/diff/DiffCmp.java "$ROOT"/test/diff/DiffBigDec.java "$ROOT"/test/diff/DiffCollectors.java \
   "$ROOT"/test/diff/DiffDow.java "$ROOT"/test/diff/DiffDecFmt.java "$ROOT"/test/diff/DiffPath.java "$ROOT"/test/diff/DiffIntStream.java "$ROOT"/test/diff/DiffBigDec2.java \
   "$ROOT"/test/diff/DiffDate2.java \
+  "$ROOT"/test/diff/DiffB64.java "$ROOT"/test/diff/DiffCrc.java "$ROOT"/test/diff/DiffLongStream.java "$ROOT"/test/diff/DiffDoubleStream.java "$ROOT"/test/diff/DiffRegex2.java "$ROOT"/test/diff/DiffStream2.java "$ROOT"/test/diff/DiffMath2.java "$ROOT"/test/diff/DiffBigDec3.java "$ROOT"/test/diff/DiffDtf.java "$ROOT"/test/diff/DiffGauss.java \
   "$ROOT"/test/diff/Driver.java || { echo "javac failed"; exit 1; }
 "$ZIG" build --build-file "$ROOT/build.zig" >/dev/null 2>&1
 JEBENA="$ROOT/zig-out/bin/jebena"
@@ -66,6 +67,16 @@ PATHC="fileName parent nameCount nameAt1 resolveRel resolveAbs normalizeDots nor
 INTSTREAM="filterSum reduceSum minMax average distinctSum sortedChecksum limitSum skipSum mapToObjCount"
 BIGDEC2="div10by3Half div1by8Down divNeg10by3HalfEven div7by2Ceiling div7by2Floor pow25cubed pow2to10 strip movePointLeft2 movePointRight1"
 DATE2="cmpSign cmpEqual beforeAfter isEqualCase dowThursday dowSunday untilDays untilMonths"
+B64="encMan encMa encM encHello encEmpty roundtrip decString urlSafeChars urlRoundtrip noPad decNoPad"
+CRC="crcHello adlerHello crcIncremental adlerIncremental crcSingleBytes adlerSingleBytes crcReset adlerReset crcEmpty adlerRange"
+LONGSTREAM="rangeClosedSum rangeMapSquareSum ofMax ofMin filterEvenSum reduceProduct averageMicros boxedCount emptyMinPresent toArrayChecksum"
+DBLSTREAM="sumBasic mapSum filterCount averageBasic averageEmpty reduceProduct minVal maxVal minEmpty boxedToArray"
+REGEX2="replaceAllDigits replaceFirstDigit groupSwap groupSwapFirst quoteMatch quoteReplLiteral quoteReplMixed escapedDollar noMatch wholeRef"
+STREAM2="flatMapSum flatMapEmpty concatCount concatEmpty takeWhileSum takeWhileNone dropWhileSum dropWhileAll minNat maxNat minEmpty"
+MATH2="toRadians180 toDegreesPI copySign3neg1 copySignFloat signumNeg5 signumZero signumFloatPos ulp1bits nextUp1 nextDown1"
+BIGDEC3="remainderBasic remainderFrac remainderNeg divToIntegral divToIntegralFrac maxOf minOf precisionOf precisionZero roundBasic roundCarry roundFloorMode"
+DTF="isoDate slashDate dateTime literalHeavy midnightTime endOfDay compactNoSep singleLetters fullDateTime"
+GAUSS="single42 single42Coarse sum3Seed7 sum3Seed7Coarse combineSeed1 combineSeed1Coarse cachedPairSecond reseedClearsCache"
 
 CASES=""
 for m in $COLL; do CASES="$CASES DiffColl:$m"; done
@@ -100,6 +111,16 @@ for m in $PATHC; do CASES="$CASES DiffPath:$m"; done
 for m in $INTSTREAM; do CASES="$CASES DiffIntStream:$m"; done
 for m in $BIGDEC2; do CASES="$CASES DiffBigDec2:$m"; done
 for m in $DATE2; do CASES="$CASES DiffDate2:$m"; done
+for m in $B64; do CASES="$CASES DiffB64:$m"; done
+for m in $CRC; do CASES="$CASES DiffCrc:$m"; done
+for m in $LONGSTREAM; do CASES="$CASES DiffLongStream:$m"; done
+for m in $DBLSTREAM; do CASES="$CASES DiffDoubleStream:$m"; done
+for m in $REGEX2; do CASES="$CASES DiffRegex2:$m"; done
+for m in $STREAM2; do CASES="$CASES DiffStream2:$m"; done
+for m in $MATH2; do CASES="$CASES DiffMath2:$m"; done
+for m in $BIGDEC3; do CASES="$CASES DiffBigDec3:$m"; done
+for m in $DTF; do CASES="$CASES DiffDtf:$m"; done
+for m in $GAUSS; do CASES="$CASES DiffGauss:$m"; done
 
 pass=0; fail=0
 printf "%-24s %12s %12s   %s\n" CASE JAVA JEBENA RESULT
