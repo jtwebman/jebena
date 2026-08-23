@@ -66,6 +66,41 @@ public final class Collections {
         return min;
     }
 
+    public static List singletonList(Object o) {
+        ArrayList list = new ArrayList();
+        list.add(o);
+        return list;
+    }
+
+    public static List nCopies(int n, Object o) {
+        if (n < 0) {
+            throw new IllegalArgumentException("List length = " + n);
+        }
+        ArrayList list = new ArrayList();
+        for (int i = 0; i < n; i++) {
+            list.add(o);
+        }
+        return list;
+    }
+
+    public static int frequency(Collection c, Object o) {
+        int count = 0;
+        java.util.Iterator it = c.iterator();
+        while (it.hasNext()) {
+            Object e = it.next();
+            if (o == null ? e == null : o.equals(e)) {
+                count++;
+            }
+        }
+        return count;
+    }
+
+    public static void swap(List list, int i, int j) {
+        Object a = list.get(i);
+        list.set(i, list.get(j));
+        list.set(j, a);
+    }
+
     public static List emptyList() {
         return new ArrayList(0);
     }
