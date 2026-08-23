@@ -15,8 +15,11 @@ public final class RoundingMode {
 
     public static final RoundingMode UP = new RoundingMode("UP", 0);
     public static final RoundingMode DOWN = new RoundingMode("DOWN", 1);
-    public static final RoundingMode HALF_UP = new RoundingMode("HALF_UP", 2);
-    public static final RoundingMode HALF_EVEN = new RoundingMode("HALF_EVEN", 3);
+    public static final RoundingMode CEILING = new RoundingMode("CEILING", 2);
+    public static final RoundingMode FLOOR = new RoundingMode("FLOOR", 3);
+    public static final RoundingMode HALF_UP = new RoundingMode("HALF_UP", 4);
+    public static final RoundingMode HALF_DOWN = new RoundingMode("HALF_DOWN", 5);
+    public static final RoundingMode HALF_EVEN = new RoundingMode("HALF_EVEN", 6);
 
     private final String name;
     private final int ordinal;

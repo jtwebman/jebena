@@ -61,6 +61,17 @@ public final class Period {
         return create(years + other.years, months + other.months, days + other.days);
     }
 
+    /** Rolls months into years so months is in the range -11..11. */
+    public Period normalized() {
+        long totalMonths = (long) years * 12 + months;
+        int splitYears = (int) (totalMonths / 12);
+        int splitMonths = (int) (totalMonths % 12);
+        if (splitYears == years && splitMonths == months) {
+            return this;
+        }
+        return create(splitYears, splitMonths, days);
+    }
+
     public boolean equals(Object obj) {
         if (this == obj) {
             return true;

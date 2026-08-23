@@ -9,9 +9,7 @@ package java.math;
  * to the right of the decimal point; a negative scale multiplies by a power of
  * ten.
  *
- * <p>Clean-room implementation from the public contract. This is a deliberately
- * minimal slice: {@code divide} is intentionally NOT implemented (getting it
- * bit-exact across all rounding modes is out of scope for this slice).
+ * <p>Clean-room implementation from the public contract.
  */
 public class BigDecimal extends Number implements Comparable<BigDecimal> {
 
@@ -182,6 +180,127 @@ public class BigDecimal extends Number implements Comparable<BigDecimal> {
 
     public BigDecimal abs() {
         return signum() < 0 ? negate() : this;
+    }
+
+    // --------------------------------------------------------------- divide
+
+    public BigDecimal divide(BigDecimal divisor, int scale, RoundingMode mode) {
+        if (divisor.signum() == 0) {
+            throw new ArithmeticException("Division by zero");
+        }
+        // We want q such that (q * 10^-scale) approximates this/divisor.
+        //   this/divisor = (thisUnscaled/divUnscaled) * 10^(divScale - thisScale)
+        //   q = this/divisor * 10^scale
+        //     = (thisUnscaled * 10^shift) / divUnscaled ,  shift = scale + divScale - thisScale
+        int shift = scale + divisor.scale - this.scale;
+        BigInteger dividend = this.intVal;
+        BigInteger divisorInt = divisor.intVal;
+        if (shift >= 0) {
+            dividend = dividend.multiply(BigInteger.TEN.pow(shift));
+        } else {
+            divisorInt = divisorInt.multiply(BigInteger.TEN.pow(-shift));
+        }
+        BigInteger q = divideAndRound(dividend, divisorInt, mode);
+        return new BigDecimal(q, scale);
+    }
+
+    /** Integer division of {@code dividend/divisor} with the given rounding. */
+    private static BigInteger divideAndRound(BigInteger dividend, BigInteger divisor, RoundingMode mode) {
+        BigInteger q = dividend.divide(divisor);      // truncated toward zero
+        BigInteger r = dividend.remainder(divisor);   // sign of dividend
+        if (r.signum() == 0) {
+            return q;
+        }
+        // Sign of the exact quotient.
+        int quotientSign = dividend.signum() * divisor.signum();
+
+        boolean roundAway;
+        if (mode == RoundingMode.DOWN) {
+            roundAway = false;
+        } else if (mode == RoundingMode.UP) {
+            roundAway = true;
+        } else if (mode == RoundingMode.CEILING) {
+            roundAway = quotientSign > 0;
+        } else if (mode == RoundingMode.FLOOR) {
+            roundAway = quotientSign < 0;
+        } else if (mode == RoundingMode.HALF_UP
+                || mode == RoundingMode.HALF_DOWN
+                || mode == RoundingMode.HALF_EVEN) {
+            BigInteger twiceR = r.abs().multiply(BigInteger.TWO);
+            int cmp = twiceR.compareTo(divisor.abs());
+            if (cmp > 0) {
+                roundAway = true;
+            } else if (cmp < 0) {
+                roundAway = false;
+            } else if (mode == RoundingMode.HALF_UP) {
+                roundAway = true;
+            } else if (mode == RoundingMode.HALF_DOWN) {
+                roundAway = false;
+            } else {
+                // HALF_EVEN: round away only if the truncated quotient is odd.
+                roundAway = q.remainder(BigInteger.TWO).signum() != 0;
+            }
+        } else {
+            throw new ArithmeticException("Unsupported rounding mode: " + mode);
+        }
+
+        if (roundAway) {
+            q = q.add(BigInteger.valueOf(quotientSign));
+        }
+        return q;
+    }
+
+    // --------------------------------------------------------------- powers
+
+    public BigDecimal pow(int n) {
+        if (n < 0) {
+            throw new ArithmeticException("Invalid operation: negative exponent");
+        }
+        if (n == 0) {
+            return ONE;
+        }
+        BigDecimal result = ONE;
+        for (int i = 0; i < n; i++) {
+            result = result.multiply(this);
+        }
+        return result;
+    }
+
+    // ------------------------------------------------------- point movement
+
+    public BigDecimal stripTrailingZeros() {
+        if (intVal.signum() == 0) {
+            return new BigDecimal(BigInteger.ZERO, 0);
+        }
+        BigInteger u = intVal;
+        int s = scale;
+        while (true) {
+            BigInteger q = u.divide(BigInteger.TEN);
+            BigInteger r = u.remainder(BigInteger.TEN);
+            if (r.signum() != 0) {
+                break;
+            }
+            u = q;
+            s = s - 1;
+        }
+        return new BigDecimal(u, s);
+    }
+
+    public BigDecimal movePointLeft(int n) {
+        int newScale = scale + n;
+        if (newScale < 0) {
+            // Absorb the deficit into the unscaled value.
+            return new BigDecimal(intVal.multiply(BigInteger.TEN.pow(-newScale)), 0);
+        }
+        return new BigDecimal(intVal, newScale);
+    }
+
+    public BigDecimal movePointRight(int n) {
+        int newScale = scale - n;
+        if (newScale < 0) {
+            return new BigDecimal(intVal.multiply(BigInteger.TEN.pow(-newScale)), 0);
+        }
+        return new BigDecimal(intVal, newScale);
     }
 
     // --------------------------------------------------------------- rescale
