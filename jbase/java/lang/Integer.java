@@ -72,6 +72,39 @@ public final class Integer extends Number implements Comparable<Integer> {
         return String.valueOf(i);
     }
 
+    public static String toString(int i, int radix) {
+        if (radix < 2 || radix > 36) {
+            radix = 10;
+        }
+        if (radix == 10) {
+            return String.valueOf(i);
+        }
+        boolean neg = i < 0;
+        char[] buf = new char[33];
+        int p = 33;
+        int v = i;
+        if (!neg) {
+            v = -v;
+        }
+        // v is <= 0 here; work with negative magnitude to cover MIN_VALUE
+        while (v <= -radix) {
+            int d = -(v % radix);
+            buf[--p] = (char) (d < 10 ? ('0' + d) : ('a' + d - 10));
+            v = v / radix;
+        }
+        int d = -v;
+        buf[--p] = (char) (d < 10 ? ('0' + d) : ('a' + d - 10));
+        if (neg) {
+            buf[--p] = '-';
+        }
+        int len = 33 - p;
+        char[] r = new char[len];
+        for (int k = 0; k < len; k++) {
+            r[k] = buf[p + k];
+        }
+        return new String(r);
+    }
+
     public static int parseInt(String s) {
         int len = s.length();
         if (len == 0) {
@@ -205,6 +238,13 @@ public final class Integer extends Number implements Comparable<Integer> {
 
     public static int lowestOneBit(int i) {
         return i & -i;
+    }
+
+    public static int reverseBytes(int i) {
+        return (i << 24)
+            | ((i & 0xff00) << 8)
+            | ((i >>> 8) & 0xff00)
+            | (i >>> 24);
     }
 
     public static int reverse(int i) {

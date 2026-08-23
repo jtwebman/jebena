@@ -62,6 +62,7 @@ public final class Formatter {
             boolean flagSpace = false;
             boolean flagComma = false;
             boolean flagAlt = false;
+            boolean flagParen = false;
             while (i < len) {
                 char f = format.charAt(i);
                 if (f == '-') {
@@ -77,7 +78,7 @@ public final class Formatter {
                 } else if (f == '#') {
                     flagAlt = true;
                 } else if (f == '(') {
-                    // accepted but not acted upon
+                    flagParen = true;
                 } else {
                     break;
                 }
@@ -125,6 +126,7 @@ public final class Formatter {
 
             String body;
             String sign = "";
+            String suffix = "";
             boolean numeric = false;
 
             if (conv == 's' || conv == 'S') {
@@ -168,7 +170,12 @@ public final class Formatter {
                 boolean neg = v < 0;
                 String digits = neg ? unsignedDecimalOfNegated(v) : String.valueOf(v);
                 if (neg) {
-                    sign = "-";
+                    if (flagParen) {
+                        sign = "(";
+                        suffix = ")";
+                    } else {
+                        sign = "-";
+                    }
                 } else if (flagPlus) {
                     sign = "+";
                 } else if (flagSpace) {
@@ -207,9 +214,20 @@ public final class Formatter {
                 } else {
                     neg = (d < 0) || (d == 0.0 && 1.0 / d < 0);
                     body = formatFixed(d < 0 ? -d : d, p);
+                    if (flagComma) {
+                        int dot = body.indexOf('.');
+                        String ip = (dot < 0) ? body : body.substring(0, dot);
+                        String fp = (dot < 0) ? "" : body.substring(dot);
+                        body = group(ip) + fp;
+                    }
                 }
                 if (neg) {
-                    sign = "-";
+                    if (flagParen) {
+                        sign = "(";
+                        suffix = ")";
+                    } else {
+                        sign = "-";
+                    }
                 } else if (flagPlus) {
                     sign = "+";
                 } else if (flagSpace) {
@@ -234,7 +252,12 @@ public final class Formatter {
                     }
                 }
                 if (neg) {
-                    sign = "-";
+                    if (flagParen) {
+                        sign = "(";
+                        suffix = ")";
+                    } else {
+                        sign = "-";
+                    }
                 } else if (flagPlus) {
                     sign = "+";
                 } else if (flagSpace) {
@@ -259,7 +282,12 @@ public final class Formatter {
                     }
                 }
                 if (neg) {
-                    sign = "-";
+                    if (flagParen) {
+                        sign = "(";
+                        suffix = ")";
+                    } else {
+                        sign = "-";
+                    }
                 } else if (flagPlus) {
                     sign = "+";
                 } else if (flagSpace) {
@@ -269,7 +297,7 @@ public final class Formatter {
                 throw new IllegalArgumentException("unsupported conversion: " + conv);
             }
 
-            sb.append(pad(sign, body, width, flagLeft, flagZero && numeric));
+            sb.append(pad(sign, body + suffix, width, flagLeft, flagZero && numeric));
         }
         return sb.toString();
     }

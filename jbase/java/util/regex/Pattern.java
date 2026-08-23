@@ -29,17 +29,40 @@ public final class Pattern {
     /** Sentinel used for "unbounded" quantifier maxima (avoids Integer.MAX_VALUE). */
     static final int MAX = 2147483647;
 
+    /** Enables case-insensitive matching (ASCII folding). */
+    public static final int CASE_INSENSITIVE = 0x02;
+
+    /** Enables multiline mode, so {@code ^} and {@code $} match at line bounds. */
+    public static final int MULTILINE = 0x08;
+
+    /** Enables dotall mode, so {@code .} matches any character including line terminators. */
+    public static final int DOTALL = 0x20;
+
     private final String patternString;
+    private final int flags;
     Node root;
     int groupCount;
 
     /** Maps a named-group name (from {@code (?<name>...)}) to its group number. */
     final Map namedGroups;
 
-    private Pattern(String patternString) {
+    private Pattern(String patternString, int flags) {
         this.patternString = patternString;
+        this.flags = flags;
         this.groupCount = 0;
         this.namedGroups = new HashMap();
+    }
+
+    /** Case-insensitive ASCII character comparison. */
+    static boolean ciEquals(char a, char b) {
+        if (a == b) {
+            return true;
+        }
+        char la = a;
+        char lb = b;
+        if (la >= 'A' && la <= 'Z') { la += 32; }
+        if (lb >= 'A' && lb <= 'Z') { lb += 32; }
+        return la == lb;
     }
 
     /**
@@ -56,14 +79,24 @@ public final class Pattern {
 
     /** Compiles the given regular expression into a pattern. */
     public static Pattern compile(String regex) {
+        return compile(regex, 0);
+    }
+
+    /** Compiles the given regular expression with the given match flags. */
+    public static Pattern compile(String regex, int flags) {
         if (regex == null) {
             throw new NullPointerException("regex");
         }
-        Pattern p = new Pattern(regex);
+        Pattern p = new Pattern(regex, flags);
         Parser parser = new Parser(regex, p);
         Ast ast = parser.parse();
         p.root = ast.compile(new LastNode());
         return p;
+    }
+
+    /** Returns this pattern's match flags. */
+    public int flags() {
+        return flags;
     }
 
     /** Returns the source regular expression. */
@@ -276,21 +309,26 @@ public final class Pattern {
     static final class CharNode extends Node {
         final char ch;
         final Node next;
-        CharNode(char ch, Node next) { this.ch = ch; this.next = next; }
+        final boolean ci;
+        CharNode(char ch, Node next, boolean ci) { this.ch = ch; this.next = next; this.ci = ci; }
         boolean match(Matcher m, int i) {
-            if (i < m.to && m.text.charAt(i) == ch) {
-                return next.match(m, i + 1);
+            if (i < m.to) {
+                char t = m.text.charAt(i);
+                if (ci ? ciEquals(t, ch) : t == ch) {
+                    return next.match(m, i + 1);
+                }
             }
             return false;
         }
     }
 
-    /** The {@code .} metacharacter: any character except a line terminator. */
+    /** The {@code .} metacharacter: any character except a line terminator (unless dotall). */
     static final class DotNode extends Node {
         final Node next;
-        DotNode(Node next) { this.next = next; }
+        final boolean dotall;
+        DotNode(Node next, boolean dotall) { this.next = next; this.dotall = dotall; }
         boolean match(Matcher m, int i) {
-            if (i < m.to && !isLineTerminator(m.text.charAt(i))) {
+            if (i < m.to && (dotall || !isLineTerminator(m.text.charAt(i)))) {
                 return next.match(m, i + 1);
             }
             return false;
@@ -301,22 +339,47 @@ public final class Pattern {
     static final class ClassNode extends Node {
         final CharPredicate pred;
         final Node next;
-        ClassNode(CharPredicate pred, Node next) { this.pred = pred; this.next = next; }
+        final boolean ci;
+        ClassNode(CharPredicate pred, Node next, boolean ci) {
+            this.pred = pred; this.next = next; this.ci = ci;
+        }
         boolean match(Matcher m, int i) {
-            if (i < m.to && pred.test(m.text.charAt(i))) {
-                return next.match(m, i + 1);
+            if (i < m.to) {
+                char t = m.text.charAt(i);
+                boolean ok = pred.test(t);
+                if (!ok && ci) {
+                    char lo = (t >= 'A' && t <= 'Z') ? (char) (t + 32) : t;
+                    char up = (t >= 'a' && t <= 'z') ? (char) (t - 32) : t;
+                    ok = pred.test(lo) || pred.test(up);
+                }
+                if (ok) {
+                    return next.match(m, i + 1);
+                }
             }
             return false;
         }
     }
 
-    /** {@code ^} in default mode: matches only at the start of input. */
+    /** {@code ^}: matches at the start of input, or after a line terminator in multiline mode. */
     static final class BeginNode extends Node {
         final Node next;
-        BeginNode(Node next) { this.next = next; }
+        final boolean multiline;
+        BeginNode(Node next, boolean multiline) { this.next = next; this.multiline = multiline; }
         boolean match(Matcher m, int i) {
             if (i == m.from) {
                 return next.match(m, i);
+            }
+            if (multiline && i > m.from && i <= m.to) {
+                char prev = m.text.charAt(i - 1);
+                if (prev == '\n') {
+                    return next.match(m, i);
+                }
+                if (prev == '\r' && !(i < m.to && m.text.charAt(i) == '\n')) {
+                    return next.match(m, i);
+                }
+                if (prev == '\u0085' || prev == '\u2028' || prev == '\u2029') {
+                    return next.match(m, i);
+                }
             }
             return false;
         }
@@ -324,12 +387,30 @@ public final class Pattern {
 
     /**
      * {@code $} in default mode: matches at the end of input, or just before a
-     * line terminator that ends the input. Mirrors the real engine's Dollar node.
+     * line terminator that ends the input. In multiline mode it also matches at
+     * the end of each line. Mirrors the real engine's Dollar node.
      */
     static final class EndNode extends Node {
         final Node next;
-        EndNode(Node next) { this.next = next; }
+        final boolean multiline;
+        EndNode(Node next, boolean multiline) { this.next = next; this.multiline = multiline; }
         boolean match(Matcher m, int i) {
+            if (multiline) {
+                if (i == m.to) {
+                    return next.match(m, i);
+                }
+                char c = m.text.charAt(i);
+                if (isLineTerminator(c)) {
+                    if (c == '\n' && i > m.from && m.text.charAt(i - 1) == '\r') {
+                        return false;
+                    }
+                    return next.match(m, i);
+                }
+                return false;
+            }
+            return matchDefault(m, i);
+        }
+        boolean matchDefault(Matcher m, int i) {
             int endIndex = m.to;
             if (i < endIndex - 2) {
                 return false;
@@ -507,26 +588,39 @@ public final class Pattern {
 
     static final class LitAst extends Ast {
         final char ch;
-        LitAst(char ch) { this.ch = ch; }
-        Node compile(Node next) { return new CharNode(ch, next); }
+        final boolean ci;
+        LitAst(char ch, boolean ci) { this.ch = ch; this.ci = ci; }
+        Node compile(Node next) { return new CharNode(ch, next, ci); }
+    }
+
+    /** An empty fragment (e.g. a standalone inline-flag group {@code (?i)}). */
+    static final class EmptyAst extends Ast {
+        Node compile(Node next) { return next; }
     }
 
     static final class DotAst extends Ast {
-        Node compile(Node next) { return new DotNode(next); }
+        final boolean dotall;
+        DotAst(boolean dotall) { this.dotall = dotall; }
+        Node compile(Node next) { return new DotNode(next, dotall); }
     }
 
     static final class ClazzAst extends Ast {
         final CharPredicate pred;
-        ClazzAst(CharPredicate pred) { this.pred = pred; }
-        Node compile(Node next) { return new ClassNode(pred, next); }
+        final boolean ci;
+        ClazzAst(CharPredicate pred, boolean ci) { this.pred = pred; this.ci = ci; }
+        Node compile(Node next) { return new ClassNode(pred, next, ci); }
     }
 
     static final class BeginAst extends Ast {
-        Node compile(Node next) { return new BeginNode(next); }
+        final boolean multiline;
+        BeginAst(boolean multiline) { this.multiline = multiline; }
+        Node compile(Node next) { return new BeginNode(next, multiline); }
     }
 
     static final class EndAst extends Ast {
-        Node compile(Node next) { return new EndNode(next); }
+        final boolean multiline;
+        EndAst(boolean multiline) { this.multiline = multiline; }
+        Node compile(Node next) { return new EndNode(next, multiline); }
     }
 
     static final class ConcatAst extends Ast {
@@ -602,13 +696,19 @@ public final class Pattern {
         final int len;
         int pos;
         final Pattern pat;
+        int flags;
 
         Parser(String re, Pattern pat) {
             this.re = re;
             this.len = re.length();
             this.pos = 0;
             this.pat = pat;
+            this.flags = pat.flags;
         }
+
+        private boolean ci() { return (flags & CASE_INSENSITIVE) != 0; }
+        private boolean multiline() { return (flags & MULTILINE) != 0; }
+        private boolean dotall() { return (flags & DOTALL) != 0; }
 
         private char peek() {
             return re.charAt(pos);
@@ -737,15 +837,15 @@ public final class Pattern {
             }
             if (c == '.') {
                 pos++;
-                return new DotAst();
+                return new DotAst(dotall());
             }
             if (c == '^') {
                 pos++;
-                return new BeginAst();
+                return new BeginAst(multiline());
             }
             if (c == '$') {
                 pos++;
-                return new EndAst();
+                return new EndAst(multiline());
             }
             if (c == '\\') {
                 return parseEscapeAtom();
@@ -758,7 +858,7 @@ public final class Pattern {
                 error("unexpected metacharacter '" + c + "'");
             }
             pos++;
-            return new LitAst(c);
+            return new LitAst(c, ci());
         }
 
         private Ast parseGroup() {
@@ -766,7 +866,9 @@ public final class Pattern {
             int groupNum = -1;
             if (pos < len && peek() == '?') {
                 pos++;
-                if (pos < len && peek() == ':') {
+                if (pos < len && isInlineFlagStart(peek())) {
+                    return parseInlineFlagGroup();
+                } else if (pos < len && peek() == ':') {
                     pos++; // non-capturing
                 } else if (pos < len && peek() == '<') {
                     pos++; // consume '<'
@@ -793,6 +895,66 @@ public final class Pattern {
             }
             pos++; // consume ')'
             return new GroupAst(groupNum, body);
+        }
+
+        /** Whether {@code c} can begin an inline-flag construct {@code (?imsU-imsU...)}. */
+        private boolean isInlineFlagStart(char c) {
+            return c == 'i' || c == 'm' || c == 's' || c == '-';
+        }
+
+        /** Maps an inline-flag letter to its flag bit, or 0 if unsupported. */
+        private int flagBit(char c) {
+            if (c == 'i') { return CASE_INSENSITIVE; }
+            if (c == 'm') { return MULTILINE; }
+            if (c == 's') { return DOTALL; }
+            return 0;
+        }
+
+        /**
+         * Parses an inline-flag construct: either {@code (?flags)} which changes
+         * the flags for the remainder of the enclosing expression, or
+         * {@code (?flags:...)} which applies the changed flags only to a scoped
+         * non-capturing group.
+         */
+        private Ast parseInlineFlagGroup() {
+            int savedFlags = flags;
+            boolean clearing = false;
+            while (pos < len) {
+                char c = peek();
+                if (c == ')' || c == ':') {
+                    break;
+                }
+                if (c == '-') {
+                    clearing = true;
+                    pos++;
+                    continue;
+                }
+                int bit = flagBit(c);
+                if (bit == 0) {
+                    error("unsupported inline flag '" + c + "'");
+                }
+                if (clearing) {
+                    flags &= ~bit;
+                } else {
+                    flags |= bit;
+                }
+                pos++;
+            }
+            if (pos >= len) {
+                error("unclosed inline-flag group");
+            }
+            if (peek() == ':') {
+                pos++; // consume ':'
+                Ast body = parseAlt();
+                if (pos >= len || peek() != ')') {
+                    error("unclosed group");
+                }
+                pos++; // consume ')'
+                flags = savedFlags; // scoped: flags revert outside the group
+                return new GroupAst(-1, body);
+            }
+            pos++; // consume ')'; the flag change persists for the rest of the pattern
+            return new EmptyAst();
         }
 
         /**
@@ -837,9 +999,9 @@ public final class Pattern {
             pos++;
             CharPredicate p = predefined(c);
             if (p != null) {
-                return new ClazzAst(p);
+                return new ClazzAst(p, ci());
             }
-            return new LitAst(escapedLiteral(c));
+            return new LitAst(escapedLiteral(c), ci());
         }
 
         /** Returns the predefined class for d/D/w/W/s/S, or null otherwise. */
@@ -916,7 +1078,7 @@ public final class Pattern {
                 arr[k] = (CharPredicate) parts.get(k);
             }
             CharPredicate union = new Union(arr);
-            return new ClazzAst(neg ? new Negate(union) : union);
+            return new ClazzAst(neg ? new Negate(union) : union, ci());
         }
 
         /** Reads one element inside a character class: a char or a predicate. */

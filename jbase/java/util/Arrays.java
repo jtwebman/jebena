@@ -1,6 +1,7 @@
 package java.util;
 
 import java.util.stream.IntStream;
+import java.util.function.IntUnaryOperator;
 
 /**
  * Clean-room java.util.Arrays (a subset). Insertion sorts (stable, same result as
@@ -128,6 +129,88 @@ public final class Arrays {
     public static void fill(int[] a, int val) {
         for (int i = 0; i < a.length; i++) {
             a[i] = val;
+        }
+    }
+
+    public static void fill(int[] a, int fromIndex, int toIndex, int val) {
+        rangeCheck(a.length, fromIndex, toIndex);
+        for (int i = fromIndex; i < toIndex; i++) {
+            a[i] = val;
+        }
+    }
+
+    public static void fill(long[] a, long val) {
+        for (int i = 0; i < a.length; i++) {
+            a[i] = val;
+        }
+    }
+
+    public static void fill(long[] a, int fromIndex, int toIndex, long val) {
+        rangeCheck(a.length, fromIndex, toIndex);
+        for (int i = fromIndex; i < toIndex; i++) {
+            a[i] = val;
+        }
+    }
+
+    public static void fill(char[] a, char val) {
+        for (int i = 0; i < a.length; i++) {
+            a[i] = val;
+        }
+    }
+
+    public static void fill(char[] a, int fromIndex, int toIndex, char val) {
+        rangeCheck(a.length, fromIndex, toIndex);
+        for (int i = fromIndex; i < toIndex; i++) {
+            a[i] = val;
+        }
+    }
+
+    public static void setAll(int[] a, IntUnaryOperator generator) {
+        for (int i = 0; i < a.length; i++) {
+            a[i] = generator.applyAsInt(i);
+        }
+    }
+
+    public static boolean equals(int[] a, int aFromIndex, int aToIndex,
+                                 int[] b, int bFromIndex, int bToIndex) {
+        rangeCheck(a.length, aFromIndex, aToIndex);
+        rangeCheck(b.length, bFromIndex, bToIndex);
+        int aLength = aToIndex - aFromIndex;
+        int bLength = bToIndex - bFromIndex;
+        if (aLength != bLength) {
+            return false;
+        }
+        for (int i = 0; i < aLength; i++) {
+            if (a[aFromIndex + i] != b[bFromIndex + i]) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    public static int mismatch(int[] a, int[] b) {
+        int length = Math.min(a.length, b.length);
+        for (int i = 0; i < length; i++) {
+            if (a[i] != b[i]) {
+                return i;
+            }
+        }
+        if (a.length != b.length) {
+            return length;
+        }
+        return -1;
+    }
+
+    private static void rangeCheck(int arrayLength, int fromIndex, int toIndex) {
+        if (fromIndex > toIndex) {
+            throw new IllegalArgumentException(
+                "fromIndex(" + fromIndex + ") > toIndex(" + toIndex + ")");
+        }
+        if (fromIndex < 0) {
+            throw new ArrayIndexOutOfBoundsException(String.valueOf(fromIndex));
+        }
+        if (toIndex > arrayLength) {
+            throw new ArrayIndexOutOfBoundsException(String.valueOf(toIndex));
         }
     }
 

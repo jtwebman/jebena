@@ -28,6 +28,7 @@ rm -rf "$OUT"; mkdir -p "$OUT"
   "$ROOT"/test/diff/DiffScanner2.java "$ROOT"/test/diff/DiffDuration.java "$ROOT"/test/diff/DiffPeriod.java "$ROOT"/test/diff/DiffTreeNav.java "$ROOT"/test/diff/DiffNumFmt.java "$ROOT"/test/diff/DiffArrays2.java "$ROOT"/test/diff/DiffIntStream2.java "$ROOT"/test/diff/DiffOptional2.java "$ROOT"/test/diff/DiffRegex5.java "$ROOT"/test/diff/DiffUnsigned.java \
   "$ROOT"/test/diff/DiffInstant.java "$ROOT"/test/diff/DiffClock.java "$ROOT"/test/diff/DiffAtomRefArr.java "$ROOT"/test/diff/DiffColl4.java "$ROOT"/test/diff/DiffCollectorOf.java "$ROOT"/test/diff/DiffSplitRnd.java "$ROOT"/test/diff/DiffObjects.java "$ROOT"/test/diff/DiffAtomUpd.java "$ROOT"/test/diff/DiffMath4.java "$ROOT"/test/diff/DiffLDStream.java \
   "$ROOT"/test/diff/DiffCmp2.java "$ROOT"/test/diff/DiffCLQ.java "$ROOT"/test/diff/DiffCOW.java "$ROOT"/test/diff/DiffOffsetTime.java "$ROOT"/test/diff/DiffFmtSci.java "$ROOT"/test/diff/DiffRndStream.java "$ROOT"/test/diff/DiffStreamGen.java "$ROOT"/test/diff/DiffCollections3.java "$ROOT"/test/diff/DiffOptPrim.java "$ROOT"/test/diff/DiffIntStream3.java \
+  "$ROOT"/test/diff/DiffLru.java "$ROOT"/test/diff/DiffArrays3.java "$ROOT"/test/diff/DiffFmtGrp.java "$ROOT"/test/diff/DiffRegex6.java "$ROOT"/test/diff/DiffB64Mime.java "$ROOT"/test/diff/DiffStr3.java "$ROOT"/test/diff/DiffMath5.java "$ROOT"/test/diff/DiffIntRadix.java "$ROOT"/test/diff/DiffColl5.java "$ROOT"/test/diff/DiffADq2.java \
   "$ROOT"/test/diff/Driver.java || { echo "javac failed"; exit 1; }
 "$ZIG" build --build-file "$ROOT/build.zig" >/dev/null 2>&1
 JEBENA="$ROOT/zig-out/bin/jebena"
@@ -135,6 +136,16 @@ COLLECTIONS3="rotateChecksum rotateNegative replaceAllChecksum replaceAllNoMatch
 OPTPRIM="streamPresentSum streamEmptySum ifPresentSideEffect ifPresentOrElsePresent ifPresentOrElseEmpty orElseGetDoublePresent orElseGetDoubleEmpty orElseGetInt longStreamSum orElseThrowCatch"
 INTSTREAM3="anyMatchTrue anyMatchFalse allMatch allMatchFalse noneMatch findFirst findFirstEmpty peekSum forEachAcc"
 
+LRU="accessOrderMovesToEnd insertionOrderUnchangedByGet accessOrderReputMovesToEnd insertionOrderReputKeepsPosition lruEvictsEldest lruEvictedKeyAbsent lruAccessProtectsEntry lruSizeCapped valuesFollowAccessOrder defaultNoEviction lruSequence"
+ARRAYS3="rangeFill rangeFillFull rangeFillEmptyRange rangeFillBadRange rangeFillOob setAllSquares equalsRangeMatch equalsRangeDiffLength equalsRangeContentDiff copyOfRangePad intHashCode charFill longFill mismatchDiff mismatchPrefix mismatchEqual"
+FMTGRP="commaInt commaIntCommaCount plusPositive plusNegative parenNegative parenPositive parenCommaIntNeg spaceForPlus spaceNegative commaFloat parenCommaFloatNeg commaLong"
+REGEX6="ciMatches ciNoFlagNoMatch ciMixed multilineCaretCount noMultilineCaretCount multilineDollarCount dotallMatches noDotallNoMatch inlineI inlineM inlineS combinedCiMultiline"
+B64MIME="mimeEncodedLength mimeCrCount mimeLfCount mimeFirstLineLength mimeLineLengthsOk mimeEncodedChecksum mimeRoundTripSum mimeRoundTripLength mimeDecodeIgnoresWhitespace mimeDecodeBasicString mimeShortNoBreak mimeExact76"
+STR3="stripLeadingLen stripTrailingLen stripBothLen charsSum charsSumLong charsCount linesCount linesCountTrailing linesChecksum formattedLen formattedHash isBlankFlags"
+MATH5="addExactInt addExactIntOverflow addExactLong addExactLongOverflow subtractExactInt subtractExactIntOverflow subtractExactLongOverflow multiplyExactInt multiplyExactIntOverflow multiplyExactLong multiplyExactLongOverflow toIntExactNormal toIntExactOverflow negateExactNormal negateExactOverflow negateExactLongOverflow incrementExactOverflow decrementExactOverflow incDecNormal"
+INTRADIX="parseHex parseBinNeg parseVariousRadix toStringRadix radixStringLengths radixStringHashes bitCounts highLowBits leadingTrailingZeros reverseOps longRadix parseErrors"
+COLL5="unmodListThrows unmodSetThrows unmodMapThrows frequencyCount disjointTrue disjointFalse nCopiesSum swapValues rotateChecksum rotateNegative fillList"
+ADQ2="descendingChecksum descendingCount removeFirstOccurrence removeLastOccurrence removeOccurrenceMiss peekAndGet peekEmptyVsGetEmpty addFirstGrowthOrder addFirstGrowthEndpoints offerInterleave offerInterleaveDescending removeLastOccurrenceAtHead"
 CASES=""
 for m in $COLL; do CASES="$CASES DiffColl:$m"; done
 for m in $REGEX; do CASES="$CASES DiffRegex:$m"; done
@@ -229,6 +240,16 @@ for m in $STREAMGEN; do CASES="$CASES DiffStreamGen:$m"; done
 for m in $COLLECTIONS3; do CASES="$CASES DiffCollections3:$m"; done
 for m in $OPTPRIM; do CASES="$CASES DiffOptPrim:$m"; done
 for m in $INTSTREAM3; do CASES="$CASES DiffIntStream3:$m"; done
+for m in $LRU; do CASES="$CASES DiffLru:$m"; done
+for m in $ARRAYS3; do CASES="$CASES DiffArrays3:$m"; done
+for m in $FMTGRP; do CASES="$CASES DiffFmtGrp:$m"; done
+for m in $REGEX6; do CASES="$CASES DiffRegex6:$m"; done
+for m in $B64MIME; do CASES="$CASES DiffB64Mime:$m"; done
+for m in $STR3; do CASES="$CASES DiffStr3:$m"; done
+for m in $MATH5; do CASES="$CASES DiffMath5:$m"; done
+for m in $INTRADIX; do CASES="$CASES DiffIntRadix:$m"; done
+for m in $COLL5; do CASES="$CASES DiffColl5:$m"; done
+for m in $ADQ2; do CASES="$CASES DiffADq2:$m"; done
 
 pass=0; fail=0
 printf "%-24s %12s %12s   %s\n" CASE JAVA JEBENA RESULT

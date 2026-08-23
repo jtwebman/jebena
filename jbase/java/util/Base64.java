@@ -2,7 +2,7 @@ package java.util;
 
 /**
  * Original clean-room implementation of the RFC 4648 Base64 codec, providing
- * the Basic and URL/filename-safe variants exposed through the standard
+ * the Basic, URL/filename-safe, and MIME variants exposed through the standard
  * java.util.Base64 factory methods.
  */
 public class Base64 {
@@ -18,6 +18,10 @@ public class Base64 {
     private static final char[] URLSAFE = toChars(
             "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_");
 
+    // RFC 2045 MIME line separator.
+    private static final byte[] CRLF = {'\r', '\n'};
+    private static final int MIME_LINE_MAX = 76;
+
     private static char[] toChars(String s) {
         char[] c = new char[s.length()];
         for (int i = 0; i < s.length(); i++) {
@@ -26,13 +30,15 @@ public class Base64 {
         return c;
     }
 
-    private static final Encoder BASIC_ENCODER = new Encoder(BASIC, true);
-    private static final Encoder BASIC_ENCODER_NP = new Encoder(BASIC, false);
-    private static final Encoder URL_ENCODER = new Encoder(URLSAFE, true);
-    private static final Encoder URL_ENCODER_NP = new Encoder(URLSAFE, false);
+    private static final Encoder BASIC_ENCODER = new Encoder(BASIC, true, 0, null);
+    private static final Encoder BASIC_ENCODER_NP = new Encoder(BASIC, false, 0, null);
+    private static final Encoder URL_ENCODER = new Encoder(URLSAFE, true, 0, null);
+    private static final Encoder URL_ENCODER_NP = new Encoder(URLSAFE, false, 0, null);
+    private static final Encoder MIME_ENCODER = new Encoder(BASIC, true, MIME_LINE_MAX, CRLF);
 
-    private static final Decoder BASIC_DECODER = new Decoder(BASIC);
-    private static final Decoder URL_DECODER = new Decoder(URLSAFE);
+    private static final Decoder BASIC_DECODER = new Decoder(BASIC, false);
+    private static final Decoder URL_DECODER = new Decoder(URLSAFE, false);
+    private static final Decoder MIME_DECODER = new Decoder(BASIC, true);
 
     public static Encoder getEncoder() {
         return BASIC_ENCODER;
@@ -50,19 +56,34 @@ public class Base64 {
         return URL_DECODER;
     }
 
+    public static Encoder getMimeEncoder() {
+        return MIME_ENCODER;
+    }
+
+    public static Decoder getMimeDecoder() {
+        return MIME_DECODER;
+    }
+
     public static class Encoder {
 
         private final char[] alphabet;
         private final boolean padding;
+        private final int lineMax;      // 0 = no line wrapping
+        private final byte[] lineSep;
 
-        private Encoder(char[] alphabet, boolean padding) {
+        private Encoder(char[] alphabet, boolean padding, int lineMax, byte[] lineSep) {
             this.alphabet = alphabet;
             this.padding = padding;
+            this.lineMax = lineMax;
+            this.lineSep = lineSep;
         }
 
         public Encoder withoutPadding() {
             if (!padding) {
                 return this;
+            }
+            if (lineMax > 0) {
+                return new Encoder(alphabet, false, lineMax, lineSep);
             }
             if (alphabet == BASIC) {
                 return BASIC_ENCODER_NP;
@@ -77,40 +98,62 @@ public class Base64 {
             int len = src.length;
             int groups = len / 3;
             int rem = len - groups * 3;
-            int outLen = groups * 4;
+            int baseLen = groups * 4;
             if (rem != 0) {
-                outLen += padding ? 4 : (rem + 1);
+                baseLen += padding ? 4 : (rem + 1);
             }
-            byte[] out = new byte[outLen];
+
+            // Encode into a contiguous buffer first (no line breaks).
+            byte[] raw = new byte[baseLen];
             int si = 0;
-            int di = 0;
+            int ri = 0;
             for (int g = 0; g < groups; g++) {
                 int b0 = src[si++] & 0xff;
                 int b1 = src[si++] & 0xff;
                 int b2 = src[si++] & 0xff;
                 int bits = (b0 << 16) | (b1 << 8) | b2;
-                out[di++] = (byte) alphabet[(bits >>> 18) & 0x3f];
-                out[di++] = (byte) alphabet[(bits >>> 12) & 0x3f];
-                out[di++] = (byte) alphabet[(bits >>> 6) & 0x3f];
-                out[di++] = (byte) alphabet[bits & 0x3f];
+                raw[ri++] = (byte) alphabet[(bits >>> 18) & 0x3f];
+                raw[ri++] = (byte) alphabet[(bits >>> 12) & 0x3f];
+                raw[ri++] = (byte) alphabet[(bits >>> 6) & 0x3f];
+                raw[ri++] = (byte) alphabet[bits & 0x3f];
             }
             if (rem == 1) {
                 int b0 = src[si++] & 0xff;
-                out[di++] = (byte) alphabet[(b0 >>> 2) & 0x3f];
-                out[di++] = (byte) alphabet[(b0 << 4) & 0x3f];
+                raw[ri++] = (byte) alphabet[(b0 >>> 2) & 0x3f];
+                raw[ri++] = (byte) alphabet[(b0 << 4) & 0x3f];
                 if (padding) {
-                    out[di++] = (byte) '=';
-                    out[di++] = (byte) '=';
+                    raw[ri++] = (byte) '=';
+                    raw[ri++] = (byte) '=';
                 }
             } else if (rem == 2) {
                 int b0 = src[si++] & 0xff;
                 int b1 = src[si++] & 0xff;
-                out[di++] = (byte) alphabet[(b0 >>> 2) & 0x3f];
-                out[di++] = (byte) alphabet[((b0 << 4) | (b1 >>> 4)) & 0x3f];
-                out[di++] = (byte) alphabet[(b1 << 2) & 0x3f];
+                raw[ri++] = (byte) alphabet[(b0 >>> 2) & 0x3f];
+                raw[ri++] = (byte) alphabet[((b0 << 4) | (b1 >>> 4)) & 0x3f];
+                raw[ri++] = (byte) alphabet[(b1 << 2) & 0x3f];
                 if (padding) {
-                    out[di++] = (byte) '=';
+                    raw[ri++] = (byte) '=';
                 }
+            }
+
+            if (lineMax <= 0 || baseLen == 0) {
+                return raw;
+            }
+
+            // Insert the line separator after every lineMax encoded characters.
+            int seps = (baseLen - 1) / lineMax;
+            byte[] out = new byte[baseLen + seps * lineSep.length];
+            int di = 0;
+            int col = 0;
+            for (int i = 0; i < baseLen; i++) {
+                if (col == lineMax) {
+                    for (int k = 0; k < lineSep.length; k++) {
+                        out[di++] = lineSep[k];
+                    }
+                    col = 0;
+                }
+                out[di++] = raw[i];
+                col++;
             }
             return out;
         }
@@ -128,8 +171,9 @@ public class Base64 {
     public static class Decoder {
 
         private final int[] lookup;
+        private final boolean lenient;   // MIME: skip characters outside the alphabet
 
-        private Decoder(char[] alphabet) {
+        private Decoder(char[] alphabet, boolean lenient) {
             int[] table = new int[128];
             for (int i = 0; i < table.length; i++) {
                 table[i] = -1;
@@ -138,6 +182,7 @@ public class Base64 {
                 table[alphabet[i]] = i;
             }
             this.lookup = table;
+            this.lenient = lenient;
         }
 
         public byte[] decode(String src) {
@@ -167,13 +212,16 @@ public class Base64 {
                     pad++;
                     continue;
                 }
-                if (pad != 0) {
-                    throw new IllegalArgumentException(
-                            "Input byte array has incorrect ending byte at " + i);
-                }
                 if (c >= 128 || lookup[c] < 0) {
+                    if (lenient) {
+                        continue;
+                    }
                     throw new IllegalArgumentException(
                             "Illegal base64 character " + Integer.toHexString(c));
+                }
+                if (pad != 0 && !lenient) {
+                    throw new IllegalArgumentException(
+                            "Input byte array has incorrect ending byte at " + i);
                 }
                 symbols++;
             }
@@ -201,6 +249,13 @@ public class Base64 {
                 if (c == '=') {
                     break;
                 }
+                if (c >= 128 || lookup[c] < 0) {
+                    if (lenient) {
+                        continue;
+                    }
+                    throw new IllegalArgumentException(
+                            "Illegal base64 character " + Integer.toHexString(c));
+                }
                 bits = (bits << 6) | lookup[c];
                 count++;
                 if (count == 4) {
@@ -212,10 +267,8 @@ public class Base64 {
                 }
             }
             if (count == 2) {
-                // 12 bits -> top 8 bits are one byte
                 out[di++] = (byte) (bits >>> 4);
             } else if (count == 3) {
-                // 18 bits -> top 16 bits are two bytes
                 out[di++] = (byte) (bits >>> 10);
                 out[di++] = (byte) (bits >>> 2);
             }

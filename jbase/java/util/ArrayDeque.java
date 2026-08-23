@@ -239,6 +239,63 @@ public class ArrayDeque implements Deque {
         return false;
     }
 
+    public boolean removeFirstOccurrence(Object o) {
+        if (o == null) {
+            return false;
+        }
+        int idx = head;
+        while (idx != tail) {
+            if (o.equals(elements[idx])) {
+                deleteAt(idx);
+                return true;
+            }
+            idx = (idx + 1) % elements.length;
+        }
+        return false;
+    }
+
+    public boolean removeLastOccurrence(Object o) {
+        if (o == null) {
+            return false;
+        }
+        int len = elements.length;
+        int idx = (tail - 1 + len) % len;
+        while (idx != (head - 1 + len) % len) {
+            if (o.equals(elements[idx])) {
+                deleteAt(idx);
+                return true;
+            }
+            idx = (idx - 1 + len) % len;
+        }
+        return false;
+    }
+
+    public Iterator descendingIterator() {
+        return new DescItr();
+    }
+
+    private class DescItr implements Iterator {
+        private int cursor = (tail - 1 + elements.length) % elements.length;
+        private boolean done = (head == tail);
+
+        public boolean hasNext() {
+            return !done;
+        }
+
+        public Object next() {
+            if (done) {
+                throw new NoSuchElementException();
+            }
+            Object result = elements[cursor];
+            if (cursor == head) {
+                done = true;
+            } else {
+                cursor = (cursor - 1 + elements.length) % elements.length;
+            }
+            return result;
+        }
+    }
+
     public void clear() {
         int idx = head;
         while (idx != tail) {

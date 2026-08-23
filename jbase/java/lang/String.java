@@ -516,6 +516,42 @@ public final class String implements CharSequence, Comparable<String> {
         return java.util.Formatter.formatStatic(fmt, args);
     }
 
+    /** Uses this string as the format, mirroring java.lang.String.format(this, args). */
+    public String formatted(Object... args) {
+        return java.util.Formatter.formatStatic(this, args);
+    }
+
+    /** An IntStream of the char values (zero-extended to int) of this string. */
+    public java.util.stream.IntStream chars() {
+        int[] out = new int[value.length];
+        for (int i = 0; i < value.length; i++) {
+            out[i] = value[i];
+        }
+        return java.util.stream.IntStream.of(out);
+    }
+
+    /** Stream of lines separated by \n, \r, or \r\n; terminators not included. */
+    public java.util.stream.Stream lines() {
+        java.util.ArrayList list = new java.util.ArrayList(); // jbase collections are raw
+        int i = 0;
+        int len = value.length;
+        while (i < len) {
+            int start = i;
+            while (i < len && value[i] != '\n' && value[i] != '\r') {
+                i++;
+            }
+            list.add(substring(start, i));
+            if (i < len) {
+                if (value[i] == '\r' && i + 1 < len && value[i + 1] == '\n') {
+                    i += 2;
+                } else {
+                    i++;
+                }
+            }
+        }
+        return java.util.stream.Stream.ofList(list);
+    }
+
     // Numeric valueOf reuse the VM's decimal/shortest-float formatting.
     public static native String valueOf(int i);
 

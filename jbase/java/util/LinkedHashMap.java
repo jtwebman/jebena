@@ -28,8 +28,15 @@ public class LinkedHashMap implements Map {
     private Node[] table;
     private int size;
     private int threshold;
+    private float loadFactor;
 
-    // Head (oldest) and tail (newest) of the insertion-order list.
+    // When true, get() moves the accessed entry to the end of the order list
+    // (least-recently used first), enabling LRU behavior. When false, the list
+    // stays in insertion order.
+    private boolean accessOrder;
+
+    // Head (oldest / least-recently-used) and tail (newest / most-recently-used)
+    // of the order list.
     private Node head;
     private Node tail;
 
@@ -38,10 +45,45 @@ public class LinkedHashMap implements Map {
 
     public LinkedHashMap() {
         table = new Node[DEFAULT_CAPACITY];
+        loadFactor = LOAD_FACTOR;
         threshold = (int) (DEFAULT_CAPACITY * LOAD_FACTOR);
         size = 0;
         head = null;
         tail = null;
+        accessOrder = false;
+    }
+
+    public LinkedHashMap(int initialCapacity) {
+        this(initialCapacity, LOAD_FACTOR, false);
+    }
+
+    public LinkedHashMap(int initialCapacity, float loadFactor) {
+        this(initialCapacity, loadFactor, false);
+    }
+
+    public LinkedHashMap(int initialCapacity, float loadFactor, boolean accessOrder) {
+        if (initialCapacity < 0) {
+            throw new IllegalArgumentException("Illegal initial capacity: " + initialCapacity);
+        }
+        if (loadFactor <= 0 || loadFactor != loadFactor) {
+            throw new IllegalArgumentException("Illegal load factor: " + loadFactor);
+        }
+        int cap = tableSizeFor(initialCapacity < 1 ? 1 : initialCapacity);
+        this.table = new Node[cap];
+        this.loadFactor = loadFactor;
+        this.threshold = (int) (cap * loadFactor);
+        this.size = 0;
+        this.head = null;
+        this.tail = null;
+        this.accessOrder = accessOrder;
+    }
+
+    private static int tableSizeFor(int c) {
+        int n = 1;
+        while (n < c) {
+            n <<= 1;
+        }
+        return n;
     }
 
     static int hash(Object key) {
@@ -72,7 +114,21 @@ public class LinkedHashMap implements Map {
 
     public Object get(Object key) {
         Node e = find(key, hash(key));
-        return (e == null) ? null : e.value;
+        if (e == null) {
+            return null;
+        }
+        if (accessOrder) {
+            moveToTail(e);
+        }
+        return e.value;
+    }
+
+    private void moveToTail(Node node) {
+        if (tail == node) {
+            return;
+        }
+        unlink(node);
+        linkTail(node);
     }
 
     public boolean containsKey(Object key) {
@@ -85,6 +141,9 @@ public class LinkedHashMap implements Map {
         if (e != null) {
             Object old = e.value;
             e.value = value;
+            if (accessOrder) {
+                moveToTail(e);
+            }
             return old;
         }
         int i = h & (table.length - 1);
@@ -95,7 +154,25 @@ public class LinkedHashMap implements Map {
         if (size > threshold) {
             resize();
         }
+        afterNodeInsertion();
         return null;
+    }
+
+    /**
+     * Called after inserting a new entry. If the map wants to evict its eldest
+     * (least-recently-used, in access order; oldest inserted otherwise) entry,
+     * removeEldestEntry returns true and that entry is removed. Subclasses
+     * override removeEldestEntry to build a size-bounded LRU cache.
+     */
+    private void afterNodeInsertion() {
+        Node first = head;
+        if (first != null && removeEldestEntry(new SimpleEntry(first.key, first.value))) {
+            remove(first.key);
+        }
+    }
+
+    protected boolean removeEldestEntry(Map.Entry eldest) {
+        return false;
     }
 
     private void linkTail(Node node) {
@@ -143,7 +220,7 @@ public class LinkedHashMap implements Map {
             }
         }
         table = newTable;
-        threshold = (int) (newCap * LOAD_FACTOR);
+        threshold = (int) (newCap * loadFactor);
     }
 
     public Object remove(Object key) {

@@ -93,12 +93,76 @@ public final class Math {
         return r;
     }
 
+    public static long subtractExact(long x, long y) {
+        long r = x - y;
+        if (((x ^ y) & (x ^ r)) < 0L) {
+            throw new ArithmeticException("long overflow");
+        }
+        return r;
+    }
+
     public static int multiplyExact(int x, int y) {
         long r = (long) x * (long) y;
         if ((int) r != r) {
             throw new ArithmeticException("integer overflow");
         }
         return (int) r;
+    }
+
+    public static long multiplyExact(long x, long y) {
+        long r = x * y;
+        long ax = abs(x);
+        long ay = abs(y);
+        if (((ax | ay) >>> 31 != 0)) {
+            // Some bits greater than 2^31 that might cause overflow; check.
+            if (((y != 0) && (r / y != x)) ||
+                (x == Long.MIN_VALUE && y == -1)) {
+                throw new ArithmeticException("long overflow");
+            }
+        }
+        return r;
+    }
+
+    public static int negateExact(int a) {
+        if (a == Integer.MIN_VALUE) {
+            throw new ArithmeticException("integer overflow");
+        }
+        return -a;
+    }
+
+    public static long negateExact(long a) {
+        if (a == Long.MIN_VALUE) {
+            throw new ArithmeticException("long overflow");
+        }
+        return -a;
+    }
+
+    public static int incrementExact(int a) {
+        if (a == Integer.MAX_VALUE) {
+            throw new ArithmeticException("integer overflow");
+        }
+        return a + 1;
+    }
+
+    public static long incrementExact(long a) {
+        if (a == Long.MAX_VALUE) {
+            throw new ArithmeticException("long overflow");
+        }
+        return a + 1L;
+    }
+
+    public static int decrementExact(int a) {
+        if (a == Integer.MIN_VALUE) {
+            throw new ArithmeticException("integer overflow");
+        }
+        return a - 1;
+    }
+
+    public static long decrementExact(long a) {
+        if (a == Long.MIN_VALUE) {
+            throw new ArithmeticException("long overflow");
+        }
+        return a - 1L;
     }
 
     public static long floorDiv(long x, long y) {
