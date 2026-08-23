@@ -6,6 +6,8 @@ import java.util.OptionalInt;
 import java.util.function.IntBinaryOperator;
 import java.util.function.IntFunction;
 import java.util.function.IntPredicate;
+import java.util.function.IntToDoubleFunction;
+import java.util.function.IntToLongFunction;
 import java.util.function.IntUnaryOperator;
 
 /**
@@ -205,6 +207,58 @@ public class IntStream {
             list.add(mapper.apply(data[i]));
         }
         return new Stream(list);
+    }
+
+    public LongStream mapToLong(IntToLongFunction mapper) {
+        long[] out = new long[data.length];
+        for (int i = 0; i < data.length; i++) {
+            out[i] = mapper.applyAsLong(data[i]);
+        }
+        return LongStream.of(out);
+    }
+
+    public DoubleStream mapToDouble(IntToDoubleFunction mapper) {
+        double[] out = new double[data.length];
+        for (int i = 0; i < data.length; i++) {
+            out[i] = mapper.applyAsDouble(data[i]);
+        }
+        return DoubleStream.of(out);
+    }
+
+    public LongStream asLongStream() {
+        long[] out = new long[data.length];
+        for (int i = 0; i < data.length; i++) {
+            out[i] = data[i];
+        }
+        return LongStream.of(out);
+    }
+
+    public DoubleStream asDoubleStream() {
+        double[] out = new double[data.length];
+        for (int i = 0; i < data.length; i++) {
+            out[i] = data[i];
+        }
+        return DoubleStream.of(out);
+    }
+
+    public IntStream flatMap(IntFunction mapper) {
+        ArrayList parts = new ArrayList();
+        int total = 0;
+        for (int i = 0; i < data.length; i++) {
+            IntStream sub = (IntStream) mapper.apply(data[i]);
+            int[] arr = sub.toArray();
+            parts.add(arr);
+            total += arr.length;
+        }
+        int[] out = new int[total];
+        int n = 0;
+        for (int p = 0; p < parts.size(); p++) {
+            int[] arr = (int[]) parts.get(p);
+            for (int i = 0; i < arr.length; i++) {
+                out[n++] = arr[i];
+            }
+        }
+        return new IntStream(out);
     }
 
     /** Boxes each int into an Integer and returns an object Stream. */

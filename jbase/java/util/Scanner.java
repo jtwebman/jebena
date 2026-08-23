@@ -14,6 +14,8 @@ public class Scanner {
     private final int len;
     private int pos;
     private boolean closed;
+    // Custom token delimiter; null means the default whitespace delimiter.
+    private java.util.regex.Pattern delimiter;
 
     public Scanner(String source) {
         if (source == null) {
@@ -23,6 +25,58 @@ public class Scanner {
         this.len = source.length();
         this.pos = 0;
         this.closed = false;
+        this.delimiter = null;
+    }
+
+    /**
+     * Sets this scanner's delimiter to a pattern compiled from the given regular
+     * expression and returns this scanner. A simple literal such as "," or ";" is
+     * supported, as is any expression the regex engine accepts.
+     */
+    public Scanner useDelimiter(String pattern) {
+        this.delimiter = java.util.regex.Pattern.compile(pattern);
+        return this;
+    }
+
+    /**
+     * Restores this scanner to the default whitespace delimiter and returns this
+     * scanner. The current position in the input is not changed.
+     */
+    public Scanner reset() {
+        this.delimiter = null;
+        return this;
+    }
+
+    /**
+     * Computes the boundaries of the next token starting from {@code pos}. Returns
+     * {tokenStart, tokenEnd, newPos} or null when no token remains.
+     */
+    private int[] tokenBounds() {
+        if (delimiter == null) {
+            int s = skipWhitespace(pos);
+            if (s >= len) {
+                return null;
+            }
+            int e = tokenEnd(s);
+            return new int[] { s, e, e };
+        }
+        java.util.regex.Matcher m = delimiter.matcher(src);
+        int s;
+        if (m.find(pos) && m.start() == pos && m.end() > pos) {
+            s = m.end();
+        } else {
+            s = pos;
+        }
+        if (s >= len) {
+            return null;
+        }
+        int e;
+        if (m.find(s)) {
+            e = m.start();
+        } else {
+            e = len;
+        }
+        return new int[] { s, e, e };
     }
 
     private int skipWhitespace(int p) {
@@ -46,12 +100,11 @@ public class Scanner {
      * none remains.
      */
     private String peekToken() {
-        int start = skipWhitespace(pos);
-        if (start >= len) {
+        int[] b = tokenBounds();
+        if (b == null) {
             return null;
         }
-        int end = tokenEnd(start);
-        return src.substring(start, end);
+        return src.substring(b[0], b[1]);
     }
 
     public boolean hasNext() {
@@ -59,13 +112,51 @@ public class Scanner {
     }
 
     public String next() {
-        int start = skipWhitespace(pos);
-        if (start >= len) {
+        int[] b = tokenBounds();
+        if (b == null) {
             throw new NoSuchElementException();
         }
-        int end = tokenEnd(start);
-        pos = end;
-        return src.substring(start, end);
+        pos = b[2];
+        return src.substring(b[0], b[1]);
+    }
+
+    public boolean hasNext(String pattern) {
+        String t = peekToken();
+        return t != null && java.util.regex.Pattern.matches(pattern, t);
+    }
+
+    public String next(String pattern) {
+        String t = peekToken();
+        if (t == null) {
+            throw new NoSuchElementException();
+        }
+        if (!java.util.regex.Pattern.matches(pattern, t)) {
+            throw new NoSuchElementException();
+        }
+        next();
+        return t;
+    }
+
+    public boolean hasNextBoolean() {
+        String t = peekToken();
+        return t != null
+                && (t.equalsIgnoreCase("true") || t.equalsIgnoreCase("false"));
+    }
+
+    public boolean nextBoolean() {
+        String t = peekToken();
+        if (t == null) {
+            throw new NoSuchElementException();
+        }
+        if (t.equalsIgnoreCase("true")) {
+            next();
+            return true;
+        }
+        if (t.equalsIgnoreCase("false")) {
+            next();
+            return false;
+        }
+        throw new NoSuchElementException();
     }
 
     private static boolean isIntToken(String t) {

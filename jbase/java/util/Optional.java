@@ -4,6 +4,7 @@ import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.function.Predicate;
 import java.util.function.Supplier;
+import java.util.stream.Stream;
 
 public final class Optional<T> {
 
@@ -100,6 +101,25 @@ public final class Optional<T> {
             return this;
         }
         return predicate.test(value) ? this : Optional.<T>empty();
+    }
+
+    public <U> Optional<U> flatMap(Function<? super T, ? extends Optional<? extends U>> mapper) {
+        Objects.requireNonNull(mapper);
+        if (value == null) {
+            return Optional.empty();
+        }
+        @SuppressWarnings("unchecked")
+        Optional<U> r = (Optional<U>) mapper.apply(value);
+        Objects.requireNonNull(r);
+        return r;
+    }
+
+    public Stream stream() {
+        ArrayList list = new ArrayList();
+        if (value != null) {
+            list.add(value);
+        }
+        return Stream.ofList(list);
     }
 
     @Override

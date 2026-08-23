@@ -145,4 +145,95 @@ public final class Long extends Number implements Comparable<Long> {
         i = i + (i >>> 32);
         return (int) i & 0x7f;
     }
+
+    public static long parseLong(String s, int radix) {
+        if (s == null) {
+            throw new NumberFormatException("null");
+        }
+        if (radix < 2 || radix > 36) {
+            throw new NumberFormatException("radix " + radix + " out of range");
+        }
+        int len = s.length();
+        if (len == 0) {
+            throw new NumberFormatException(s);
+        }
+        boolean neg = false;
+        int i = 0;
+        long limit = -MAX_VALUE;
+        char first = s.charAt(0);
+        if (first == '-') {
+            neg = true;
+            limit = MIN_VALUE;
+            i = 1;
+        } else if (first == '+') {
+            i = 1;
+        }
+        if (i == len) {
+            throw new NumberFormatException(s);
+        }
+        long multmin = limit / radix;
+        long result = 0;
+        while (i < len) {
+            int digit = Character.digit(s.charAt(i), radix);
+            i++;
+            if (digit < 0 || result < multmin) {
+                throw new NumberFormatException(s);
+            }
+            result *= radix;
+            if (result < limit + digit) {
+                throw new NumberFormatException(s);
+            }
+            result -= digit;
+        }
+        return neg ? result : -result;
+    }
+
+    public static int compare(long x, long y) {
+        return (x < y) ? -1 : ((x == y) ? 0 : 1);
+    }
+
+    public static int compareUnsigned(long x, long y) {
+        return compare(x + MIN_VALUE, y + MIN_VALUE);
+    }
+
+    public static long divideUnsigned(long dividend, long divisor) {
+        if (divisor < 0L) {
+            return compareUnsigned(dividend, divisor) < 0 ? 0L : 1L;
+        }
+        if (dividend >= 0L) {
+            return dividend / divisor;
+        }
+        long quotient = ((dividend >>> 1) / divisor) << 1;
+        long rem = dividend - quotient * divisor;
+        return quotient + (compareUnsigned(rem, divisor) >= 0 ? 1L : 0L);
+    }
+
+    public static long remainderUnsigned(long dividend, long divisor) {
+        if (divisor < 0L) {
+            return compareUnsigned(dividend, divisor) < 0 ? dividend : dividend - divisor;
+        }
+        if (dividend >= 0L) {
+            return dividend % divisor;
+        }
+        long quotient = ((dividend >>> 1) / divisor) << 1;
+        long rem = dividend - quotient * divisor;
+        return rem - (compareUnsigned(rem, divisor) >= 0 ? divisor : 0L);
+    }
+
+    public static String toUnsignedString(long i) {
+        if (i >= 0L) {
+            return String.valueOf(i);
+        }
+        long quot = divideUnsigned(i, 10L);
+        long rem = i - quot * 10L;
+        return String.valueOf(quot) + rem;
+    }
+
+    public static long rotateLeft(long i, int distance) {
+        return (i << distance) | (i >>> -distance);
+    }
+
+    public static long rotateRight(long i, int distance) {
+        return (i >>> distance) | (i << -distance);
+    }
 }

@@ -25,6 +25,7 @@ rm -rf "$OUT"; mkdir -p "$OUT"
   "$ROOT"/test/diff/DiffStrBytes.java \
   "$ROOT"/test/diff/DiffHex.java "$ROOT"/test/diff/DiffTimeUnit.java "$ROOT"/test/diff/DiffColl2.java "$ROOT"/test/diff/DiffRegex3.java "$ROOT"/test/diff/DiffZoneOffset.java "$ROOT"/test/diff/DiffBitSet2.java "$ROOT"/test/diff/DiffSB2.java "$ROOT"/test/diff/DiffStream3.java "$ROOT"/test/diff/DiffChar2.java "$ROOT"/test/diff/DiffBigInt2.java \
   "$ROOT"/test/diff/DiffOdt.java "$ROOT"/test/diff/DiffYear.java "$ROOT"/test/diff/DiffMonthDay.java "$ROOT"/test/diff/DiffAtomIntArr.java "$ROOT"/test/diff/DiffAtomLongArr.java "$ROOT"/test/diff/DiffColl3.java "$ROOT"/test/diff/DiffStream4.java "$ROOT"/test/diff/DiffMath3.java "$ROOT"/test/diff/DiffCollections2.java "$ROOT"/test/diff/DiffRegex4.java \
+  "$ROOT"/test/diff/DiffScanner2.java "$ROOT"/test/diff/DiffDuration.java "$ROOT"/test/diff/DiffPeriod.java "$ROOT"/test/diff/DiffTreeNav.java "$ROOT"/test/diff/DiffNumFmt.java "$ROOT"/test/diff/DiffArrays2.java "$ROOT"/test/diff/DiffIntStream2.java "$ROOT"/test/diff/DiffOptional2.java "$ROOT"/test/diff/DiffRegex5.java "$ROOT"/test/diff/DiffUnsigned.java \
   "$ROOT"/test/diff/Driver.java || { echo "javac failed"; exit 1; }
 "$ZIG" build --build-file "$ROOT/build.zig" >/dev/null 2>&1
 JEBENA="$ROOT/zig-out/bin/jebena"
@@ -101,6 +102,16 @@ STREAM4="collectSize collectChecksum collectEmpty collectStringBuilder collectMa
 MATH3="rintHalfEven rintNonTie getExponent scalbInt scalbFrac nextAfterLowBits nextAfterDown nextAfterZero floorDivMod"
 COLLECTIONS2="umListSizeGet umListMutateThrows umSetMutateThrows umMapMutateThrows binarySearchComparator maxReverse minReverse disjointTrueFalse emptySetMapSize addAllSize fillCheck singletonSize"
 REGEX4="splitDefaultJoin splitDefaultCount splitLimit2Join splitLimit2Count splitNegCount splitNegJoin splitRegexJoin appendReplaceResult appendReplaceLen appendReplaceGroupRef"
+SCANNER2="boolTwice boolMixed delimComma delimSemicolonInts hasNextDigits nextLetters resetToWhitespace hasNextNoBool"
+DURATION="parseMinutes parseHours parseNegHours ofNanosSeconds ofNanosNano multiplied divided isNeg absPos toNanosCase toStringChecksum"
+PERIOD="parseYMD parseNegYear parseNegYearMonth parseWeeks parseWeekUnit multipliedByTotal negatedYears totalMonths roundTripToString isZeroFlag isNegativeFlag minusPlus"
+NUMFMT="integerGrouped numberOneFrac numberThreeFrac numberLong maxFrac2 groupingOff minFracPad negativeGrouped zeroValue integerHalfEven"
+TREENAV="ceilingEntry25 floorEntry25 higherEntry20 lowerEntry20 higherKey20 lowerKey20 pollFirstEntryKey pollFirstThenFirstKey pollLastEntryKey descendingFirst lastEntryValue firstEntryKey descendingMapFirstKey descendingMapCeiling"
+ARRAYS2="deepToStringFlat deepEqualsFlatEqual deepEqualsFlatUnequal deepHashFlat hashLong hashObject streamSum"
+INTSTREAM2="mapToObjCount asLongSum mapToDoubleSum flatMapSum asDoubleAvg mapToLongSum flatMapCount mapToDoubleDistinctCount"
+OPTIONAL2="filterKeep filterDrop flatMapPresent flatMapEmpty orEmpty orPresent streamPresent streamEmpty"
+REGEX5="digitLengths wrapMatches usePosition useEnd swapGroups groupCountReplace noMatch"
+UNSIGNED="parseIntRadix parseUnsigned toUnsignedLongLow divideUnsignedInt remainderUnsignedInt compareUnsignedInt rotateLeftInt rotateRightInt toUnsignedStringInt parseLongRadix divideUnsignedLong remainderUnsignedLong compareUnsignedLong rotateLeftLong toUnsignedStringLong"
 
 CASES=""
 for m in $COLL; do CASES="$CASES DiffColl:$m"; done
@@ -166,6 +177,16 @@ for m in $STREAM4; do CASES="$CASES DiffStream4:$m"; done
 for m in $MATH3; do CASES="$CASES DiffMath3:$m"; done
 for m in $COLLECTIONS2; do CASES="$CASES DiffCollections2:$m"; done
 for m in $REGEX4; do CASES="$CASES DiffRegex4:$m"; done
+for m in $SCANNER2; do CASES="$CASES DiffScanner2:$m"; done
+for m in $DURATION; do CASES="$CASES DiffDuration:$m"; done
+for m in $PERIOD; do CASES="$CASES DiffPeriod:$m"; done
+for m in $NUMFMT; do CASES="$CASES DiffNumFmt:$m"; done
+for m in $TREENAV; do CASES="$CASES DiffTreeNav:$m"; done
+for m in $ARRAYS2; do CASES="$CASES DiffArrays2:$m"; done
+for m in $INTSTREAM2; do CASES="$CASES DiffIntStream2:$m"; done
+for m in $OPTIONAL2; do CASES="$CASES DiffOptional2:$m"; done
+for m in $REGEX5; do CASES="$CASES DiffRegex5:$m"; done
+for m in $UNSIGNED; do CASES="$CASES DiffUnsigned:$m"; done
 
 pass=0; fail=0
 printf "%-24s %12s %12s   %s\n" CASE JAVA JEBENA RESULT

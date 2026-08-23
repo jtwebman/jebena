@@ -214,4 +214,98 @@ public final class Integer extends Number implements Comparable<Integer> {
         i = (i << 24) | ((i & 0xff00) << 8) | ((i >>> 8) & 0xff00) | (i >>> 24);
         return i;
     }
+
+    public static int parseInt(String s, int radix) {
+        if (s == null) {
+            throw new NumberFormatException("null");
+        }
+        if (radix < 2 || radix > 36) {
+            throw new NumberFormatException("radix " + radix + " out of range");
+        }
+        int len = s.length();
+        if (len == 0) {
+            throw new NumberFormatException(s);
+        }
+        boolean neg = false;
+        int i = 0;
+        int limit = -MAX_VALUE;
+        char first = s.charAt(0);
+        if (first == '-') {
+            neg = true;
+            limit = MIN_VALUE;
+            i = 1;
+        } else if (first == '+') {
+            i = 1;
+        }
+        if (i == len) {
+            throw new NumberFormatException(s);
+        }
+        int multmin = limit / radix;
+        int result = 0;
+        while (i < len) {
+            int digit = Character.digit(s.charAt(i), radix);
+            i++;
+            if (digit < 0 || result < multmin) {
+                throw new NumberFormatException(s);
+            }
+            result *= radix;
+            if (result < limit + digit) {
+                throw new NumberFormatException(s);
+            }
+            result -= digit;
+        }
+        return neg ? result : -result;
+    }
+
+    public static int parseUnsignedInt(String s) {
+        if (s == null) {
+            throw new NumberFormatException("null");
+        }
+        int len = s.length();
+        if (len == 0) {
+            throw new NumberFormatException(s);
+        }
+        if (s.charAt(0) == '-') {
+            throw new NumberFormatException(
+                "Illegal leading minus sign on unsigned string " + s);
+        }
+        long l = Long.parseLong(s, 10);
+        if ((l & 0xffffffff00000000L) != 0) {
+            throw new NumberFormatException(
+                "String value " + s + " exceeds range of unsigned int");
+        }
+        return (int) l;
+    }
+
+    public static long toUnsignedLong(int i) {
+        return ((long) i) & 0xffffffffL;
+    }
+
+    public static String toUnsignedString(int i) {
+        return Long.toString(toUnsignedLong(i));
+    }
+
+    public static int divideUnsigned(int dividend, int divisor) {
+        return (int) (toUnsignedLong(dividend) / toUnsignedLong(divisor));
+    }
+
+    public static int remainderUnsigned(int dividend, int divisor) {
+        return (int) (toUnsignedLong(dividend) % toUnsignedLong(divisor));
+    }
+
+    public static int compare(int x, int y) {
+        return (x < y) ? -1 : ((x == y) ? 0 : 1);
+    }
+
+    public static int compareUnsigned(int x, int y) {
+        return compare(x + MIN_VALUE, y + MIN_VALUE);
+    }
+
+    public static int rotateLeft(int i, int distance) {
+        return (i << distance) | (i >>> -distance);
+    }
+
+    public static int rotateRight(int i, int distance) {
+        return (i >>> distance) | (i << -distance);
+    }
 }

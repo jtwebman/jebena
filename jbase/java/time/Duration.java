@@ -1,5 +1,7 @@
 package java.time;
 
+import java.math.BigInteger;
+
 /**
  * Clean-room time-based amount of time: seconds plus a nanosecond adjustment
  * (0..999,999,999).
@@ -12,6 +14,7 @@ public final class Duration implements Comparable<Duration> {
     private static final long SECONDS_PER_MINUTE = 60L;
     private static final long SECONDS_PER_HOUR = 3600L;
     private static final long SECONDS_PER_DAY = 86400L;
+    private static final BigInteger BI_NANOS_PER_SECOND = BigInteger.valueOf(NANOS_PER_SECOND);
 
     private final long seconds;
     private final int nanos;
@@ -60,6 +63,126 @@ public final class Duration implements Comparable<Duration> {
         long secs = floorDiv(millis, 1000);
         int mos = (int) floorMod(millis, 1000);
         return create(secs, mos * 1_000_000);
+    }
+
+    public static Duration ofNanos(long nanos) {
+        long secs = floorDiv(nanos, NANOS_PER_SECOND);
+        int nos = (int) floorMod(nanos, NANOS_PER_SECOND);
+        return create(secs, nos);
+    }
+
+    public static Duration ofSeconds(long seconds, long nanoAdjustment) {
+        long secs = seconds + floorDiv(nanoAdjustment, NANOS_PER_SECOND);
+        int nos = (int) floorMod(nanoAdjustment, NANOS_PER_SECOND);
+        return create(secs, nos);
+    }
+
+    /**
+     * Parse an ISO-8601 duration text of the form {@code PnDTnHnMnS}, with an
+     * optional overall sign, optional per-field signs, and an optional
+     * fractional part on the seconds field. Clean-room, hand-written parser.
+     */
+    public static Duration parse(CharSequence text) {
+        String s = text.toString();
+        int len = s.length();
+        int idx = 0;
+        boolean negate = false;
+        if (idx < len) {
+            char c = s.charAt(idx);
+            if (c == '+') {
+                idx++;
+            } else if (c == '-') {
+                negate = true;
+                idx++;
+            }
+        }
+        if (idx >= len || (s.charAt(idx) != 'P' && s.charAt(idx) != 'p')) {
+            throw new IllegalArgumentException("Text cannot be parsed to a Duration: " + s);
+        }
+        idx++;
+        long secondsAcc = 0;
+        int nanoAcc = 0;
+        boolean inTime = false;
+        boolean parsedAny = false;
+        while (idx < len) {
+            char c = s.charAt(idx);
+            if (c == 'T' || c == 't') {
+                if (inTime) {
+                    throw new IllegalArgumentException("Text cannot be parsed to a Duration: " + s);
+                }
+                inTime = true;
+                idx++;
+                continue;
+            }
+            boolean numNeg = false;
+            if (c == '-') {
+                numNeg = true;
+                idx++;
+            } else if (c == '+') {
+                idx++;
+            }
+            int dstart = idx;
+            while (idx < len && s.charAt(idx) >= '0' && s.charAt(idx) <= '9') {
+                idx++;
+            }
+            if (idx == dstart) {
+                throw new IllegalArgumentException("Text cannot be parsed to a Duration: " + s);
+            }
+            long value = Long.parseLong(s.substring(dstart, idx));
+            int fracNanos = 0;
+            boolean hasFraction = false;
+            if (idx < len && (s.charAt(idx) == '.' || s.charAt(idx) == ',')) {
+                idx++;
+                int fstart = idx;
+                while (idx < len && s.charAt(idx) >= '0' && s.charAt(idx) <= '9') {
+                    idx++;
+                }
+                String frac = s.substring(fstart, idx);
+                for (int i = 0; i < 9; i++) {
+                    fracNanos *= 10;
+                    if (i < frac.length()) {
+                        fracNanos += frac.charAt(i) - '0';
+                    }
+                }
+                hasFraction = true;
+            }
+            if (idx >= len) {
+                throw new IllegalArgumentException("Text cannot be parsed to a Duration: " + s);
+            }
+            char unit = s.charAt(idx);
+            idx++;
+            if (numNeg) {
+                value = -value;
+                fracNanos = -fracNanos;
+            }
+            if ((unit == 'D' || unit == 'd') && !inTime) {
+                if (hasFraction) {
+                    throw new IllegalArgumentException("Text cannot be parsed to a Duration: " + s);
+                }
+                secondsAcc += value * SECONDS_PER_DAY;
+            } else if ((unit == 'H' || unit == 'h') && inTime) {
+                if (hasFraction) {
+                    throw new IllegalArgumentException("Text cannot be parsed to a Duration: " + s);
+                }
+                secondsAcc += value * SECONDS_PER_HOUR;
+            } else if ((unit == 'M' || unit == 'm') && inTime) {
+                if (hasFraction) {
+                    throw new IllegalArgumentException("Text cannot be parsed to a Duration: " + s);
+                }
+                secondsAcc += value * SECONDS_PER_MINUTE;
+            } else if ((unit == 'S' || unit == 's') && inTime) {
+                secondsAcc += value;
+                nanoAcc += fracNanos;
+            } else {
+                throw new IllegalArgumentException("Text cannot be parsed to a Duration: " + s);
+            }
+            parsedAny = true;
+        }
+        if (!parsedAny) {
+            throw new IllegalArgumentException("Text cannot be parsed to a Duration: " + s);
+        }
+        Duration d = ofSeconds(secondsAcc, nanoAcc);
+        return negate ? d.negated() : d;
     }
 
     public long getSeconds() {
@@ -127,6 +250,73 @@ public final class Duration implements Comparable<Duration> {
         epochSec += floorDiv(totalNanos, NANOS_PER_SECOND);
         int newNanos = (int) floorMod(totalNanos, NANOS_PER_SECOND);
         return create(epochSec, newNanos);
+    }
+
+    public Duration plusNanos(long nanosToAdd) {
+        return plus(0, nanosToAdd);
+    }
+
+    public Duration minusNanos(long nanosToSubtract) {
+        return nanosToSubtract == Long.MIN_VALUE
+                ? plusNanos(Long.MAX_VALUE).plusNanos(1)
+                : plusNanos(-nanosToSubtract);
+    }
+
+    public long toNanos() {
+        return seconds * NANOS_PER_SECOND + nanos;
+    }
+
+    public long toSeconds() {
+        return seconds;
+    }
+
+    public boolean isZero() {
+        return (seconds | nanos) == 0;
+    }
+
+    public boolean isNegative() {
+        return seconds < 0;
+    }
+
+    public Duration negated() {
+        return ofSeconds(-seconds, -(long) nanos);
+    }
+
+    public Duration abs() {
+        return isNegative() ? negated() : this;
+    }
+
+    private BigInteger toTotalNanos() {
+        return BigInteger.valueOf(seconds).multiply(BI_NANOS_PER_SECOND).add(BigInteger.valueOf(nanos));
+    }
+
+    private static Duration ofBigNanos(BigInteger totalNanos) {
+        BigInteger secs = totalNanos.divide(BI_NANOS_PER_SECOND);
+        BigInteger nos = totalNanos.remainder(BI_NANOS_PER_SECOND);
+        if (secs.bitLength() > 63) {
+            throw new ArithmeticException("Exceeds capacity of Duration: " + totalNanos);
+        }
+        return ofSeconds(secs.longValue(), nos.longValue());
+    }
+
+    public Duration multipliedBy(long multiplicand) {
+        if (multiplicand == 0) {
+            return ZERO;
+        }
+        if (multiplicand == 1) {
+            return this;
+        }
+        return ofBigNanos(toTotalNanos().multiply(BigInteger.valueOf(multiplicand)));
+    }
+
+    public Duration dividedBy(long divisor) {
+        if (divisor == 0) {
+            throw new ArithmeticException("Cannot divide by zero");
+        }
+        if (divisor == 1) {
+            return this;
+        }
+        return ofBigNanos(toTotalNanos().divide(BigInteger.valueOf(divisor)));
     }
 
     public int compareTo(Duration other) {

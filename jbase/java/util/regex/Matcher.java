@@ -12,7 +12,7 @@ package java.util.regex;
  * an unmatched optional group reports {@code null} from {@link #group(int)} and
  * {@code -1} from {@link #start(int)}/{@link #end(int)}.
  */
-public final class Matcher {
+public final class Matcher implements MatchResult {
 
     private final Pattern parent;
     final String text;
@@ -226,6 +226,32 @@ public final class Matcher {
         if (result) {
             StringBuilder sb = new StringBuilder();
             do {
+                appendReplacement(sb, replacement);
+                result = find();
+            } while (result);
+            appendTail(sb);
+            return sb.toString();
+        }
+        return text;
+    }
+
+    /**
+     * Replaces every subsequence of the input that matches the pattern with the
+     * result of applying {@code replacer} to the {@link MatchResult} of that
+     * match. This matcher itself is passed to the replacer as the match result;
+     * the returned replacement string is expanded with the same {@code $g} group
+     * references and backslash escapes as {@link #replaceAll(String)}.
+     */
+    public String replaceAll(java.util.function.Function replacer) {
+        if (replacer == null) {
+            throw new NullPointerException("replacer");
+        }
+        reset();
+        boolean result = find();
+        if (result) {
+            StringBuilder sb = new StringBuilder();
+            do {
+                String replacement = (String) replacer.apply(this);
                 appendReplacement(sb, replacement);
                 result = find();
             } while (result);
