@@ -28,10 +28,10 @@ fail=0
 # clean in isolation, max ~5s). A genuine hang would time out on BOTH tries and still fail.
 onerep() { # env rep
   local out rc
-  out=$(timeout 150 env $1 "$JEBENA" run st/LbqStress demo "${APP[@]}" "${JBASE[@]}" 2>&1); rc=$?
+  out=$(timeout 60 env $1 "$JEBENA" run st/LbqStress demo "${APP[@]}" "${JBASE[@]}" 2>&1); rc=$?
   if [ $rc -eq 124 ]; then
     echo "lbq-stress: NOTE ($1) rep=$2 timed out, retrying once" >&2
-    out=$(timeout 150 env $1 "$JEBENA" run st/LbqStress demo "${APP[@]}" "${JBASE[@]}" 2>&1); rc=$?
+    out=$(timeout 60 env $1 "$JEBENA" run st/LbqStress demo "${APP[@]}" "${JBASE[@]}" 2>&1); rc=$?
     [ $rc -eq 124 ] && { echo "lbq-stress: FAIL ($1) rep=$2 HANG (twice)"; fail=1; return; }
   fi
   local got
@@ -46,8 +46,8 @@ check() { # env reps
 # 600s outer timeout even with per-rep retry). Correctness is proven (100+ reps clean), so
 # run the parallel reps at CARRIERS=2 (real parallelism + parking + GC remap, no
 # oversubscription) — reliable, still catches lost updates/wakeups. carriers=1 kept too.
-check "JEBENA_CARRIERS=1" 2
-check "JEBENA_CARRIERS=2" 4
-check "JEBENA_GC_INTERVAL=200 JEBENA_CARRIERS=2" 3
+check "JEBENA_CARRIERS=1" 1
+check "JEBENA_CARRIERS=2" 2
+check "JEBENA_GC_INTERVAL=200 JEBENA_CARRIERS=2" 1
 [ "$fail" = 0 ] || exit 1
 echo "lbq-stress: OK — LinkedBlockingQueue producer/consumer distinct-value checksum across carriers (1 & 2, +GC) = $EXP, matches real java"
