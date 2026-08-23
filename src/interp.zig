@@ -4880,6 +4880,12 @@ fn nativeInvoke(f: *Frame, owner: *const Class, method: *const Class.Method, slo
         if (eq2(mn, md, "abs", "(D)D")) return f.pushDouble(@abs(slots[method.params[0].slot].double));
         if (eq2(mn, md, "cbrt", "(D)D")) return f.pushDouble(std.math.cbrt(slots[method.params[0].slot].double));
         if (eq2(mn, md, "pow", "(DD)D")) return f.pushDouble(std.math.pow(f64, slots[method.params[0].slot].double, slots[method.params[1].slot].double));
+        if (eq2(mn, md, "exp", "(D)D")) return f.pushDouble(@exp(slots[method.params[0].slot].double));
+        if (eq2(mn, md, "log", "(D)D")) return f.pushDouble(@log(slots[method.params[0].slot].double));
+        if (eq2(mn, md, "log10", "(D)D")) return f.pushDouble(@log10(slots[method.params[0].slot].double));
+        if (eq2(mn, md, "hypot", "(DD)D")) return f.pushDouble(std.math.hypot(slots[method.params[0].slot].double, slots[method.params[1].slot].double));
+        if (eq2(mn, md, "round", "(D)J")) return f.pushLong(@intFromFloat(@floor(slots[method.params[0].slot].double + 0.5)));
+        if (eq2(mn, md, "round", "(F)I")) return f.pushInt(@intFromFloat(@floor(slots[method.params[0].slot].float + 0.5)));
     }
     return error.UnsupportedOpcode;
 }
