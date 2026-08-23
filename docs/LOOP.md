@@ -52,6 +52,7 @@ Each iteration is one small, verified, committed step. Never leave the tree red.
    - `bash scripts/bbq-stress.sh` — bounded-buffer producer/consumer over a shared ArrayDeque with user synchronized(lock)+wait/notifyAll (cap 8, backpressure both ways) = 1625500 at carriers 1 & 4 (+GC), matches real java
    - `bash scripts/dijkstra-smoke.sh` — Dijkstra shortest paths over a weighted TreeMap-adjacency digraph (int[] edges, distance array, min-scan); stdout byte-identical to real java
    - `bash scripts/treiber-stress.sh` — Treiber lock-free stack over AtomicReference.compareAndSet (8 fibers push 250 distinct each, 8 pop+sum) = 7253000 at carriers 1 & 4 (+GC), matches real java
+   - `bash scripts/rle-smoke.sh` — run-length encode/decode round-trip (multi-digit runs, empty string) via StringBuilder + Character.isDigit; stdout byte-identical to real java
    - `bash scripts/portability-check.sh` — VM cross-compiles for macOS/Linux (aarch64/x86_64)
    - `zig fmt --check src/ build.zig` — formatted
    If anything fails: fix it, or revert the change. Do not commit red.
