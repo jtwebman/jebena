@@ -17,6 +17,7 @@ rm -rf "$OUT"; mkdir -p "$OUT"
 [ -d "$ROOT/jbase/out" ] || bash "$ROOT/scripts/build-jbase.sh" >/dev/null 2>&1
 "$JAVAC" -d "$OUT" "$ROOT"/test/diff/DiffColl.java "$ROOT"/test/diff/DiffRegex.java \
   "$ROOT"/test/diff/DiffStream.java "$ROOT"/test/diff/DiffString.java "$ROOT"/test/diff/DiffTrace.java "$ROOT"/test/diff/DiffBits.java "$ROOT"/test/diff/DiffFmt.java "$ROOT"/test/diff/DiffBig.java "$ROOT"/test/diff/DiffNav.java "$ROOT"/test/diff/DiffList.java "$ROOT"/test/diff/DiffMath.java "$ROOT"/test/diff/DiffChar.java "$ROOT"/test/diff/DiffMap.java \
+  "$ROOT"/test/diff/DiffRandom.java "$ROOT"/test/diff/DiffPQ.java "$ROOT"/test/diff/DiffTok.java "$ROOT"/test/diff/DiffVec.java "$ROOT"/test/diff/DiffStk.java "$ROOT"/test/diff/DiffUuid.java "$ROOT"/test/diff/DiffOptInt.java "$ROOT"/test/diff/DiffADq.java \
   "$ROOT"/test/diff/Driver.java || { echo "javac failed"; exit 1; }
 "$ZIG" build --build-file "$ROOT/build.zig" >/dev/null 2>&1
 JEBENA="$ROOT/zig-out/bin/jebena"
@@ -43,6 +44,14 @@ LIST="dequeOps llAsList iterRemove collReverseMaxMin collHelpers arraysOps array
 MATH="limits hypot round exactOk addOverflow mulOverflow floorLong setAddAll setRetainRemove setContainsAll"
 CHAR="classify caseTests caseConvert whitespace digitRadix numeric"
 MAP="mergeCount getOrDefault putIfAbsent computeIfAbsent compute forEachSum"
+RANDOM_C="newSeedInts newSeedBounded seedLong seedBools seedDouble seedFloat setSeedReset boundPowerOfTwo"
+PQ="pollSorted peekMin sizeTrack containsHitMiss removeObj removeHead emptyPoll iterSum"
+TOK="countWs countComma loopCount mixedDelim singleTok emptyInput changeDelim elementsApi"
+VEC="addGet setElem insertAt removeAt removeObj indexOfHitMiss firstLast clearEmpty"
+STK="pushPop peekTop emptyFlag searchDist sizeTrack popAll searchDup singleton"
+UUID_C="versionV1 versionV4 variantBits compareSign equalsRoundTrip msbLow lsbLow toStringRoundTrip hashMix"
+OPTINT="optIntGet optIntOrElse optIntPresent optLongGet optLongOrElse optDoubleOrElse optDoubleGet optEmptyFlags"
+ADQ="fifo lifo bothEnds pollEnds emptyPoll sizeTrack contains offerPeek"
 
 CASES=""
 for m in $COLL; do CASES="$CASES DiffColl:$m"; done
@@ -58,6 +67,14 @@ for m in $LIST; do CASES="$CASES DiffList:$m"; done
 for m in $MATH; do CASES="$CASES DiffMath:$m"; done
 for m in $CHAR; do CASES="$CASES DiffChar:$m"; done
 for m in $MAP; do CASES="$CASES DiffMap:$m"; done
+for m in $RANDOM_C; do CASES="$CASES DiffRandom:$m"; done
+for m in $PQ; do CASES="$CASES DiffPQ:$m"; done
+for m in $TOK; do CASES="$CASES DiffTok:$m"; done
+for m in $VEC; do CASES="$CASES DiffVec:$m"; done
+for m in $STK; do CASES="$CASES DiffStk:$m"; done
+for m in $UUID_C; do CASES="$CASES DiffUuid:$m"; done
+for m in $OPTINT; do CASES="$CASES DiffOptInt:$m"; done
+for m in $ADQ; do CASES="$CASES DiffADq:$m"; done
 
 pass=0; fail=0
 printf "%-24s %12s %12s   %s\n" CASE JAVA JEBENA RESULT
